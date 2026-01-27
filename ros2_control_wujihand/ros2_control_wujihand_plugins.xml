@@ -1,0 +1,9 @@
+<library path="ros2_control_wujihand">
+    <class name="ros2_control_wujihand/WujiHandHardware"
+            type="ros2_control_wujihand::WujiHandHardware"
+            base_class_type="hardware_interface::SystemInterface">
+            <description>
+                Hardware interface for the Wuji hand using wujihandcpp.
+            </description>
+    </class>
+</library>

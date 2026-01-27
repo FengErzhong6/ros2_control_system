@@ -3,8 +3,6 @@
   <xacro:arg name="prefix" default="" />
   <xacro:arg name="mesh_pkg" default="asset_description" />
   <xacro:arg name="side" default="right" />
-  <xacro:property name="mesh_pkg" value="$(arg mesh_pkg)" />
-  <xacro:property name="side" value="$(arg side)" />
   <xacro:property name="mesh_root" value="package://${mesh_pkg}/wuji/meshes/${side}" />
   <mujoco>
     <compiler meshdir="../meshes/${side}" balanceinertia="true" discardvisual="false" eulerseq="xyz" autolimits="true" />
@@ -50,7 +48,7 @@
     </collision>
   </link>
   <link
-    name="finger0_link0">
+    name="finger1_link1">
     <inertial>
       <origin
         xyz="-0.0024628 -0.0014428 0.0077802"
@@ -90,7 +88,7 @@
     </collision>
   </link>
   <joint
-    name="finger0_joint0"
+    name="finger1_joint1"
     type="revolute">
     <origin
       xyz="0.0085244 0.020575 0.028712"
@@ -98,7 +96,7 @@
     <parent
       link="palm_link" />
     <child
-      link="finger0_link0" />
+      link="finger1_link1" />
     <axis
       xyz="-0 1 -0" />
     <limit
@@ -108,7 +106,7 @@
       velocity="8.58701992" />
   </joint>
   <link
-    name="finger0_link1">
+    name="finger1_link2">
     <inertial>
       <origin
         xyz="0.0011196 -1.2405E-05 0.015663"
@@ -148,15 +146,15 @@
     </collision>
   </link>
   <joint
-    name="finger0_joint1"
+    name="finger1_joint2"
     type="revolute">
     <origin
       xyz="-0.0047549 -0.0060191 0.014132"
       rpy="-0.57428 -0.23677 1.8034" />
     <parent
-      link="finger0_link0" />
+      link="finger1_link1" />
     <child
-      link="finger0_link1" />
+      link="finger1_link2" />
     <axis
       xyz="-0 -1 -0" />
     <limit
@@ -166,7 +164,7 @@
       velocity="11.10029404" />
   </joint>
   <link
-    name="finger0_link2">
+    name="finger1_link3">
     <inertial>
       <origin
         xyz="-0.0011235 -1.579E-05 0.013056"
@@ -206,15 +204,15 @@
     </collision>
   </link>
   <joint
-    name="finger0_joint2"
+    name="finger1_joint3"
     type="revolute">
     <origin
       xyz="0.00018873 -0.0009916 0.034664"
       rpy="0.049049 0.017311 -1.9085" />
     <parent
-      link="finger0_link1" />
+      link="finger1_link2" />
     <child
-      link="finger0_link2" />
+      link="finger1_link3" />
     <axis
       xyz="0 1 0" />
     <limit
@@ -224,7 +222,7 @@
       velocity="12.86307659" />
   </joint>
   <link
-    name="finger0_link3">
+    name="finger1_link4">
     <inertial>
       <origin
         xyz="-0.0011922 0.00023589 0.0082118"
@@ -264,15 +262,15 @@
     </collision>
   </link>
   <joint
-    name="finger0_joint3"
+    name="finger1_joint4"
     type="revolute">
     <origin
       xyz="0 -0.00025 0.0295"
       rpy="0 0 0" />
     <parent
-      link="finger0_link2" />
+      link="finger1_link3" />
     <child
-      link="finger0_link3" />
+      link="finger1_link4" />
     <axis
       xyz="0 1 0" />
     <limit
@@ -282,7 +280,7 @@
       velocity="13.57866158" />
   </joint>
   <link
-    name="finger0_tip_link">
+    name="finger1_tip_link">
     <inertial>
       <origin
         xyz="-0.00018237 -3.9481E-06 -0.0041777"
@@ -322,20 +320,20 @@
     </collision>
   </link>
   <joint
-    name="finger0_tip_fixed"
+    name="finger1_tip_fixed"
     type="fixed">
     <origin
       xyz="-0.0011048 0.00023218 0.0283"
       rpy="0 0 0" />
     <parent
-      link="finger0_link3" />
+      link="finger1_link4" />
     <child
-      link="finger0_tip_link" />
+      link="finger1_tip_link" />
     <axis
       xyz="0 0 0" />
   </joint>
   <link
-    name="finger1_link0">
+    name="finger2_link1">
     <inertial>
       <origin
         xyz="-0.0013291 -3.2911E-08 0.00031987"
@@ -375,7 +373,7 @@
     </collision>
   </link>
   <joint
-    name="finger1_joint0"
+    name="finger2_joint1"
     type="revolute">
     <origin
       xyz="-0.0058701 0.029434 0.091917"
@@ -383,7 +381,7 @@
     <parent
       link="palm_link" />
     <child
-      link="finger1_link0" />
+      link="finger2_link1" />
     <axis
       xyz="0 1 0" />
     <limit
@@ -393,7 +391,7 @@
       velocity="8.203047484" />
   </joint>
   <link
-    name="finger1_link1">
+    name="finger2_link2">
     <inertial>
       <origin
         xyz="-0.0061577 -4.1189E-07 0.020911"
@@ -433,15 +431,15 @@
     </collision>
   </link>
   <joint
-    name="finger1_joint1"
+    name="finger2_joint2"
     type="revolute">
     <origin
       xyz="0.0022 0 0.004"
       rpy="0 0 0" />
     <parent
-      link="finger1_link0" />
+      link="finger2_link1" />
     <child
-      link="finger1_link1" />
+      link="finger2_link2" />
     <axis
       xyz="-1 0 0" />
     <limit
@@ -451,7 +449,7 @@
       velocity="8.115781022" />
   </joint>
   <link
-    name="finger1_link2">
+    name="finger2_link3">
     <inertial>
       <origin
         xyz="-0.0011668 4.1873E-06 0.026893"
@@ -491,15 +489,15 @@
     </collision>
   </link>
   <joint
-    name="finger1_joint2"
+    name="finger2_joint3"
     type="revolute">
     <origin
       xyz="-0.0047503 0 0.043618"
       rpy="0 0 -0.00026861" />
     <parent
-      link="finger1_link1" />
+      link="finger2_link2" />
     <child
-      link="finger1_link2" />
+      link="finger2_link3" />
     <axis
       xyz="-0 1 -0" />
     <limit
@@ -509,7 +507,7 @@
       velocity="12.86307659" />
   </joint>
   <link
-    name="finger1_link3">
+    name="finger2_link4">
     <inertial>
       <origin
         xyz="-0.00089438 1.7042E-05 0.0053518"
@@ -549,15 +547,15 @@
     </collision>
   </link>
   <joint
-    name="finger1_joint3"
+    name="finger2_joint4"
     type="revolute">
     <origin
       xyz="0 0 0.0295"
       rpy="0 0 0" />
     <parent
-      link="finger1_link2" />
+      link="finger2_link3" />
     <child
-      link="finger1_link3" />
+      link="finger2_link4" />
     <axis
       xyz="-0 1 -0" />
     <limit
@@ -567,7 +565,7 @@
       velocity="13.57866158" />
   </joint>
   <link
-    name="finger1_tip_link">
+    name="finger2_tip_link">
     <inertial>
       <origin
         xyz="-0.00020111 3.8638E-06 -0.009311"
@@ -607,20 +605,20 @@
     </collision>
   </link>
   <joint
-    name="finger1_tip_fixed"
+    name="finger2_tip_fixed"
     type="fixed">
     <origin
       xyz="-0.00105 0 0.0274"
       rpy="0 0 0" />
     <parent
-      link="finger1_link3" />
+      link="finger2_link4" />
     <child
-      link="finger1_tip_link" />
+      link="finger2_tip_link" />
     <axis
       xyz="0 0 0" />
   </joint>
   <link
-    name="finger2_link0">
+    name="finger3_link1">
     <inertial>
       <origin
         xyz="-0.0013291 3.4987E-09 0.00031994"
@@ -660,7 +658,7 @@
     </collision>
   </link>
   <joint
-    name="finger2_joint0"
+    name="finger3_joint1"
     type="revolute">
     <origin
       xyz="-0.01046 0.0074615 0.089544"
@@ -668,7 +666,7 @@
     <parent
       link="palm_link" />
     <child
-      link="finger2_link0" />
+      link="finger3_link1" />
     <axis
       xyz="0 1 0" />
     <limit
@@ -678,7 +676,7 @@
       velocity="8.203047484" />
   </joint>
   <link
-    name="finger2_link1">
+    name="finger3_link2">
     <inertial>
       <origin
         xyz="-0.0061576 -4.1651E-07 0.020911"
@@ -718,15 +716,15 @@
     </collision>
   </link>
   <joint
-    name="finger2_joint1"
+    name="finger3_joint2"
     type="revolute">
     <origin
       xyz="0.0022 0 0.004"
       rpy="0 0 0" />
     <parent
-      link="finger2_link0" />
+      link="finger3_link1" />
     <child
-      link="finger2_link1" />
+      link="finger3_link2" />
     <axis
       xyz="-1 0 0" />
     <limit
@@ -736,7 +734,7 @@
       velocity="8.115781022" />
   </joint>
   <link
-    name="finger2_link2">
+    name="finger3_link3">
     <inertial>
       <origin
         xyz="-0.0011214 4.331E-06 0.015763"
@@ -776,15 +774,15 @@
     </collision>
   </link>
   <joint
-    name="finger2_joint2"
+    name="finger3_joint3"
     type="revolute">
     <origin
       xyz="-0.00475 0 0.043618"
       rpy="0 0 -0.00026861" />
     <parent
-      link="finger2_link1" />
+      link="finger3_link2" />
     <child
-      link="finger2_link2" />
+      link="finger3_link3" />
     <axis
       xyz="-0 1 -0" />
     <limit
@@ -794,7 +792,7 @@
       velocity="12.86307659" />
   </joint>
   <link
-    name="finger2_link3">
+    name="finger3_link4">
     <inertial>
       <origin
         xyz="-0.00089436 1.7049E-05 0.0053518"
@@ -834,15 +832,15 @@
     </collision>
   </link>
   <joint
-    name="finger2_joint3"
+    name="finger3_joint4"
     type="revolute">
     <origin
       xyz="0 0 0.0295"
       rpy="0 0 0" />
     <parent
-      link="finger2_link2" />
+      link="finger3_link3" />
     <child
-      link="finger2_link3" />
+      link="finger3_link4" />
     <axis
       xyz="-0 1 -0" />
     <limit
@@ -852,7 +850,7 @@
       velocity="13.57866158" />
   </joint>
   <link
-    name="finger2_tip_link">
+    name="finger3_tip_link">
     <inertial>
       <origin
         xyz="-0.00020328 1.4971E-06 -0.008611"
@@ -892,20 +890,20 @@
     </collision>
   </link>
   <joint
-    name="finger2_tip_fixed"
+    name="finger3_tip_fixed"
     type="fixed">
     <origin
       xyz="-0.0010491 0 0.0267"
       rpy="0 0 0" />
     <parent
-      link="finger2_link3" />
+      link="finger3_link4" />
     <child
-      link="finger2_tip_link" />
+      link="finger3_tip_link" />
     <axis
       xyz="0 0 0" />
   </joint>
   <link
-    name="finger3_link0">
+    name="finger4_link1">
     <inertial>
       <origin
         xyz="-0.0013291 1.0048E-08 0.00031995"
@@ -945,7 +943,7 @@
     </collision>
   </link>
   <joint
-    name="finger3_joint0"
+    name="finger4_joint1"
     type="revolute">
     <origin
       xyz="-0.0076649 -0.013712 0.084429"
@@ -953,7 +951,7 @@
     <parent
       link="palm_link" />
     <child
-      link="finger3_link0" />
+      link="finger4_link1" />
     <axis
       xyz="-0 1 -0" />
     <limit
@@ -963,7 +961,7 @@
       velocity="8.203047484" />
   </joint>
   <link
-    name="finger3_link1">
+    name="finger4_link2">
     <inertial>
       <origin
         xyz="-0.0061576 -4.1601E-07 0.020911"
@@ -1003,15 +1001,15 @@
     </collision>
   </link>
   <joint
-    name="finger3_joint1"
+    name="finger4_joint2"
     type="revolute">
     <origin
       xyz="0.0022 0 0.004"
       rpy="0 0 0" />
     <parent
-      link="finger3_link0" />
+      link="finger4_link1" />
     <child
-      link="finger3_link1" />
+      link="finger4_link2" />
     <axis
       xyz="-1 0 0" />
     <limit
@@ -1021,7 +1019,7 @@
       velocity="8.115781022" />
   </joint>
   <link
-    name="finger3_link2">
+    name="finger4_link3">
     <inertial>
       <origin
         xyz="-0.0011214 4.3494E-06 0.015763"
@@ -1061,15 +1059,15 @@
     </collision>
   </link>
   <joint
-    name="finger3_joint2"
+    name="finger4_joint3"
     type="revolute">
     <origin
       xyz="-0.00475 0 0.043618"
       rpy="0 0 -0.00026861" />
     <parent
-      link="finger3_link1" />
+      link="finger4_link2" />
     <child
-      link="finger3_link2" />
+      link="finger4_link3" />
     <axis
       xyz="-0 1 -0" />
     <limit
@@ -1079,7 +1077,7 @@
       velocity="12.86307659" />
   </joint>
   <link
-    name="finger3_link3">
+    name="finger4_link4">
     <inertial>
       <origin
         xyz="-0.00089436 1.7058E-05 0.0053518"
@@ -1119,15 +1117,15 @@
     </collision>
   </link>
   <joint
-    name="finger3_joint3"
+    name="finger4_joint4"
     type="revolute">
     <origin
       xyz="0 0 0.0295"
       rpy="0 0 0" />
     <parent
-      link="finger3_link2" />
+      link="finger4_link3" />
     <child
-      link="finger3_link3" />
+      link="finger4_link4" />
     <axis
       xyz="-0 1 -0" />
     <limit
@@ -1137,7 +1135,7 @@
       velocity="13.57866158" />
   </joint>
   <link
-    name="finger3_tip_link">
+    name="finger4_tip_link">
     <inertial>
       <origin
         xyz="-0.00020322 1.528E-06 -0.0086106"
@@ -1177,20 +1175,20 @@
     </collision>
   </link>
   <joint
-    name="finger3_tip_fixed"
+    name="finger4_tip_fixed"
     type="fixed">
     <origin
       xyz="-0.0010528 0 0.0267"
       rpy="0 0 0" />
     <parent
-      link="finger3_link3" />
+      link="finger4_link4" />
     <child
-      link="finger3_tip_link" />
+      link="finger4_tip_link" />
     <axis
       xyz="0 0 0" />
   </joint>
   <link
-    name="finger4_link0">
+    name="finger5_link1">
     <inertial>
       <origin
         xyz="-0.0013291 1.7235E-08 0.00031997"
@@ -1230,7 +1228,7 @@
     </collision>
   </link>
   <joint
-    name="finger4_joint0"
+    name="finger5_joint1"
     type="revolute">
     <origin
       xyz="-0.0022687 -0.034001 0.074281"
@@ -1238,7 +1236,7 @@
     <parent
       link="palm_link" />
     <child
-      link="finger4_link0" />
+      link="finger5_link1" />
     <axis
       xyz="0 1 0" />
     <limit
@@ -1248,7 +1246,7 @@
       velocity="8.203047484" />
   </joint>
   <link
-    name="finger4_link1">
+    name="finger5_link2">
     <inertial>
       <origin
         xyz="-0.0061576 -4.1475E-07 0.020911"
@@ -1288,15 +1286,15 @@
     </collision>
   </link>
   <joint
-    name="finger4_joint1"
+    name="finger5_joint2"
     type="revolute">
     <origin
       xyz="0.0022 0 0.004"
       rpy="0 0 0" />
     <parent
-      link="finger4_link0" />
+      link="finger5_link1" />
     <child
-      link="finger4_link1" />
+      link="finger5_link2" />
     <axis
       xyz="-1 0 0" />
     <limit
@@ -1306,7 +1304,7 @@
       velocity="8.115781022" />
   </joint>
   <link
-    name="finger4_link2">
+    name="finger5_link3">
     <inertial>
       <origin
         xyz="-0.0011214 4.3703E-06 0.015763"
@@ -1346,15 +1344,15 @@
     </collision>
   </link>
   <joint
-    name="finger4_joint2"
+    name="finger5_joint3"
     type="revolute">
     <origin
       xyz="-0.00475 0 0.043618"
       rpy="0 0 -0.00026861" />
     <parent
-      link="finger4_link1" />
+      link="finger5_link2" />
     <child
-      link="finger4_link2" />
+      link="finger5_link3" />
     <axis
       xyz="-0 1 -0" />
     <limit
@@ -1364,7 +1362,7 @@
       velocity="12.86307659" />
   </joint>
   <link
-    name="finger4_link3">
+    name="finger5_link4">
     <inertial>
       <origin
         xyz="-0.00089437 1.7063E-05 0.0053518"
@@ -1404,15 +1402,15 @@
     </collision>
   </link>
   <joint
-    name="finger4_joint3"
+    name="finger5_joint4"
     type="revolute">
     <origin
       xyz="0 0 0.0295"
       rpy="0 0 0" />
     <parent
-      link="finger4_link2" />
+      link="finger5_link3" />
     <child
-      link="finger4_link3" />
+      link="finger5_link4" />
     <axis
       xyz="-0 1 -0" />
     <limit
@@ -1422,7 +1420,7 @@
       velocity="13.57866158" />
   </joint>
   <link
-    name="finger4_tip_link">
+    name="finger5_tip_link">
     <inertial>
       <origin
         xyz="-0.00020332 1.4872E-06 -0.0086111"
@@ -1462,15 +1460,15 @@
     </collision>
   </link>
   <joint
-    name="finger4_tip_fixed"
+    name="finger5_tip_fixed"
     type="fixed">
     <origin
       xyz="-0.0010446 1.1308E-05 0.0267"
       rpy="0 0 0" />
     <parent
-      link="finger4_link3" />
+      link="finger5_link4" />
     <child
-      link="finger4_tip_link" />
+      link="finger5_tip_link" />
     <axis
       xyz="0 0 0" />
   </joint>
