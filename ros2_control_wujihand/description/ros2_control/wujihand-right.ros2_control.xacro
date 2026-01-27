@@ -12,6 +12,7 @@
 		<ros2_control name="${name}" type="system">
 			<hardware>
 				<plugin>ros2_control_wujihand/WujiHandHardware</plugin>
+                <param name="low_pass_cutoff_frequency">5.0</param>
 			</hardware>
 
 			<!--

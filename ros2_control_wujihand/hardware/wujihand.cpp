@@ -45,7 +45,7 @@ hardware_interface::CallbackReturn WujiHandHardware::submit_io_request(IoRequest
     IoRequest req{type, std::promise<hardware_interface::CallbackReturn>{}};
     auto fut = req.promise.get_future();
     {
-        std::lock_guard<std::mutex> lock(io_mutex_);
+        std::lock_guard<std::mutex> lock(io_mutex_); // use lock_guard to avoid deadlock on exception
         if(io_request_.has_value()){
             RCLCPP_ERROR(get_logger(), "I/O thread request already pending.");
             return hardware_interface::CallbackReturn::ERROR;
@@ -61,7 +61,8 @@ void WujiHandHardware::io_thread_main()
     using namespace std::chrono;
 
     // Default to 100 Hz if rw_rate is not set.
-    const int rate_hz = (info_.rw_rate > 0) ? info_.rw_rate : 100;
+    // const int rate_hz = (info_.rw_rate > 0) ? info_.rw_rate : 100;
+    const int rate_hz = 500;
     const auto period = nanoseconds(static_cast<long long>(1e9 / rate_hz));
 
     while(!io_stop_.load(std::memory_order_relaxed)){
@@ -107,7 +108,9 @@ void WujiHandHardware::io_thread_main()
                         hand_->write<wujihandcpp::data::joint::Enabled>(true);
 
                         // create the realtime controller
-                        controller_ = hand_->realtime_controller<true>(wujihandcpp::filter::LowPass{5.0});
+                        controller_ = hand_->realtime_controller<true>(
+                            wujihandcpp::filter::LowPass{low_pass_cutoff_frequency_}
+                        );
                         if(!controller_){
                             RCLCPP_ERROR(get_logger(), "I/O Activate: failed to get realtime controller.");
                             result = hardware_interface::CallbackReturn::ERROR;
@@ -220,8 +223,30 @@ hardware_interface::CallbackReturn WujiHandHardware::on_init(
     }
     // If we need to read some parameters from the ros2_control URDF, please add the code here.
 
+    // Read low-pass filter cutoff from ros2_control URDF <param>.
+    // Example:
+    // <param name="low_pass_cutoff_frequency">5.0</param>
+    low_pass_cutoff_frequency_ = 5.0;
+    {
+        const auto it = info_.hardware_parameters.find("low_pass_cutoff_frequency");
+        if(it != info_.hardware_parameters.end()){
+            try{
+                low_pass_cutoff_frequency_ = std::stod(it->second);
+            } catch(const std::exception &e){
+                RCLCPP_WARN(
+                    get_logger(),
+                    "Invalid low_pass_cutoff_frequency='%s', fallback to %.3f. (%s)",
+                    it->second.c_str(),
+                    low_pass_cutoff_frequency_,
+                    e.what()
+                );
+            }
+        }
+    }
+
     // Log the info about the hw here
-    RCLCPP_INFO(get_logger(), "wujihand hardware update is %dHz.", info_.rw_rate);
+    RCLCPP_INFO(get_logger(), "The update rate of wujihand controller manager is %dHz.", info_.rw_rate);
+    RCLCPP_INFO(get_logger(), "Using low_pass_cutoff_frequency = %.3f", low_pass_cutoff_frequency_);
 
     // check joint configurations in URDF
     for(const auto &joint : info_.joints){

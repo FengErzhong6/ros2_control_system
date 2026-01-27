@@ -61,6 +61,8 @@ private:
     static constexpr size_t kFingerCount = 5;
     static constexpr size_t kJointCount = 4;
 
+    double low_pass_cutoff_frequency_;
+
     enum class IoRequestType {
         Configure,
         Activate,
