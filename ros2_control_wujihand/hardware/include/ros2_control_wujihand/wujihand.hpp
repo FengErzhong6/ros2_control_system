@@ -1,7 +1,15 @@
 #ifndef ROS2_CONTROL_WUJIHAND__HARDWARE__WUJIHAND_HPP_
 #define ROS2_CONTROL_WUJIHAND__HARDWARE__WUJIHAND_HPP_
+
+#include <atomic>
+#include <array>
+#include <condition_variable>
+#include <future>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "hardware_interface/handle.hpp"
@@ -19,6 +27,8 @@ namespace ros2_control_wujihand{
 class WujiHandHardware : public hardware_interface::SystemInterface{
 public:
     RCLCPP_SHARED_PTR_DEFINITIONS(WujiHandHardware)
+
+    ~WujiHandHardware() override;
 
     hardware_interface::CallbackReturn on_init(
         const hardware_interface::HardwareComponentInterfaceParams &params
@@ -48,9 +58,36 @@ public:
         const rclcpp::Time &time, const rclcpp::Duration &period
     ) override;
 private:
+    static constexpr size_t kFingerCount = 5;
+    static constexpr size_t kJointCount = 4;
+
+    enum class IoRequestType {
+        Configure,
+        Activate,
+        Deactivate,
+        Cleanup,
+    };
+    struct IoRequest {
+        IoRequestType type;
+        std::promise<hardware_interface::CallbackReturn> promise;
+    };
+
+    hardware_interface::CallbackReturn submit_io_request(IoRequestType type);
+    void io_thread_main();
+
     std::unique_ptr<wujihandcpp::device::Hand> hand_;
     std::unique_ptr<wujihandcpp::device::IController> controller_;
-    bool activated_{false};
+    std::atomic<bool> activated_{false};
+
+    std::atomic<bool> io_stop_{false};
+    std::atomic<bool> io_error_{false};
+    std::thread io_thread_;
+    std::mutex io_mutex_;
+    std::condition_variable io_cv_;
+    std::optional<IoRequest> io_request_;
+
+    std::array<std::array<std::atomic<double>, kJointCount>, kFingerCount> state_cache_{};
+    std::array<std::array<std::atomic<double>, kJointCount>, kFingerCount> target_cache_{};
 };
 
 }   // namespace ros2_control_wujihand

@@ -87,7 +87,7 @@ install(
 	DESTINATION share/${PROJECT_NAME}
 )
 install(
-  DIRECTORY bringup/config
+  DIRECTORY bringup/config bringup/launch
   DESTINATION share/${PROJECT_NAME}
 )
 install(TARGETS ros2_control_wujihand
