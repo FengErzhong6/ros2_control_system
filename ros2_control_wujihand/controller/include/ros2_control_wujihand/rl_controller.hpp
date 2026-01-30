@@ -8,7 +8,6 @@
 #include <memory>
 #include <mutex>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -54,19 +53,20 @@ public:
 protected:
     // fixed sizes
     static constexpr size_t kNumJoints = 20;
-    static constexpr size_t kObsDim = kNumJoints * 20;
+    static constexpr size_t kObsDim = kNumJoints * 2;
     static constexpr size_t kActDim = kNumJoints;
 
     // interface names
     std::array<std::string, kNumJoints> joint_names_{};
 
     // full interface names
-    std::array<std::string, kNumJoints> command_interface_types_{};
-    std::array<std::string, kNumJoints> state_interface_types_{};
+    std::array<std::string, kActDim> command_interface_types_{};
+    std::array<std::string, kObsDim> state_interface_types_{}; // first kNumJoints: position, next kNumJoints: velocity
 
     // loaned interfaces (avoid name lookups in update)
     std::array<hardware_interface::LoanedCommandInterface *, kNumJoints> joint_position_command_interface_{};
     std::array<hardware_interface::LoanedStateInterface *, kNumJoints> joint_position_state_interface_{};
+    std::array<hardware_interface::LoanedStateInterface *, kNumJoints> joint_velocity_state_interface_{};
 };
 
 } // namespace ros2_control_wujihand

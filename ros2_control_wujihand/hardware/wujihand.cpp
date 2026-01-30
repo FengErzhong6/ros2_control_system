@@ -296,6 +296,8 @@ hardware_interface::CallbackReturn WujiHandHardware::on_init(
     RCLCPP_INFO(get_logger(), "Using low_pass_cutoff_frequency = %.3f", low_pass_cutoff_frequency_);
 
     // check joint configurations in URDF
+    bool all_have_velocity = true;
+    bool any_have_velocity = false;
     for(const auto &joint : info_.joints){
         // wujihand has exactly one state and command interface on each joint
         if(joint.command_interfaces.size() != 1){
@@ -319,27 +321,47 @@ hardware_interface::CallbackReturn WujiHandHardware::on_init(
             return hardware_interface::CallbackReturn::ERROR;
         }
 
-        if(joint.state_interfaces.size() != 1){
-            RCLCPP_FATAL(
-                get_logger(),
-                "Joint '%s' has %zu state interfaces found. 1 expected.",
-                joint.name.c_str(),
-                joint.state_interfaces.size()
-            );
-            return hardware_interface::CallbackReturn::ERROR;
+        bool has_position = false;
+        bool has_velocity = false;
+        for(const auto &si : joint.state_interfaces){
+            if(si.name == hardware_interface::HW_IF_POSITION){
+                has_position = true;
+            } else if(si.name == hardware_interface::HW_IF_VELOCITY){
+                has_velocity = true;
+            } else {
+                RCLCPP_FATAL(
+                    get_logger(),
+                    "Joint '%s' has unsupported state interface '%s'.",
+                    joint.name.c_str(),
+                    si.name.c_str()
+                );
+                return hardware_interface::CallbackReturn::ERROR;
+            }
         }
 
-        if(joint.state_interfaces[0].name != hardware_interface::HW_IF_POSITION){
+        if(!has_position){
             RCLCPP_FATAL(
                 get_logger(),
-                "Joint '%s' has '%s' state interface. '%s' expected.",
+                "Joint '%s' is missing required state interface '%s'.",
                 joint.name.c_str(),
-                joint.state_interfaces[0].name.c_str(),
                 hardware_interface::HW_IF_POSITION
             );
             return hardware_interface::CallbackReturn::ERROR;
         }
+
+        any_have_velocity = any_have_velocity || has_velocity;
+        all_have_velocity = all_have_velocity && has_velocity;
     }
+
+    if(any_have_velocity && !all_have_velocity){
+        RCLCPP_WARN(
+            get_logger(),
+            "Some joints declare '%s' state interface but not all. Velocity state will be disabled.",
+            hardware_interface::HW_IF_VELOCITY
+        );
+    }
+    has_velocity_state_ = all_have_velocity;
+    last_position_valid_ = false;
 
     // Start the dedicated I/O thread once. It will be responsible for ALL SDK calls.
     if(!io_thread_.joinable()){
@@ -377,8 +399,18 @@ hardware_interface::CallbackReturn WujiHandHardware::on_activate(
             const auto if_name = position_if_name_from_index(f, j);
             set_state(if_name, pos);
             set_command(if_name, pos);
+
+                last_position_[flat_index(f, j)] = pos;
+                if(has_velocity_state_){
+                    set_state(
+                        joint_name_from_index(f, j) + "/" + hardware_interface::HW_IF_VELOCITY,
+                        0.0
+                    );
+                }
         }
     }
+
+        last_position_valid_ = true;
 
     activated_.store(true, std::memory_order_relaxed);
     return hardware_interface::CallbackReturn::SUCCESS;
@@ -389,6 +421,7 @@ hardware_interface::CallbackReturn WujiHandHardware::on_deactivate(
 ){
     activated_.store(false, std::memory_order_relaxed);
     io_error_.store(false, std::memory_order_relaxed);
+    last_position_valid_ = false;
     return submit_io_request(IoRequestType::Deactivate);
 }
 
@@ -397,11 +430,12 @@ hardware_interface::CallbackReturn WujiHandHardware::on_cleanup(
 ){
     activated_.store(false, std::memory_order_relaxed);
     io_error_.store(false, std::memory_order_relaxed);
+    last_position_valid_ = false;
     return submit_io_request(IoRequestType::Cleanup);
 }
 
 hardware_interface::return_type WujiHandHardware::read(
-    const rclcpp::Time &, const rclcpp::Duration &
+    const rclcpp::Time &, const rclcpp::Duration &period
 ){
     if(!activated_.load(std::memory_order_relaxed)){
         return hardware_interface::return_type::OK;
@@ -412,14 +446,31 @@ hardware_interface::return_type WujiHandHardware::read(
 
     const uint8_t idx = state_active_.load(std::memory_order_acquire);
     const auto &frame = state_frames_[idx];
+
+    const double dt = period.seconds();
+    const bool can_diff = has_velocity_state_ && last_position_valid_ && dt > 0.0;
     for(size_t f = 0; f < kFingerCount; ++f){
         for(size_t j = 0; j < kJointCount; ++j){
+            const size_t flat = flat_index(f, j);
+            const double pos = frame.data[flat];
             set_state(
                 position_if_name_from_index(f, j),
-                frame.data[flat_index(f, j)]
+                pos
             );
+
+            if(has_velocity_state_){
+                const double vel = can_diff ? ((pos - last_position_[flat]) / dt) : 0.0;
+                set_state(
+                    joint_name_from_index(f, j) + "/" + hardware_interface::HW_IF_VELOCITY,
+                    vel
+                );
+            }
+
+            last_position_[flat] = pos;
         }
     }
+
+    last_position_valid_ = true;
     return hardware_interface::return_type::OK;
 }
 

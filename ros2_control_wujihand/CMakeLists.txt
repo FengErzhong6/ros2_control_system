@@ -7,6 +7,7 @@ export_windows_symbols()
 
 # find dependencies
 set(THIS_PACKAGE_INCLUDE_DEPENDS
+  controller_interface
   hardware_interface
   pluginlib
   rclcpp
@@ -24,6 +25,7 @@ endif()
 # find dependencies
 find_package(backward_ros REQUIRED)
 find_package(ament_cmake REQUIRED)
+find_package(onnxruntime REQUIRED)
 
 # wujihandcpp (system library may not ship a CMake package config)
 find_package(wujihandcpp QUIET)
@@ -71,15 +73,39 @@ target_link_libraries(ros2_control_wujihand PUBLIC
   ${WUJIHANDCPP_TARGET}
 )
 
+# Controller plugin
+add_library(
+  ros2_control_wujihand_rl_controller
+  SHARED
+  controller/rl_controller.cpp
+)
+target_compile_features(ros2_control_wujihand_rl_controller PUBLIC cxx_std_17)
+target_include_directories(ros2_control_wujihand_rl_controller PUBLIC
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/controller/include>
+  $<INSTALL_INTERFACE:include/ros2_control_wujihand>
+)
+target_link_libraries(ros2_control_wujihand_rl_controller PUBLIC
+  controller_interface::controller_interface
+  pluginlib::pluginlib
+  rclcpp::rclcpp
+  rclcpp_lifecycle::rclcpp_lifecycle
+  onnxruntime::onnxruntime
+)
+
 # Export hardware plugins
 pluginlib_export_plugin_description_file(
   hardware_interface
   ros2_control_wujihand_plugins.xml
 )
 
+pluginlib_export_plugin_description_file(
+  controller_interface
+  ros2_control_wujihand_controller_plugins.xml
+)
+
 # INSTALL
 install(
-  DIRECTORY hardware/include 
+  DIRECTORY hardware/include controller/include
   DESTINATION include/${PROJECT_NAME}
 )
 install(
@@ -90,7 +116,7 @@ install(
   DIRECTORY bringup/config bringup/launch
   DESTINATION share/${PROJECT_NAME}
 )
-install(TARGETS ros2_control_wujihand
+install(TARGETS ros2_control_wujihand ros2_control_wujihand_rl_controller
   EXPORT export_${PROJECT_NAME}
   LIBRARY DESTINATION lib
   ARCHIVE DESTINATION lib

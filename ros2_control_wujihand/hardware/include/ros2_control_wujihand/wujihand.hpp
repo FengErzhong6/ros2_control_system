@@ -104,6 +104,10 @@ private:
     std::array<Frame, 2> cmd_frames_{};
     std::atomic<uint8_t> cmd_active_{0};
     std::atomic<uint64_t> cmd_frame_id_{0};
+
+    bool has_velocity_state_{false};
+    std::array<double, kTotalJoints> last_position_{};
+    bool last_position_valid_{false};
 };
 
 }   // namespace ros2_control_wujihand
