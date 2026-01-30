@@ -4,6 +4,7 @@
 #include <atomic>
 #include <array>
 #include <condition_variable>
+#include <cstdint>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -60,6 +61,7 @@ public:
 private:
     static constexpr size_t kFingerCount = 5;
     static constexpr size_t kJointCount = 4;
+    static constexpr size_t kTotalJoints = kFingerCount * kJointCount;
 
     double low_pass_cutoff_frequency_;
 
@@ -88,8 +90,20 @@ private:
     std::condition_variable io_cv_;
     std::optional<IoRequest> io_request_;
 
-    std::array<std::array<std::atomic<double>, kJointCount>, kFingerCount> state_cache_{};
-    std::array<std::array<std::atomic<double>, kJointCount>, kFingerCount> target_cache_{};
+    struct Frame {
+        std::array<double, kTotalJoints> data{};
+        uint64_t frame_id{0};
+    };
+
+    // State direction: IO thread writes, RT thread reads.
+    std::array<Frame, 2> state_frames_{};
+    std::atomic<uint8_t> state_active_{0};
+    uint64_t state_frame_id_{0};
+
+    // Command direction: RT thread writes, IO thread reads.
+    std::array<Frame, 2> cmd_frames_{};
+    std::atomic<uint8_t> cmd_active_{0};
+    std::atomic<uint64_t> cmd_frame_id_{0};
 };
 
 }   // namespace ros2_control_wujihand

@@ -23,6 +23,13 @@ inline std::string joint_name_from_index(const size_t finger_idx, const size_t j
     return "finger" + std::to_string(finger_idx) + "_joint" + std::to_string(joint_idx);
 }
 
+inline constexpr size_t flat_index(const size_t finger_idx, const size_t joint_idx)
+{
+    // Wuji hand is fixed 5x4 (20 joints). Keep this helper local to avoid depending on
+    // private class constants.
+    return finger_idx * 4U + joint_idx;
+}
+
 inline std::string position_if_name_from_index(const size_t finger_idx, const size_t joint_idx)
 {
     return joint_name_from_index(finger_idx, joint_idx) + "/" + hardware_interface::HW_IF_POSITION;
@@ -120,14 +127,31 @@ void WujiHandHardware::io_thread_main()
                         // Initialize caches to current position and hold.
                         const auto &actual_pos = controller_->get_joint_actual_position();
                         double hold_target[kFingerCount][kJointCount] = {};
+
+                        // Initialize both buffers so there is never an uninitialized frame.
+                        state_frame_id_ = 0;
+                        const uint8_t init_idx = 0;
+                        state_active_.store(init_idx, std::memory_order_relaxed);
+                        cmd_active_.store(init_idx, std::memory_order_relaxed);
+
                         for(size_t f = 0; f < kFingerCount; ++f){
                             for(size_t j = 0; j < kJointCount; ++j){
                                 const double pos = actual_pos[f][j].load(std::memory_order_relaxed);
-                                state_cache_[f][j].store(pos, std::memory_order_relaxed);
-                                target_cache_[f][j].store(pos, std::memory_order_relaxed);
+                                const size_t idx = flat_index(f, j);
+
+                                state_frames_[0].data[idx] = pos;
+                                state_frames_[1].data[idx] = pos;
+                                cmd_frames_[0].data[idx] = pos;
+                                cmd_frames_[1].data[idx] = pos;
+
                                 hold_target[f][j] = pos;
                             }
                         }
+                        state_frames_[0].frame_id = 0;
+                        state_frames_[1].frame_id = 0;
+                        cmd_frames_[0].frame_id = 0;
+                        cmd_frames_[1].frame_id = 0;
+
                         controller_->set_joint_target_position(hold_target);
                         result = hardware_interface::CallbackReturn::SUCCESS;
                         break;
@@ -137,14 +161,30 @@ void WujiHandHardware::io_thread_main()
                         if(hand_ && controller_){
                             const auto &actual_pos = controller_->get_joint_actual_position();
                             double hold_target[kFingerCount][kJointCount] = {};
+
+                            const uint8_t cur_s = state_active_.load(std::memory_order_relaxed);
+                            const uint8_t back_s = cur_s ^ 1U;
+                            const uint8_t cur_c = cmd_active_.load(std::memory_order_relaxed);
+                            const uint8_t back_c = cur_c ^ 1U;
+
                             for(size_t f = 0; f < kFingerCount; ++f){
                                 for(size_t j = 0; j < kJointCount; ++j){
                                     const double pos = actual_pos[f][j].load(std::memory_order_relaxed);
-                                    state_cache_[f][j].store(pos, std::memory_order_relaxed);
-                                    target_cache_[f][j].store(pos, std::memory_order_relaxed);
+                                    const size_t idx = flat_index(f, j);
+                                    state_frames_[back_s].data[idx] = pos;
+                                    cmd_frames_[back_c].data[idx] = pos;
+
                                     hold_target[f][j] = pos;
                                 }
                             }
+
+                            state_frames_[back_s].frame_id = ++state_frame_id_;
+                            state_active_.store(back_s, std::memory_order_release);
+
+                            cmd_frames_[back_c].frame_id =
+                                cmd_frame_id_.fetch_add(1, std::memory_order_relaxed) + 1;
+                            cmd_active_.store(back_c, std::memory_order_release);
+
                             controller_->set_joint_target_position(hold_target);
                         }
                         if(hand_){
@@ -192,19 +232,26 @@ void WujiHandHardware::io_thread_main()
 
         try{
             const auto &actual_pos = controller_->get_joint_actual_position();
+
+            // Publish a coherent state frame.
+            const uint8_t cur_s = state_active_.load(std::memory_order_relaxed);
+            const uint8_t back_s = cur_s ^ 1U;
+            // state_frames_[back_s] = state_frames_[cur_s];
             for(size_t f = 0; f < kFingerCount; ++f){
                 for(size_t j = 0; j < kJointCount; ++j){
-                    state_cache_[f][j].store(
-                        actual_pos[f][j].load(std::memory_order_relaxed),
-                        std::memory_order_relaxed
-                    );
+                    state_frames_[back_s].data[flat_index(f, j)] =
+                        actual_pos[f][j].load(std::memory_order_relaxed);
                 }
             }
+            state_frames_[back_s].frame_id = ++state_frame_id_;
+            state_active_.store(back_s, std::memory_order_release);
 
+            // Read a coherent command frame.
+            const uint8_t cmd_idx = cmd_active_.load(std::memory_order_acquire);
             double target[kFingerCount][kJointCount] = {};
             for(size_t f = 0; f < kFingerCount; ++f){
                 for(size_t j = 0; j < kJointCount; ++j){
-                    target[f][j] = target_cache_[f][j].load(std::memory_order_relaxed);
+                    target[f][j] = cmd_frames_[cmd_idx].data[flat_index(f, j)];
                 }
             }
             controller_->set_joint_target_position(target);
@@ -323,9 +370,10 @@ hardware_interface::CallbackReturn WujiHandHardware::on_activate(
     }
 
     // Align command/state interfaces to the cached initial positions.
+    const uint8_t sidx = state_active_.load(std::memory_order_acquire);
     for(size_t f = 0; f < kFingerCount; ++f){
         for(size_t j = 0; j < kJointCount; ++j){
-            const double pos = state_cache_[f][j].load(std::memory_order_relaxed);
+            const double pos = state_frames_[sidx].data[flat_index(f, j)];
             const auto if_name = position_if_name_from_index(f, j);
             set_state(if_name, pos);
             set_command(if_name, pos);
@@ -362,11 +410,13 @@ hardware_interface::return_type WujiHandHardware::read(
         return hardware_interface::return_type::ERROR;
     }
 
+    const uint8_t idx = state_active_.load(std::memory_order_acquire);
+    const auto &frame = state_frames_[idx];
     for(size_t f = 0; f < kFingerCount; ++f){
         for(size_t j = 0; j < kJointCount; ++j){
             set_state(
                 position_if_name_from_index(f, j),
-                state_cache_[f][j].load(std::memory_order_relaxed)
+                frame.data[flat_index(f, j)]
             );
         }
     }
@@ -383,14 +433,17 @@ hardware_interface::return_type WujiHandHardware::write(
         return hardware_interface::return_type::ERROR;
     }
 
+    const uint8_t cur = cmd_active_.load(std::memory_order_relaxed);
+    const uint8_t back = cur ^ 1U;
+    // Write a full coherent command frame, then publish it with a release store.
     for(size_t f = 0; f < kFingerCount; ++f){
         for(size_t j = 0; j < kJointCount; ++j){
-            target_cache_[f][j].store(
-                get_command<double>(position_if_name_from_index(f, j)),
-                std::memory_order_relaxed
-            );
+            cmd_frames_[back].data[flat_index(f, j)] =
+                get_command<double>(position_if_name_from_index(f, j));
         }
     }
+    cmd_frames_[back].frame_id = cmd_frame_id_.fetch_add(1, std::memory_order_relaxed) + 1;
+    cmd_active_.store(back, std::memory_order_release);
     return hardware_interface::return_type::OK;
 }
 
