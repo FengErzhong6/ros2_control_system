@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -19,14 +20,14 @@
 #include "rclcpp_lifecycle/lifecycle_publisher.hpp"
 #include "rclcpp_lifecycle/node_interfaces/lifecycle_node_interface.hpp"
 
-#include "onnxruntime/onnxruntime_cxx_api.h"
-
 namespace ros2_control_wujihand{
+class RLPolicy;
+
 class RLController : public controller_interface::ControllerInterface{
 public:
     RLController();
 
-    virtual ~RLController() = default;
+    ~RLController() override;
 
     controller_interface::InterfaceConfiguration command_interface_configuration() const override;
 
@@ -67,6 +68,18 @@ protected:
     std::array<hardware_interface::LoanedCommandInterface *, kNumJoints> joint_position_command_interface_{};
     std::array<hardware_interface::LoanedStateInterface *, kNumJoints> joint_position_state_interface_{};
     std::array<hardware_interface::LoanedStateInterface *, kNumJoints> joint_velocity_state_interface_{};
+
+    // RL policy
+    std::unique_ptr<RLPolicy> policy_;
+    double joint_vel_obs_scale_{1.0};
+    std::array<double, kNumJoints> lower_bound_{};
+    std::array<double, kNumJoints> upper_bound_{};
+    std::array<double, kNumJoints> range_{};
+    std::array<double, kNumJoints> inv_range_{};
+    std::array<double, kNumJoints> sum_{};
+
+    std::array<float, kObsDim> policy_obs_{};
+    std::array<float, kActDim> policy_act_{};
 };
 
 } // namespace ros2_control_wujihand

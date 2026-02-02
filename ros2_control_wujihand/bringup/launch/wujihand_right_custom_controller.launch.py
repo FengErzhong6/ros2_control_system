@@ -38,11 +38,19 @@ def generate_launch_description():
             description="YAML with controller_manager and controller parameters.",
         )
     )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "policy_file",
+            default_value="config/policy.yaml",
+            description="YAML with RL policy parameters (applied to rl_controller node).",
+        )
+    )
 
     gui = LaunchConfiguration("gui")
     description_package = LaunchConfiguration("description_package")
     description_file = LaunchConfiguration("description_file")
     controllers_file = LaunchConfiguration("controllers_file")
+    policy_file = LaunchConfiguration("policy_file")
 
     # robot_description from xacro
     robot_description_content = Command(
@@ -55,13 +63,14 @@ def generate_launch_description():
     robot_description = {"robot_description": ParameterValue(robot_description_content, value_type=str)}
 
     controllers_yaml = PathJoinSubstitution([FindPackageShare("ros2_control_wujihand"), controllers_file])
+    policy_yaml = PathJoinSubstitution([FindPackageShare("ros2_control_wujihand"), policy_file])
 
     # Control node
     ros2_control_node = Node(
         package="controller_manager",
         executable="ros2_control_node",
         output="both",
-        parameters=[robot_description, controllers_yaml],
+        parameters=[robot_description, controllers_yaml, policy_yaml],
     )
 
     # TF publisher

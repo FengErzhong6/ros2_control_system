@@ -1,9 +1,12 @@
 #include "ros2_control_wujihand/rl_controller.hpp"
+#include "ros2_control_wujihand/rl_policy.hpp"
 
 #include <stddef.h>
 
 #include <algorithm>
 #include <array>
+#include <cmath>
+#include <filesystem>
 #include <iterator>
 #include <limits>
 #include <optional>
@@ -36,6 +39,8 @@ LoanedInterfaceT *find_loaned_interface(std::vector<LoanedInterfaceT> &interface
 
 RLController::RLController() : controller_interface::ControllerInterface() {}
 
+RLController::~RLController() = default;
+
 controller_interface::CallbackReturn RLController::on_init()
 {
     const auto logger = get_node()->get_logger();
@@ -48,6 +53,12 @@ controller_interface::CallbackReturn RLController::on_init()
         auto_declare<std::vector<std::string>>("joints", {});
         auto_declare<std::vector<std::string>>("command_interfaces", {});
         auto_declare<std::vector<std::string>>("state_interfaces", {});
+
+        // RL policy parameters.
+        auto_declare<std::string>("policy_model_path", "");
+        auto_declare<double>("joint_vel_obs_scale", 1.0);
+        auto_declare<std::vector<double>>("lower_bound", {});
+        auto_declare<std::vector<double>>("upper_bound", {});
     } catch(const std::exception &e){
         RCLCPP_ERROR(logger, "Failed to declare parameters: %s", e.what());
         return CallbackReturn::ERROR;
@@ -101,6 +112,26 @@ controller_interface::CallbackReturn RLController::on_configure(const rclcpp_lif
         return CallbackReturn::ERROR;
     }
 
+    std::string policy_model_path;
+    std::vector<double> lower_bound_param;
+    std::vector<double> upper_bound_param;
+    if(!get_node()->get_parameter("policy_model_path", policy_model_path)){
+        RCLCPP_ERROR(logger, "Missing required parameter 'policy_model_path'.");
+        return CallbackReturn::ERROR;
+    }
+    if(!get_node()->get_parameter("joint_vel_obs_scale", joint_vel_obs_scale_)){
+        RCLCPP_ERROR(logger, "Missing required parameter 'joint_vel_obs_scale'.");
+        return CallbackReturn::ERROR;
+    }
+    if(!get_node()->get_parameter("lower_bound", lower_bound_param)){
+        RCLCPP_ERROR(logger, "Missing required parameter 'lower_bound'.");
+        return CallbackReturn::ERROR;
+    }
+    if(!get_node()->get_parameter("upper_bound", upper_bound_param)){
+        RCLCPP_ERROR(logger, "Missing required parameter 'upper_bound'.");
+        return CallbackReturn::ERROR;
+    }
+
     // Require explicit fixed-length lists.
     if(joints_param.size() != kNumJoints){
         RCLCPP_ERROR(logger, "Parameter 'joints' must have exactly %zu entries (got %zu).", kNumJoints, joints_param.size());
@@ -122,6 +153,54 @@ controller_interface::CallbackReturn RLController::on_configure(const rclcpp_lif
             kObsDim,
             state_ifaces_param.size()
         );
+        return CallbackReturn::ERROR;
+    }
+
+    if(policy_model_path.empty()){
+        RCLCPP_ERROR(logger, "Parameter 'policy_model_path' is empty.");
+        return CallbackReturn::ERROR;
+    }
+    if(!std::filesystem::exists(policy_model_path)){
+        RCLCPP_ERROR(logger, "policy_model_path does not exist: '%s'", policy_model_path.c_str());
+        return CallbackReturn::ERROR;
+    }
+    if(!std::isfinite(joint_vel_obs_scale_)){
+        RCLCPP_ERROR(logger, "joint_vel_obs_scale must be finite (got %f).", joint_vel_obs_scale_);
+        return CallbackReturn::ERROR;
+    }
+    if(lower_bound_param.size() != kNumJoints || upper_bound_param.size() != kNumJoints){
+        RCLCPP_ERROR(
+            logger,
+            "lower_bound and upper_bound must have exactly %zu entries (got %zu and %zu).",
+            kNumJoints,
+            lower_bound_param.size(),
+            upper_bound_param.size()
+        );
+        return CallbackReturn::ERROR;
+    }
+
+    for(size_t i = 0; i < kNumJoints; ++i){
+        const double lo = lower_bound_param[i];
+        const double up = upper_bound_param[i];
+        if(!std::isfinite(lo) || !std::isfinite(up)){
+            RCLCPP_ERROR(logger, "Bounds must be finite at index %zu (lower=%f, upper=%f).", i, lo, up);
+            return CallbackReturn::ERROR;
+        }
+        if(!(up > lo)){
+            RCLCPP_ERROR(logger, "upper_bound must be > lower_bound at index %zu (lower=%f, upper=%f).", i, lo, up);
+            return CallbackReturn::ERROR;
+        }
+        lower_bound_[i] = lo;
+        upper_bound_[i] = up;
+        range_[i] = up - lo;
+        inv_range_[i] = 1.0 / range_[i];
+        sum_[i] = up + lo;
+    }
+
+    try{
+        policy_ = std::make_unique<RLPolicy>(policy_model_path);
+    } catch(const std::exception &e){
+        RCLCPP_ERROR(logger, "Failed to initialize RLPolicy: %s", e.what());
         return CallbackReturn::ERROR;
     }
 
@@ -241,24 +320,36 @@ controller_interface::CallbackReturn RLController::on_deactivate(const rclcpp_li
 
 controller_interface::return_type RLController::update(const rclcpp::Time &, const rclcpp::Duration &)
 {
-    // Fast path: fixed ordering (first 20 position, next 20 velocity).
-    std::array<double, kObsDim> obs{};
-
-    for(size_t i = 0; i < kNumJoints; ++i){
-        const auto v = joint_position_state_interface_[i]->get_optional<double>();
-        obs[i] = v.value_or(std::numeric_limits<double>::quiet_NaN());
-    }
-    for(size_t i = 0; i < kNumJoints; ++i){
-        const auto v = joint_velocity_state_interface_[i]->get_optional<double>();
-        obs[i + kNumJoints] = v.value_or(std::numeric_limits<double>::quiet_NaN());
+    if(!policy_){
+        for(size_t i = 0; i < kNumJoints; ++i){
+            (void)joint_position_command_interface_[i]->set_value(0.0);
+        }
+        return controller_interface::return_type::OK;
     }
 
-    // Temporary behavior: command all joints to zero position.
+    // obs = [unscaled q(20), scaled dq(20)]
     for(size_t i = 0; i < kNumJoints; ++i){
-        (void)joint_position_command_interface_[i]->set_value(0.0);
+        const double q = joint_position_state_interface_[i]->get_optional<double>().value_or(0.0);
+        const double q_safe = std::isfinite(q) ? q : 0.0;
+        const double q_norm = (2.0 * q_safe - sum_[i]) * inv_range_[i];
+        policy_obs_[i] = static_cast<float>(q_norm);
+    }
+    for(size_t i = 0; i < kNumJoints; ++i){
+        const double dq = joint_velocity_state_interface_[i]->get_optional<double>().value_or(0.0);
+        const double dq_safe = std::isfinite(dq) ? dq : 0.0;
+        policy_obs_[i + kNumJoints] = static_cast<float>(dq_safe * joint_vel_obs_scale_);
     }
 
-    (void)obs;
+    // infer -> action in [-1, 1] (assumed)
+    policy_->infer(policy_obs_, policy_act_);
+
+    // scale action to [lower, upper] and command position
+    for(size_t i = 0; i < kNumJoints; ++i){
+        const double a = static_cast<double>(policy_act_[i]);
+        const double cmd = 0.5 * (a + 1.0) * range_[i] + lower_bound_[i];
+        (void)joint_position_command_interface_[i]->set_value(cmd);
+    }
+
     return controller_interface::return_type::OK;
 }
 

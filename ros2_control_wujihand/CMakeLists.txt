@@ -78,6 +78,7 @@ add_library(
   ros2_control_wujihand_rl_controller
   SHARED
   controller/rl_controller.cpp
+  controller/rl_policy.cpp
 )
 target_compile_features(ros2_control_wujihand_rl_controller PUBLIC cxx_std_17)
 target_include_directories(ros2_control_wujihand_rl_controller PUBLIC
