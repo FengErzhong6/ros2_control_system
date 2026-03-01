@@ -112,4 +112,4 @@ private:
 
 }   // namespace ros2_control_wujihand
 
-#endif // ROS2_CONTROL_WUJIHAND__HARDWARE__WUJIHAND_HPP_
+#endif // ROS2_CONTROL_WUJIHAND__HARDWARE__WUJIHAND_HPP_        

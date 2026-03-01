@@ -8,4 +8,9 @@ install(
   DESTINATION share/${PROJECT_NAME}/wuji
 )
 
+install(
+  DIRECTORY marvin/urdf marvin/meshes marvin/rviz
+  DESTINATION share/${PROJECT_NAME}/marvin
+)
+
 ament_package()
