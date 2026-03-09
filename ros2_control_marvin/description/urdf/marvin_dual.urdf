@@ -1,0 +1,45 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="marvin_dual">
+
+  <!--
+    Dual-arm composite URDF (xacro).
+    - Includes both left and right arm models from `asset_description`.
+    - Adds a common `world` link and fixed joints to each arm base.
+    - Adds two ros2_control hardware components (left + right) via macros.
+
+    Args:
+      left_xyz, left_rpy:  mount pose of Base_L w.r.t world
+      right_xyz, right_rpy: mount pose of Base_R w.r.t world
+  -->
+
+  <xacro:arg name="left_xyz" default="0 -0.4375 0" />
+  <xacro:arg name="left_rpy" default="0 0 0" />
+    <xacro:arg name="right_xyz" default="0 0.4375 0" />
+  <xacro:arg name="right_rpy" default="0 0 0" />
+
+  <link name="world" />
+
+  <!-- Arm models -->
+  <xacro:include filename="$(find asset_description)/marvin/urdf/Marvin M6-S-L-CCS-696-V4.0 urdf.urdf" />
+  <xacro:include filename="$(find asset_description)/marvin/urdf/Marvin M6-S-R-CCS-696-V4.0 urdf.urdf" />
+
+  <!-- Mount them under world -->
+  <joint name="world_to_base_l" type="fixed">
+    <origin xyz="$(arg left_xyz)" rpy="$(arg left_rpy)" />
+    <parent link="world" />
+    <child link="Base_L" />
+  </joint>
+
+  <joint name="world_to_base_r" type="fixed">
+    <origin xyz="$(arg right_xyz)" rpy="$(arg right_rpy)" />
+    <parent link="world" />
+    <child link="Base_R" />
+  </joint>
+
+  <!-- ros2_control description (two hardware components) -->
+  <xacro:include filename="$(find ros2_control_marvin)/description/ros2_control/marvin_arm.ros2_control.xacro" />
+
+  <xacro:marvin_arm_ros2_control name="marvin_left" suffix="L" side="left" />
+  <xacro:marvin_arm_ros2_control name="marvin_right" suffix="R" side="right" />
+
+</robot>

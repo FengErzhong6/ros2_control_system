@@ -1,6 +1,7 @@
 #ifndef ROS2_CONTROL_MARVIN__HARDWARE__MARVIN_HPP_
 #define ROS2_CONTROL_MARVIN__HARDWARE__MARVIN_HPP_
 
+#include <chrono>
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -67,9 +68,21 @@ private:
 	// Command buffers (size == joint_count_). Consume in write().
 	std::vector<double> hw_position_commands_;
 
+	// Joint limits (size == joint_count_). Parsed from <command_interface> params.
+	std::vector<double> joint_min_;
+	std::vector<double> joint_max_;
+
 	// Interface availability (depends on URDF declared state/command interfaces).
 	bool has_velocity_state_{false};
 	bool has_effort_state_{false};
+
+	// SDK mapping / safety parameters.
+	int arm_idx_{0};
+	int no_frame_timeout_ms_{800};
+	int last_frame_serial_{-1};
+	std::chrono::steady_clock::time_point last_frame_time_{};
+	std::chrono::steady_clock::time_point last_error_log_time_{};
+	bool activated_{false};
 };
 
 } // namespace ros2_control_marvin
