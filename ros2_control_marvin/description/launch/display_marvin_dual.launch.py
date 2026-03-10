@@ -1,6 +1,6 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import Command, LaunchConfiguration
+from launch.substitutions import Command, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
@@ -39,6 +39,10 @@ def generate_launch_description():
         ]
     )
 
+    rviz_config = PathJoinSubstitution(
+        [FindPackageShare("ros2_control_marvin"), "description/rviz/marvin_dual.rviz"]
+    )
+
     return LaunchDescription(
         [
             DeclareLaunchArgument(
@@ -46,7 +50,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "left_xyz",
-                default_value="0 -0.4375 0",
+                default_value="0 0.4375 0",
                 description="Mount pose (xyz) of Base_L in world",
             ),
             DeclareLaunchArgument(
@@ -56,7 +60,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "right_xyz",
-                default_value="0 0.4375 0",
+                default_value="0 -0.4375 0",
                 description="Mount pose (xyz) of Base_R in world",
             ),
             DeclareLaunchArgument(
@@ -84,6 +88,16 @@ def generate_launch_description():
                         ),
                     }
                 ],
+            ),
+            Node(
+                package="joint_state_publisher_gui",
+                executable="joint_state_publisher_gui",
+            ),
+            Node(
+                package="rviz2",
+                executable="rviz2",
+                output="screen",
+                arguments=["-d", rviz_config],
             ),
         ]
     )

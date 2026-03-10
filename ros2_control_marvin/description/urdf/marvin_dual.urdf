@@ -12,9 +12,9 @@
       right_xyz, right_rpy: mount pose of Base_R w.r.t world
   -->
 
-  <xacro:arg name="left_xyz" default="0 -0.4375 0" />
+  <xacro:arg name="left_xyz" default="0 0.4375 0" />
   <xacro:arg name="left_rpy" default="0 0 0" />
-    <xacro:arg name="right_xyz" default="0 0.4375 0" />
+  <xacro:arg name="right_xyz" default="0 -0.4375 0" />
   <xacro:arg name="right_rpy" default="0 0 0" />
 
   <link name="world" />
@@ -36,10 +36,9 @@
     <child link="Base_R" />
   </joint>
 
-  <!-- ros2_control description (two hardware components) -->
-  <xacro:include filename="$(find ros2_control_marvin)/description/ros2_control/marvin_arm.ros2_control.xacro" />
+  <!-- ros2_control description (single hardware component for both arms) -->
+  <xacro:include filename="$(find ros2_control_marvin)/description/ros2_control/marvin_dual_system.ros2_control.xacro" />
 
-  <xacro:marvin_arm_ros2_control name="marvin_left" suffix="L" side="left" />
-  <xacro:marvin_arm_ros2_control name="marvin_right" suffix="R" side="right" />
+  <xacro:marvin_dual_ros2_control name="marvin_dual" />
 
 </robot>
