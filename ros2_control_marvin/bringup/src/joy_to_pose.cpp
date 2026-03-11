@@ -6,6 +6,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "sensor_msgs/msg/joy.hpp"
+#include "std_msgs/msg/float64_multi_array.hpp"
 #include "std_msgs/msg/string.hpp"
 
 class JoyToPose : public rclcpp::Node {
@@ -32,10 +33,25 @@ public:
             "current_pose_right_topic",
             std::string("/ik_controller/current_pose_right"));
 
+        use_gripper_ = declare_parameter("use_gripper", false);
+
         pub_pose_[kLeft] =
             create_publisher<geometry_msgs::msg::PoseStamped>(left_topic, 10);
         pub_pose_[kRight] =
             create_publisher<geometry_msgs::msg::PoseStamped>(right_topic, 10);
+
+        if (use_gripper_) {
+            auto gripper_left_topic = declare_parameter(
+                "gripper_left_topic",
+                std::string("/gripper_L_controller/commands"));
+            auto gripper_right_topic = declare_parameter(
+                "gripper_right_topic",
+                std::string("/gripper_R_controller/commands"));
+            pub_gripper_[kLeft] =
+                create_publisher<std_msgs::msg::Float64MultiArray>(gripper_left_topic, 10);
+            pub_gripper_[kRight] =
+                create_publisher<std_msgs::msg::Float64MultiArray>(gripper_right_topic, 10);
+        }
 
         // Subscribe to FK current poses (transient_local to receive latched value)
         auto fk_qos = rclcpp::QoS(1).transient_local();
@@ -80,9 +96,9 @@ public:
 
         RCLCPP_INFO(get_logger(),
             "JoyToPose ready: linear=%.3f m/s, angular=%.3f rad/s, "
-            "btn_angular=%.3f rad/s, deadzone=%.2f, rate=%.0f Hz",
+            "btn_angular=%.3f rad/s, deadzone=%.2f, rate=%.0f Hz, gripper=%s",
             linear_speed_, angular_speed_, button_angular_speed_,
-            deadzone_, publish_rate_);
+            deadzone_, publish_rate_, use_gripper_ ? "ON" : "OFF");
         RCLCPP_INFO(get_logger(),
             "Waiting for FK initial poses from IK controller...");
     }
@@ -100,6 +116,8 @@ private:
     static constexpr int kAxisRT     = 5;
     static constexpr int kBtnA  = 0;
     static constexpr int kBtnB  = 1;
+    static constexpr int kBtnX  = 2;
+    static constexpr int kBtnY  = 3;
     static constexpr int kBtnLB = 4;
     static constexpr int kBtnRB = 5;
 
@@ -118,6 +136,10 @@ private:
     bool joy_received_{false};
     bool prev_btn_a_{false};
     bool prev_btn_b_{false};
+    bool prev_btn_x_{false};
+    bool prev_btn_y_{false};
+
+    bool use_gripper_{false};
 
     rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr sub_joy_;
     std::array<rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr, 2>
@@ -126,6 +148,8 @@ private:
         sub_ik_status_;
     std::array<rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr, 2>
         pub_pose_;
+    std::array<rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr, 2>
+        pub_gripper_;
     rclcpp::TimerBase::SharedPtr timer_;
 
     double getAxis(int index) const
@@ -249,6 +273,31 @@ private:
         }
         prev_btn_a_ = a;
         prev_btn_b_ = b;
+
+        if (use_gripper_) {
+            bool x = getButton(kBtnX);
+            bool y = getButton(kBtnY);
+            if (x && !prev_btn_x_) {
+                publishGripper(active_arm_, 0.0);
+                RCLCPP_INFO(get_logger(), "%s gripper: CLOSE",
+                            active_arm_ == kLeft ? "LEFT" : "RIGHT");
+            }
+            if (y && !prev_btn_y_) {
+                publishGripper(active_arm_, 1.0);
+                RCLCPP_INFO(get_logger(), "%s gripper: OPEN",
+                            active_arm_ == kLeft ? "LEFT" : "RIGHT");
+            }
+            prev_btn_x_ = x;
+            prev_btn_y_ = y;
+        }
+    }
+
+    void publishGripper(int arm, double position)
+    {
+        if (!pub_gripper_[arm]) return;
+        std_msgs::msg::Float64MultiArray msg;
+        msg.data.push_back(position);
+        pub_gripper_[arm]->publish(msg);
     }
 
     void update()

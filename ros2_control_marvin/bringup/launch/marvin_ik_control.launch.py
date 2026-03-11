@@ -80,6 +80,31 @@ def launch_setup(context):
     with open(ik_params_file, "w") as f:
         f.write(ik_params_override)
 
+    # Gripper controller configs (generated per enabled gripper)
+    gripper_params_files = []
+    gripper_names = []
+    for side, enabled in [("L", grip_L), ("R", grip_R)]:
+        if not enabled:
+            continue
+        name = f"gripper_{side}_controller"
+        gripper_names.append(name)
+        content = (
+            f'controller_manager:\n'
+            f'  ros__parameters:\n'
+            f'    {name}:\n'
+            f'      type: forward_command_controller/ForwardCommandController\n'
+            f'\n'
+            f'{name}:\n'
+            f'  ros__parameters:\n'
+            f'    interface_name: position\n'
+            f'    joints:\n'
+            f'      - gripper_{side}\n'
+        )
+        path = os.path.join(tempfile.mkdtemp(), f"{name}.yaml")
+        with open(path, "w") as f:
+            f.write(content)
+        gripper_params_files.append(path)
+
     # ── Core ──────────────────────────────────────────────────────────────
     ros2_control_node = Node(
         package="controller_manager",
@@ -89,7 +114,7 @@ def launch_setup(context):
             robot_description,
             controllers_yaml,
             ik_params_file,
-        ],
+        ] + gripper_params_files,
     )
 
     robot_state_publisher_node = Node(
@@ -135,6 +160,16 @@ def launch_setup(context):
         output="screen",
     )
 
+    # ── Gripper controller spawners ────────────────────────────────────────
+    gripper_spawners = []
+    for name in gripper_names:
+        gripper_spawners.append(Node(
+            package="controller_manager",
+            executable="spawner",
+            arguments=[name],
+            output="screen",
+        ))
+
     # ── Assemble ──────────────────────────────────────────────────────────
     return [
         ros2_control_node,
@@ -142,4 +177,4 @@ def launch_setup(context):
         rviz_node,
         joint_state_broadcaster_spawner,
         ik_controller_spawner,
-    ]
+    ] + gripper_spawners
