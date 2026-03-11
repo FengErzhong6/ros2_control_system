@@ -13,4 +13,9 @@ install(
   DESTINATION share/${PROJECT_NAME}/marvin
 )
 
+install(
+  DIRECTORY omnipicker/urdf omnipicker/meshes omnipicker/rviz
+  DESTINATION share/${PROJECT_NAME}/omnipicker
+)
+
 ament_package()
