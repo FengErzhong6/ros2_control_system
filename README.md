@@ -51,47 +51,122 @@
 
 ---
 
-### 2. ros2_control_marvin（Marvin 双臂机器人）
+### 2. ros2_control_marvin（Marvin 双臂机器人 + OmniPicker 夹爪）
 
-**ros2_control_marvin** 为 **Marvin 双臂机器人** 提供 ros2_control 硬件接口与启动、配置，当前为 **双臂一体** 描述：左臂 + 右臂共 14 个关节，通过同一硬件插件与 Marvin SDK 通信。
+**ros2_control_marvin** 为 **Marvin 双臂机器人** 提供 ros2_control 硬件接口与启动、配置，当前为 **双臂一体** 描述：左臂 + 右臂共 14 个关节，通过同一硬件插件与 Marvin SDK 通信。可选集成 **OmniPicker 夹爪**（每臂最多 1 个，共最多 2 个）。
 
 | 项目 | 说明 |
 |------|------|
 | **机器人** | Marvin 双臂，每臂 7 关节，共 **14 个关节**（`Joint1_L`～`Joint7_L`、`Joint1_R`～`Joint7_R`） |
-| **硬件插件** | `MarvinHardware`（通过 **Marvin SDK** 经网络与机械臂控制器通信，需配置 IP） |
+| **夹爪（可选）** | OmniPicker 夹爪，通过 Marvin 末端通信模组（ChData）经 CAN-FD 控制，输入 0～1 开合百分比 |
+| **硬件插件** | `MarvinHardware`（通过 **Marvin SDK** 经网络与机械臂控制器通信，需配置 IP；夹爪通过 **OmniPicker SDK** 经 ChData 通道独立通信） |
 | **配置参数** | `ip`（默认如 `192.168.1.190`）、`joint_vel_ratio`、`joint_acc_ratio`、超时等，在 ros2_control xacro 中配置 |
-| **控制接口** | 位置命令 + 位置/速度状态 |
-| **控制器** | `joint_state_broadcaster`、`forward_position_controller` |
+| **控制接口** | 臂关节：位置命令 + 位置/速度状态；夹爪关节：位置命令（0～1）+ 位置状态 |
+| **控制器** | `joint_state_broadcaster`、`forward_position_controller`；另提供自定义 **IK 控制器** (`IKController`) 用于末端位姿指令的逆运动学跟随 |
 | **描述与可视化** | 复合 URDF 在包内（`marvin_dual.urdf` 等），引用 `asset_description` 中的左右臂模型与 mesh；RViz 使用包内 `description/rviz/marvin_dual.rviz` |
 
 **主要目录与文件：**
 
 - `description/`：双臂复合 URDF/xacro、ros2_control 的 xacro（`marvin_dual_system.ros2_control.xacro`）、RViz 配置与 view/display 启动文件
-- `hardware/`：`MarvinHardware` 的 C++ 实现（解析 IP、调用 Marvin SDK、读/写关节、超时与重连逻辑）
-- `bringup/launch/`：如 `marvin_dual_joint_gui_control.launch.py`（带 GUI 滑条控制）
-- `bringup/config/marvin_dual_controllers.yaml`：控制器管理器与 forward 控制器关节列表
-- `bringup/src/`：如 `gui_joint_state_to_forward_command` 等 GUI 到 forward 命令的桥接工具
+- `hardware/`：`MarvinHardware` 的 C++ 实现（解析 IP、调用 Marvin SDK、读/写关节、超时与重连逻辑），以及 OmniPicker SDK 头文件
+- `bringup/launch/`：如 `marvin_dual_joint_gui_control.launch.py`（带 GUI 滑条控制，支持可选夹爪）
+- `bringup/config/`：`marvin_dual_controllers.yaml`（纯臂关节）和 `marvin_dual_gripper_controllers.yaml`（含夹爪）
+- `bringup/src/`：如 `gui_joint_state_to_forward_command` 等 GUI 到 forward 命令的桥接工具（关节列表可通过 `joint_names` 参数配置）
+- `controller/`：自定义 IK 控制器（`IKController`，基于 Marvin 运动学 SDK 的逆运动学求解）
+- `third_party/`：Marvin SDK (`marvinSDK/`)、运动学 SDK (`marvinKine/`)、运动学配置 (`marvinCfg/`) 与 OmniPicker SDK (`omnipickerSDK/`)
+
+**OmniPicker 夹爪集成原理：**
+
+夹爪通信路径与臂关节独立——臂关节走 `OnClearSet → OnSetJointCmdPos → OnSetSend` 通道，夹爪走 `OnSetChData` 末端通信模组通道（CAN-FD），二者互不干扰。在 ros2_control xacro 中，夹爪作为额外关节声明（`type=omnipicker`），`MarvinHardware` 的 `on_init` 自动识别并在生命周期各阶段管理连接与控制。
 
 **典型用法：**
 
-- 启动双臂控制（含 RViz、joint_state_publisher_gui、滑条控制）：
+- 启动双臂控制（不含夹爪，和原来完全一致）：
   ```bash
   ros2 launch ros2_control_marvin marvin_dual_joint_gui_control.launch.py
+  ```
+- 启动双臂 + 双夹爪控制（GUI 滑条可控制 0～1 夹爪开合）：
+  ```bash
+  ros2 launch ros2_control_marvin marvin_dual_joint_gui_control.launch.py \
+      use_gripper_L:=true use_gripper_R:=true
   ```
 - 仅显示模型：
   ```bash
   ros2 launch ros2_control_marvin view_marvin_dual.launch.py
   ```
+- 启动双臂 IK 控制（通过发布末端位姿，控制器自动进行逆运动学求解并驱动关节）：
+  ```bash
+  ros2 launch ros2_control_marvin marvin_ik_control.launch.py
+  ```
 - 使用前请根据实际设备修改 ros2_control 中的 `ip` 及超时等参数（在 `description/ros2_control/marvin_dual_system.ros2_control.xacro` 或对应 xacro 中）。
+
+**IK 控制器详细说明：**
+
+`IKController` 是一个基于 Marvin 运动学 SDK 的自定义 ros2_control 控制器，接收末端位姿（`geometry_msgs/msg/PoseStamped`）并实时进行逆运动学求解，将结果关节角度下发给硬件接口。
+
+*订阅的 Topic：*
+
+| Topic | 类型 | 说明 |
+|-------|------|------|
+| `~/target_pose_left` | `geometry_msgs/msg/PoseStamped` | 左臂末端目标位姿 |
+| `~/target_pose_right` | `geometry_msgs/msg/PoseStamped` | 右臂末端目标位姿 |
+
+*发布的 Topic（IK 状态反馈）：*
+
+| Topic | 类型 | 说明 |
+|-------|------|------|
+| `~/ik_status_left` | `std_msgs/msg/String` | 左臂 IK 求解状态（仅状态变化时发布） |
+| `~/ik_status_right` | `std_msgs/msg/String` | 右臂 IK 求解状态（仅状态变化时发布） |
+
+状态值包括：`SUCCESS`、`INVALID_QUATERNION`、`OUT_OF_RANGE`、`JOINT_LIMIT_EXCEEDED`、`SINGULARITY`、`SDK_ERROR`、`NO_TARGET`。
+
+*发送末端位姿示例：*
+
+```bash
+# 左臂示例（单位：米，四元数表示姿态）
+ros2 topic pub --once /ik_controller/target_pose_left geometry_msgs/msg/PoseStamped \
+  "{header: {frame_id: 'base_link'}, pose: {position: {x: 0.3, y: 0.1, z: 0.4}, orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}"
+
+# 右臂示例
+ros2 topic pub --once /ik_controller/target_pose_right geometry_msgs/msg/PoseStamped \
+  "{header: {frame_id: 'base_link'}, pose: {position: {x: 0.3, y: -0.1, z: 0.5}, orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}"
+```
+
+*查看 IK 状态反馈：*
+
+```bash
+ros2 topic echo /ik_controller/ik_status_left
+ros2 topic echo /ik_controller/ik_status_right
+```
+
+*注意事项：*
+
+- **坐标系**：`frame_id` 目前仅作标注，SDK 内部以各臂基座为参考坐标系。位置的 x/y/z 单位为**米**（控制器内部自动转换为 SDK 所需的毫米）。
+- **姿态**：使用标准四元数 (x, y, z, w) 表示末端朝向。控制器会自动检查四元数的有效性（分量有限、模长为 1）。`w=1.0, x=y=z=0.0` 表示无旋转（末端保持初始朝向）。
+- **关节限位**：如果 IK 求解结果超出关节限位，控制器会拒绝该指令并保持当前位置，同时在 `~/ik_status_*` 话题上发布 `JOINT_LIMIT_EXCEEDED`。
+- **实时安全**：控制器在 `update()` 循环中避免了堆内存分配，使用枚举和状态变化检测来最小化开销。
+- **单次求解**：每个新的目标位姿仅触发一次 IK 求解，避免重复计算。
+
+**夹爪相关 xacro 参数：**
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `use_gripper_L` | `false` | 启用左臂 OmniPicker 夹爪 |
+| `use_gripper_R` | `false` | 启用右臂 OmniPicker 夹爪 |
+| `gripper_L_arm` | `A` | 左夹爪连接的 Marvin 臂侧（A/B） |
+| `gripper_R_arm` | `B` | 右夹爪连接的 Marvin 臂侧（A/B） |
+| `gripper_L_can_id` | `1` | 左夹爪 CAN 节点 ID |
+| `gripper_R_can_id` | `2` | 右夹爪 CAN 节点 ID |
 
 ---
 
 ## 三、依赖与构建
 
 - **ROS 2**（建议 Humble 或更高）
-- **ros2_control** 相关包：`controller_manager`、`hardware_interface`、`forward_command_controller`、`joint_state_broadcaster` 等
+- **ros2_control** 相关包：`controller_manager`、`hardware_interface`、`controller_interface`、`forward_command_controller`、`joint_state_broadcaster` 等
 - **舞肌手**：`wujihandcpp`（灵巧手底层通信库）
-- **Marvin**：Marvin SDK（头文件/库在包内或通过依赖引入，用于网络控制）
+- **Marvin**：Marvin SDK（头文件/库在包内，用于网络控制）；运动学 SDK（`libKine.so`，用于 IK 控制器的逆运动学求解）
+- **OmniPicker**（可选）：OmniPicker SDK（`libomnipicker.so`，用于夹爪 CAN-FD 通信）
 - **asset_description**：本 workspace 内的描述包，提供 WujiHand 与 Marvin 的 URDF/mesh 等资源
 
 在 workspace 根目录下：

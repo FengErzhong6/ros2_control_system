@@ -13,6 +13,8 @@ set_compiler_options()
 export_windows_symbols()
 
 set(THIS_PACKAGE_INCLUDE_DEPENDS
+  controller_interface
+  geometry_msgs
   hardware_interface
   pluginlib
   rclcpp
@@ -50,6 +52,38 @@ set_target_properties(ros2_control_marvin_hardware PROPERTIES
 pluginlib_export_plugin_description_file(
   hardware_interface
   ros2_control_marvin_plugins.xml
+)
+
+# IK Controller plugin
+add_library(
+  ros2_control_marvin_ik_controller
+  SHARED
+  controller/src/ik_controller.cpp
+)
+target_compile_features(ros2_control_marvin_ik_controller PUBLIC cxx_std_17)
+target_include_directories(ros2_control_marvin_ik_controller PUBLIC
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/controller/include>
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/third_party/marvinKine>
+  $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
+)
+target_link_libraries(ros2_control_marvin_ik_controller PUBLIC
+  controller_interface::controller_interface
+  pluginlib::pluginlib
+  rclcpp::rclcpp
+  rclcpp_lifecycle::rclcpp_lifecycle
+  ${PROJECT_SOURCE_DIR}/third_party/marvinKine/libKine.so
+)
+ament_target_dependencies(ros2_control_marvin_ik_controller PUBLIC
+  geometry_msgs
+  std_msgs
+)
+set_target_properties(ros2_control_marvin_ik_controller PROPERTIES
+  INSTALL_RPATH "$ORIGIN"
+)
+
+pluginlib_export_plugin_description_file(
+  controller_interface
+  ros2_control_marvin_controller_plugins.xml
 )
 
 add_executable(gui_joint_state_to_forward_command
@@ -90,8 +124,18 @@ install(
 )
 
 install(
-  FILES ros2_control_marvin_plugins.xml
+  DIRECTORY controller/include/
+  DESTINATION include/${PROJECT_NAME}
+)
+
+install(
+  FILES ros2_control_marvin_plugins.xml ros2_control_marvin_controller_plugins.xml
   DESTINATION share/${PROJECT_NAME}
+)
+
+install(
+  DIRECTORY third_party/marvinCfg/
+  DESTINATION share/${PROJECT_NAME}/config/marvinCfg
 )
 
 install(
@@ -108,7 +152,12 @@ install(
 )
 
 install(
-  TARGETS ros2_control_marvin_hardware
+  FILES third_party/marvinKine/libKine.so
+  DESTINATION lib
+)
+
+install(
+  TARGETS ros2_control_marvin_hardware ros2_control_marvin_ik_controller
   EXPORT export_${PROJECT_NAME}
   LIBRARY DESTINATION lib
   ARCHIVE DESTINATION lib
