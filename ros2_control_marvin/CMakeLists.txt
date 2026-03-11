@@ -41,6 +41,7 @@ target_link_libraries(ros2_control_marvin_hardware PUBLIC
   rclcpp::rclcpp
   rclcpp_lifecycle::rclcpp_lifecycle
   ${PROJECT_SOURCE_DIR}/third_party/marvinSDK/libMarvinSDK.so
+  ${PROJECT_SOURCE_DIR}/third_party/omnipickerSDK/libomnipicker.so
 )
 set_target_properties(ros2_control_marvin_hardware PROPERTIES
   INSTALL_RPATH "$ORIGIN"
@@ -95,6 +96,14 @@ install(
 
 install(
   FILES third_party/marvinSDK/libMarvinSDK.so
+  DESTINATION lib
+)
+
+install(
+  FILES
+    third_party/omnipickerSDK/libomnipicker.so
+    third_party/omnipickerSDK/libomnipicker.so.0
+    third_party/omnipickerSDK/libomnipicker.so.0.1.0
   DESTINATION lib
 )
 

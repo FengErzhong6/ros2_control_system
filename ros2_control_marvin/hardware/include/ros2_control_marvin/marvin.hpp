@@ -4,6 +4,8 @@
 #include <array>
 #include <chrono>
 
+#include "ros2_control_marvin/omnipicker.hpp"
+
 #include "hardware_interface/handle.hpp"
 #include "hardware_interface/hardware_info.hpp"
 #include "hardware_interface/system_interface.hpp"
@@ -62,6 +64,17 @@ private:
     int consecutive_write_failures_{0};
     int total_write_failures_{0};
     static constexpr int kMaxWriteFailures = 10;
+
+    // ---- OmniPicker gripper support (optional) ----
+    static constexpr size_t kMaxGrippers = 2;
+    struct GripperSlot {
+        omnipicker::IOmniPicker* device = nullptr;
+        omnipicker::ArmSide arm_side = omnipicker::ArmSide::kB;
+        uint32_t can_node_id = 0x01;
+        size_t joint_index = 0;
+    };
+    size_t gripper_count_{0};
+    std::array<GripperSlot, kMaxGrippers> grippers_{};
 };
 
 }  // namespace ros2_control_marvin

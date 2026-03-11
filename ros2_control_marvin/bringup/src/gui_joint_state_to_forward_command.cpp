@@ -6,7 +6,7 @@
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 
-static const std::vector<std::string> JOINT_ORDER = {
+static const std::vector<std::string> DEFAULT_JOINTS = {
     "Joint1_L", "Joint2_L", "Joint3_L", "Joint4_L",
     "Joint5_L", "Joint6_L", "Joint7_L",
     "Joint1_R", "Joint2_R", "Joint3_R", "Joint4_R",
@@ -16,9 +16,12 @@ static const std::vector<std::string> JOINT_ORDER = {
 class GuiJointStateToForwardCommand : public rclcpp::Node {
 public:
     GuiJointStateToForwardCommand()
-        : Node("gui_joint_state_to_forward_command"),
-          last_cmd_(JOINT_ORDER.size(), 0.0)
+        : Node("gui_joint_state_to_forward_command")
     {
+        joint_order_ = declare_parameter<std::vector<std::string>>(
+            "joint_names", DEFAULT_JOINTS);
+        last_cmd_.assign(joint_order_.size(), 0.0);
+
         auto input_topic = declare_parameter("input_topic", std::string("gui_joint_states"));
         auto output_topic = declare_parameter(
             "output_topic", std::string("/forward_position_controller/commands"));
@@ -35,7 +38,8 @@ public:
             initial_published_ = true;
         });
 
-        RCLCPP_INFO(get_logger(), "Bridging %s -> %s", input_topic.c_str(), output_topic.c_str());
+        RCLCPP_INFO(get_logger(), "Bridging %s -> %s (%zu joints)",
+                    input_topic.c_str(), output_topic.c_str(), joint_order_.size());
     }
 
 private:
@@ -53,9 +57,9 @@ private:
             name_to_idx[msg->name[i]] = i;
         }
 
-        std::vector<double> cmd(JOINT_ORDER.size(), 0.0);
-        for (size_t i = 0; i < JOINT_ORDER.size(); ++i) {
-            auto it = name_to_idx.find(JOINT_ORDER[i]);
+        std::vector<double> cmd(joint_order_.size(), 0.0);
+        for (size_t i = 0; i < joint_order_.size(); ++i) {
+            auto it = name_to_idx.find(joint_order_[i]);
             if (it != name_to_idx.end() && it->second < msg->position.size()) {
                 cmd[i] = msg->position[it->second];
             } else {
@@ -70,6 +74,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr pub_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr sub_;
     rclcpp::TimerBase::SharedPtr timer_;
+    std::vector<std::string> joint_order_;
     std::vector<double> last_cmd_;
     bool initial_published_{false};
 };

@@ -76,6 +76,14 @@ namespace ros2_control_marvin {
 
 MarvinHardware::~MarvinHardware()
 {
+    for (size_t g = 0; g < gripper_count_; ++g) {
+        if (grippers_[g].device) {
+            if (grippers_[g].device->is_connected())
+                grippers_[g].device->disconnect();
+            omnipicker_destroy(grippers_[g].device);
+            grippers_[g].device = nullptr;
+        }
+    }
     if (connected_) {
         OnRelease();
         connected_ = false;
@@ -92,9 +100,10 @@ hardware_interface::CallbackReturn MarvinHardware::on_init(
         return hardware_interface::CallbackReturn::ERROR;
     }
 
-    if (info_.joints.size() != kTotalJoints) {
-        RCLCPP_FATAL(get_logger(), "Expected %zu joints, got %zu.",
-                     kTotalJoints, info_.joints.size());
+    const size_t n_joints = info_.joints.size();
+    if (n_joints < kTotalJoints || n_joints > kTotalJoints + kMaxGrippers) {
+        RCLCPP_FATAL(get_logger(), "Expected %zu~%zu joints, got %zu.",
+                     kTotalJoints, kTotalJoints + kMaxGrippers, n_joints);
         return hardware_interface::CallbackReturn::ERROR;
     }
 
@@ -145,6 +154,53 @@ hardware_interface::CallbackReturn MarvinHardware::on_init(
         RCLCPP_WARN(get_logger(), "Velocity state declared on some joints only; disabled.");
     if (any_eff && !all_eff)
         RCLCPP_WARN(get_logger(), "Effort state declared on some joints only; disabled.");
+
+    // Detect optional OmniPicker gripper joints (indices kTotalJoints+)
+    gripper_count_ = 0;
+    for (size_t i = kTotalJoints; i < n_joints; ++i) {
+        const auto &j = info_.joints[i];
+        const auto &jp = j.parameters;
+
+        auto it_type = jp.find("type");
+        if (it_type == jp.end() || it_type->second != "omnipicker") {
+            RCLCPP_FATAL(get_logger(),
+                "Extra joint '%s' (index %zu) must have param type=omnipicker.",
+                j.name.c_str(), i);
+            return hardware_interface::CallbackReturn::ERROR;
+        }
+
+        bool has_pos_cmd = false, has_pos_state = false;
+        for (const auto &ci : j.command_interfaces)
+            if (ci.name == hardware_interface::HW_IF_POSITION) has_pos_cmd = true;
+        for (const auto &si : j.state_interfaces)
+            if (si.name == hardware_interface::HW_IF_POSITION) has_pos_state = true;
+        if (!has_pos_cmd || !has_pos_state) {
+            RCLCPP_FATAL(get_logger(),
+                "Gripper joint '%s' requires position command & state interfaces.",
+                j.name.c_str());
+            return hardware_interface::CallbackReturn::ERROR;
+        }
+
+        auto &slot = grippers_[gripper_count_];
+        slot.joint_index = i;
+
+        auto it_arm = jp.find("arm_side");
+        slot.arm_side = (it_arm != jp.end() &&
+                         (it_arm->second == "A" || it_arm->second == "a"))
+                        ? omnipicker::ArmSide::kA
+                        : omnipicker::ArmSide::kB;
+
+        auto it_can = jp.find("can_node_id");
+        slot.can_node_id = (it_can != jp.end())
+                           ? static_cast<uint32_t>(std::atoi(it_can->second.c_str()))
+                           : 1u;
+
+        RCLCPP_INFO(get_logger(), "Gripper joint '%s': arm=%s, CAN node=%u.",
+                     j.name.c_str(),
+                     slot.arm_side == omnipicker::ArmSide::kA ? "A" : "B",
+                     slot.can_node_id);
+        ++gripper_count_;
+    }
 
     return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -213,8 +269,33 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
         }
     }
 
-    RCLCPP_INFO(get_logger(), "Configured dual-arm system, vel=%d%%, acc=%d%%.",
-                joint_vel_ratio_, joint_acc_ratio_);
+    // Connect OmniPicker grippers (Marvin link already established, manage_link=false)
+    for (size_t g = 0; g < gripper_count_; ++g) {
+        auto &slot = grippers_[g];
+        const auto &jn = info_.joints[slot.joint_index].name;
+
+        slot.device = omnipicker_create();
+        auto err = slot.device->connect(slot.arm_side, slot.can_node_id,
+                                        ip_str.c_str(), false);
+        if (err != omnipicker::ErrorCode::kOK) {
+            RCLCPP_ERROR(get_logger(), "Gripper '%s' connect failed: %s.",
+                         jn.c_str(), omnipicker::error_to_string(err));
+            for (size_t k = 0; k <= g; ++k) {
+                if (grippers_[k].device) {
+                    omnipicker_destroy(grippers_[k].device);
+                    grippers_[k].device = nullptr;
+                }
+            }
+            return hardware_interface::CallbackReturn::ERROR;
+        }
+        RCLCPP_INFO(get_logger(), "Gripper '%s' connected (arm=%s, CAN=%u).",
+                     jn.c_str(),
+                     slot.arm_side == omnipicker::ArmSide::kA ? "A" : "B",
+                     slot.can_node_id);
+    }
+
+    RCLCPP_INFO(get_logger(), "Configured dual-arm system (vel=%d%%, acc=%d%%, grippers=%zu).",
+                joint_vel_ratio_, joint_acc_ratio_, gripper_count_);
     return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -335,11 +416,33 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
         last_frame_time_[arm] = Clock::now();
     }
 
+    // Seed gripper state & command (query_states blocks briefly, OK during activation)
+    for (size_t g = 0; g < gripper_count_; ++g) {
+        auto &slot = grippers_[g];
+        const auto &jn = info_.joints[slot.joint_index].name;
+
+        omnipicker::GripperStatus gst;
+        auto err = slot.device->query_states(gst);
+        double init_pos = 0.0;
+        if (err == omnipicker::ErrorCode::kOK && gst.valid) {
+            init_pos = static_cast<double>(gst.position) / 255.0;
+        } else {
+            RCLCPP_WARN(get_logger(),
+                "Gripper '%s' initial query returned %s; defaulting to 0.0.",
+                jn.c_str(), omnipicker::error_to_string(err));
+        }
+        set_state(pos_if(jn), init_pos);
+        set_command(pos_if(jn), init_pos);
+        RCLCPP_INFO(get_logger(), "Gripper '%s' ready (pos=%.1f%%).",
+                     jn.c_str(), init_pos * 100.0);
+    }
+
     consecutive_write_failures_ = 0;
     total_write_failures_ = 0;
     activated_ = true;
 
-    RCLCPP_INFO(get_logger(), "Dual-arm system activated (position mode).");
+    RCLCPP_INFO(get_logger(), "System activated (position mode, grippers=%zu).",
+                gripper_count_);
     return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -358,6 +461,9 @@ hardware_interface::CallbackReturn MarvinHardware::on_deactivate(
         OnSetSend();
     }
 
+    if (gripper_count_ > 0)
+        RCLCPP_INFO(get_logger(), "%zu gripper(s) holding last commanded position.",
+                     gripper_count_);
     RCLCPP_INFO(get_logger(), "Dual-arm system deactivated (arms set to idle).");
     return hardware_interface::CallbackReturn::SUCCESS;
 }
@@ -369,6 +475,19 @@ hardware_interface::CallbackReturn MarvinHardware::on_cleanup(
     const rclcpp_lifecycle::State &)
 {
     activated_ = false;
+
+    // Disconnect grippers BEFORE releasing Marvin link (they need it to send close cmd)
+    for (size_t g = 0; g < gripper_count_; ++g) {
+        if (grippers_[g].device) {
+            const auto &jn = info_.joints[grippers_[g].joint_index].name;
+            if (grippers_[g].device->is_connected())
+                grippers_[g].device->disconnect();
+            omnipicker_destroy(grippers_[g].device);
+            grippers_[g].device = nullptr;
+            RCLCPP_INFO(get_logger(), "Gripper '%s' released.", jn.c_str());
+        }
+    }
+
     if (connected_) {
         OnRelease();
         connected_ = false;
@@ -427,6 +546,14 @@ hardware_interface::return_type MarvinHardware::read(
         }
     }
 
+    // Read gripper cached states (updated asynchronously via write→move→try_read_response)
+    for (size_t g = 0; g < gripper_count_; ++g) {
+        const auto &slot = grippers_[g];
+        const auto &jn = info_.joints[slot.joint_index].name;
+        set_state(pos_if(jn),
+                  static_cast<double>(slot.device->get_position_percent()));
+    }
+
     return hardware_interface::return_type::OK;
 }
 
@@ -482,6 +609,19 @@ hardware_interface::return_type MarvinHardware::write(
         return hardware_interface::return_type::OK;
     }
     consecutive_write_failures_ = 0;
+
+    // Send gripper commands (independent ChData channel, no conflict with arm commands)
+    for (size_t g = 0; g < gripper_count_; ++g) {
+        const auto &slot = grippers_[g];
+        const auto &jn = info_.joints[slot.joint_index].name;
+        const double cmd = get_command<double>(pos_if(jn));
+        if (!std::isfinite(cmd)) {
+            RCLCPP_ERROR(get_logger(), "Non-finite command on gripper '%s'.", jn.c_str());
+            return hardware_interface::return_type::ERROR;
+        }
+        slot.device->set_position_percent(
+            static_cast<float>(std::clamp(cmd, 0.0, 1.0)));
+    }
 
     return hardware_interface::return_type::OK;
 }

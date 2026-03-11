@@ -1,5 +1,5 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 
@@ -9,54 +9,87 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    declared_arguments = [
+    return LaunchDescription([
         DeclareLaunchArgument(
-            "gui",
-            default_value="true",
+            "gui", default_value="true",
             description="Start RViz2 automatically.",
         ),
         DeclareLaunchArgument(
-            "description_package",
-            default_value="ros2_control_marvin",
+            "description_package", default_value="ros2_control_marvin",
             description="Package with the composite URDF/XACRO file.",
         ),
         DeclareLaunchArgument(
-            "description_file",
-            default_value="description/urdf/marvin_dual.urdf",
+            "description_file", default_value="description/urdf/marvin_dual.urdf",
             description="Composite URDF/XACRO file to load.",
         ),
         DeclareLaunchArgument(
-            "controllers_file",
-            default_value="bringup/config/marvin_dual_controllers.yaml",
-            description="YAML with controller_manager and controller parameters.",
+            "controllers_file", default_value="",
+            description="Controller YAML (auto-selected when empty).",
         ),
         DeclareLaunchArgument(
-            "use_jsp_gui",
-            default_value="true",
+            "use_jsp_gui", default_value="true",
             description="Start joint_state_publisher_gui for slider command input.",
         ),
-    ]
+        DeclareLaunchArgument(
+            "use_gripper_L", default_value="false",
+            description="Enable OmniPicker gripper on left arm.",
+        ),
+        DeclareLaunchArgument(
+            "use_gripper_R", default_value="false",
+            description="Enable OmniPicker gripper on right arm.",
+        ),
+        OpaqueFunction(function=launch_setup),
+    ])
 
+
+def launch_setup(context):
     gui = LaunchConfiguration("gui")
-    description_package = LaunchConfiguration("description_package")
-    description_file = LaunchConfiguration("description_file")
-    controllers_file = LaunchConfiguration("controllers_file")
     use_jsp_gui = LaunchConfiguration("use_jsp_gui")
 
-    robot_description_content = Command(
-        [
-            PathJoinSubstitution([FindExecutable(name="xacro")]),
-            " ",
-            PathJoinSubstitution([FindPackageShare(description_package), description_file]),
-        ]
-    )
+    pkg = LaunchConfiguration("description_package").perform(context)
+    desc_file = LaunchConfiguration("description_file").perform(context)
+    ctrl_file_arg = LaunchConfiguration("controllers_file").perform(context)
+    grip_L = LaunchConfiguration("use_gripper_L").perform(context).lower() == "true"
+    grip_R = LaunchConfiguration("use_gripper_R").perform(context).lower() == "true"
+
+    # ── Robot description (xacro) ─────────────────────────────────────────
+    xacro_cmd = [
+        PathJoinSubstitution([FindExecutable(name="xacro")]),
+        " ",
+        PathJoinSubstitution([FindPackageShare(pkg), desc_file]),
+    ]
+    if grip_L:
+        xacro_cmd.append(" use_gripper_L:=true")
+    if grip_R:
+        xacro_cmd.append(" use_gripper_R:=true")
+
     robot_description = {
-        "robot_description": ParameterValue(robot_description_content, value_type=str)
+        "robot_description": ParameterValue(Command(xacro_cmd), value_type=str)
     }
 
+    # ── Controller config (auto-select if not overridden) ─────────────────
+    if ctrl_file_arg:
+        ctrl_file = ctrl_file_arg
+    elif grip_L or grip_R:
+        ctrl_file = "bringup/config/marvin_dual_gripper_controllers.yaml"
+    else:
+        ctrl_file = "bringup/config/marvin_dual_controllers.yaml"
+
     controllers_yaml = PathJoinSubstitution(
-        [FindPackageShare("ros2_control_marvin"), controllers_file]
+        [FindPackageShare("ros2_control_marvin"), ctrl_file]
     )
+
+    # ── Joint names for bridge (arm + optional grippers) ──────────────────
+    joint_names = [
+        "Joint1_L", "Joint2_L", "Joint3_L", "Joint4_L",
+        "Joint5_L", "Joint6_L", "Joint7_L",
+        "Joint1_R", "Joint2_R", "Joint3_R", "Joint4_R",
+        "Joint5_R", "Joint6_R", "Joint7_R",
+    ]
+    if grip_L:
+        joint_names.append("gripper_L")
+    if grip_R:
+        joint_names.append("gripper_R")
 
     # ── Core ──────────────────────────────────────────────────────────────
 
@@ -108,6 +141,7 @@ def generate_launch_description():
         parameters=[
             {"input_topic": "gui_joint_states"},
             {"output_topic": "/forward_position_controller/commands"},
+            {"joint_names": joint_names},
         ],
         condition=IfCondition(use_jsp_gui),
     )
@@ -150,16 +184,13 @@ def generate_launch_description():
 
     # ── Assemble ──────────────────────────────────────────────────────────
 
-    return LaunchDescription(
-        declared_arguments
-        + [
-            ros2_control_node,
-            robot_state_publisher_node,
-            rviz_node,
-            joint_state_publisher_gui_node,
-            gui_to_forward_bridge,
-            joint_state_broadcaster_spawner,
-            forward_position_controller_spawner,
-            activate_forward_controller,
-        ]
-    )
+    return [
+        ros2_control_node,
+        robot_state_publisher_node,
+        rviz_node,
+        joint_state_publisher_gui_node,
+        gui_to_forward_bridge,
+        joint_state_broadcaster_spawner,
+        forward_position_controller_spawner,
+        activate_forward_controller,
+    ]

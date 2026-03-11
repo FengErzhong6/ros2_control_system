@@ -16,6 +16,8 @@
   <xacro:arg name="left_rpy" default="0 0 0" />
   <xacro:arg name="right_xyz" default="0 -0.4375 0" />
   <xacro:arg name="right_rpy" default="0 0 0" />
+  <xacro:arg name="use_gripper_L" default="false" />
+  <xacro:arg name="use_gripper_R" default="false" />
 
   <link name="world" />
 
@@ -39,6 +41,31 @@
   <!-- ros2_control description (single hardware component for both arms) -->
   <xacro:include filename="$(find ros2_control_marvin)/description/ros2_control/marvin_dual_system.ros2_control.xacro" />
 
-  <xacro:marvin_dual_ros2_control name="marvin_dual" />
+  <!-- Virtual gripper joints (for joint_state_publisher_gui sliders, range 0~1) -->
+  <xacro:if value="$(arg use_gripper_L)">
+    <link name="gripper_L_link"/>
+    <joint name="gripper_L" type="revolute">
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <parent link="Link7_L"/>
+      <child link="gripper_L_link"/>
+      <axis xyz="0 0 1"/>
+      <limit lower="0.0" upper="1.0" effort="0" velocity="1.0"/>
+    </joint>
+  </xacro:if>
+
+  <xacro:if value="$(arg use_gripper_R)">
+    <link name="gripper_R_link"/>
+    <joint name="gripper_R" type="revolute">
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <parent link="Link7_R"/>
+      <child link="gripper_R_link"/>
+      <axis xyz="0 0 1"/>
+      <limit lower="0.0" upper="1.0" effort="0" velocity="1.0"/>
+    </joint>
+  </xacro:if>
+
+  <xacro:marvin_dual_ros2_control name="marvin_dual"
+    use_gripper_L="$(arg use_gripper_L)"
+    use_gripper_R="$(arg use_gripper_R)" />
 
 </robot>
