@@ -205,6 +205,89 @@ void IKController::publishIKStatus(size_t arm_index, IKResult result)
 }
 
 // ---------------------------------------------------------------------------
+// 4×4 homogeneous matrix → PoseStamped (mm → m, rotation matrix → quaternion)
+// ---------------------------------------------------------------------------
+void IKController::matrix4ToPose(const Matrix4 mat,
+                                  geometry_msgs::msg::PoseStamped &pose) const
+{
+    pose.header.frame_id = "base_link";
+    pose.header.stamp = get_node()->get_clock()->now();
+
+    pose.pose.position.x = mat[0][3] * kMm2M;
+    pose.pose.position.y = mat[1][3] * kMm2M;
+    pose.pose.position.z = mat[2][3] * kMm2M;
+
+    // Robust rotation-matrix → quaternion (Shepperd's method)
+    const double trace = mat[0][0] + mat[1][1] + mat[2][2];
+    double qw, qx, qy, qz;
+
+    if (trace > 0.0) {
+        double s = 0.5 / std::sqrt(trace + 1.0);
+        qw = 0.25 / s;
+        qx = (mat[2][1] - mat[1][2]) * s;
+        qy = (mat[0][2] - mat[2][0]) * s;
+        qz = (mat[1][0] - mat[0][1]) * s;
+    } else if (mat[0][0] > mat[1][1] && mat[0][0] > mat[2][2]) {
+        double s = 2.0 * std::sqrt(1.0 + mat[0][0] - mat[1][1] - mat[2][2]);
+        qw = (mat[2][1] - mat[1][2]) / s;
+        qx = 0.25 * s;
+        qy = (mat[0][1] + mat[1][0]) / s;
+        qz = (mat[0][2] + mat[2][0]) / s;
+    } else if (mat[1][1] > mat[2][2]) {
+        double s = 2.0 * std::sqrt(1.0 + mat[1][1] - mat[0][0] - mat[2][2]);
+        qw = (mat[0][2] - mat[2][0]) / s;
+        qx = (mat[0][1] + mat[1][0]) / s;
+        qy = 0.25 * s;
+        qz = (mat[1][2] + mat[2][1]) / s;
+    } else {
+        double s = 2.0 * std::sqrt(1.0 + mat[2][2] - mat[0][0] - mat[1][1]);
+        qw = (mat[1][0] - mat[0][1]) / s;
+        qx = (mat[0][2] + mat[2][0]) / s;
+        qy = (mat[1][2] + mat[2][1]) / s;
+        qz = 0.25 * s;
+    }
+
+    double norm = std::sqrt(qw * qw + qx * qx + qy * qy + qz * qz);
+    pose.pose.orientation.x = qx / norm;
+    pose.pose.orientation.y = qy / norm;
+    pose.pose.orientation.z = qz / norm;
+    pose.pose.orientation.w = qw / norm;
+}
+
+// ---------------------------------------------------------------------------
+// Compute FK for both arms from last_joint_deg_ and publish current poses
+// ---------------------------------------------------------------------------
+void IKController::computeAndPublishFK()
+{
+    const auto logger = get_node()->get_logger();
+    static const char *arm_labels[] = {"LEFT", "RIGHT"};
+
+    for (size_t arm = 0; arm < kArmCount; ++arm) {
+        FX_DOUBLE joints[kJointsPerArm];
+        for (size_t j = 0; j < kJointsPerArm; ++j) {
+            joints[j] = last_joint_deg_[arm][j];
+        }
+
+        Matrix4 tcp;
+        if (!FX_Robot_Kine_FK(static_cast<FX_INT32L>(arm), joints, tcp)) {
+            RCLCPP_WARN(logger, "FK failed for arm %s", arm_labels[arm]);
+            continue;
+        }
+
+        geometry_msgs::msg::PoseStamped pose;
+        matrix4ToPose(tcp, pose);
+        pub_current_pose_[arm]->publish(pose);
+
+        RCLCPP_INFO(logger,
+            "Arm %s FK pose: pos=(%.4f, %.4f, %.4f) m  quat=(%.4f, %.4f, %.4f, %.4f)",
+            arm_labels[arm],
+            pose.pose.position.x, pose.pose.position.y, pose.pose.position.z,
+            pose.pose.orientation.x, pose.pose.orientation.y,
+            pose.pose.orientation.z, pose.pose.orientation.w);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Inverse kinematics solve for a single arm
 // ---------------------------------------------------------------------------
 IKController::IKResult IKController::solveIK(
@@ -316,6 +399,13 @@ IKController::on_configure(const rclcpp_lifecycle::State &)
     pub_ik_status_[1] = get_node()->create_publisher<std_msgs::msg::String>(
         "~/ik_status_right", rclcpp::SystemDefaultsQoS());
 
+    // FK current-pose publishers (transient_local so late joiners get the last value)
+    auto fk_qos = rclcpp::QoS(1).transient_local();
+    pub_current_pose_[0] = get_node()->create_publisher<geometry_msgs::msg::PoseStamped>(
+        "~/current_pose_left", fk_qos);
+    pub_current_pose_[1] = get_node()->create_publisher<geometry_msgs::msg::PoseStamped>(
+        "~/current_pose_right", fk_qos);
+
     // Subscribers for target poses
     sub_target_left_ = get_node()->create_subscription<geometry_msgs::msg::PoseStamped>(
         "~/target_pose_left", rclcpp::SystemDefaultsQoS(),
@@ -380,6 +470,9 @@ IKController::on_activate(const rclcpp_lifecycle::State &)
         std::lock_guard<std::mutex> lk(t.mtx);
         t.has_target = false;
     }
+
+    // Compute FK from current joint state and publish (initial end-effector pose)
+    computeAndPublishFK();
 
     RCLCPP_INFO(logger, "IKController activated.");
     return CallbackReturn::SUCCESS;

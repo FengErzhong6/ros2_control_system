@@ -80,6 +80,10 @@ private:
     // IK status feedback publishers (one per arm)
     std::array<rclcpp::Publisher<std_msgs::msg::String>::SharedPtr, kArmCount> pub_ik_status_;
 
+    // FK-derived current pose publishers (transient_local, published on activate)
+    std::array<rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr, kArmCount>
+        pub_current_pose_;
+
     // IK solve parameters
     std::array<FX_InvKineSolvePara, kArmCount> ik_params_{};
 
@@ -103,6 +107,8 @@ private:
     IKResult solveIK(size_t arm_index, const geometry_msgs::msg::PoseStamped &target_pose,
                      double (&result_joints_rad)[kJointsPerArm]);
     void poseToMatrix4(const geometry_msgs::msg::PoseStamped &pose, Matrix4 mat);
+    void matrix4ToPose(const Matrix4 mat, geometry_msgs::msg::PoseStamped &pose) const;
+    void computeAndPublishFK();
     bool isQuaternionValid(const geometry_msgs::msg::Quaternion &q) const;
     void publishIKStatus(size_t arm_index, IKResult result);
     static const char *ikResultToString(IKResult result);

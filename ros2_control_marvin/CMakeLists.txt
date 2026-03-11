@@ -96,6 +96,17 @@ ament_target_dependencies(gui_joint_state_to_forward_command
   std_msgs
 )
 
+add_executable(joy_to_pose
+  bringup/src/joy_to_pose.cpp
+)
+target_compile_features(joy_to_pose PUBLIC cxx_std_17)
+ament_target_dependencies(joy_to_pose
+  rclcpp
+  geometry_msgs
+  sensor_msgs
+  std_msgs
+)
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights
@@ -165,7 +176,7 @@ install(
 )
 
 install(
-  TARGETS gui_joint_state_to_forward_command
+  TARGETS gui_joint_state_to_forward_command joy_to_pose
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 
