@@ -51,6 +51,10 @@ private:
     int connect_timeout_ms_{1500};
     int state_timeout_ms_{5000};
     int no_frame_timeout_ms_{800};
+    int home_timeout_ms_{30000};
+
+    bool has_home_position_{false};
+    std::array<std::array<double, kJointsPerArm>, kArmCount> home_position_deg_{};
 
     std::array<int, kArmCount> last_frame_serial_{};
     std::array<std::chrono::steady_clock::time_point, kArmCount> last_frame_time_{};

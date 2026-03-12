@@ -12,10 +12,10 @@
       right_xyz, right_rpy: mount pose of Base_R w.r.t world
   -->
 
-  <xacro:arg name="left_xyz" default="0 0.4375 0" />
-  <xacro:arg name="left_rpy" default="0 0 0" />
-  <xacro:arg name="right_xyz" default="0 -0.4375 0" />
-  <xacro:arg name="right_rpy" default="0 0 0" />
+  <xacro:arg name="left_xyz" default="0 0.037 0.3618964" />
+  <xacro:arg name="left_rpy" default="-1.5707963 0 0" />
+  <xacro:arg name="right_xyz" default="0 -0.037 0.3618964" />
+  <xacro:arg name="right_rpy" default="1.5707963 0 0" />
   <xacro:arg name="use_gripper_L" default="false" />
   <xacro:arg name="use_gripper_R" default="false" />
 

@@ -16,6 +16,8 @@
         <param name="state_timeout_ms">5000</param>
         <param name="no_frame_timeout_ms">800</param>
         <param name="sdk_log_enabled">0</param>
+        <param name="home_position_L">1.16 -1.28 -1.5707963 -1.25 0 0 0</param>
+        <param name="home_position_R">-1.16 -1.28 1.5707963 -1.25 0 0 0</param>
       </hardware>
 
       <!-- Left arm (SDK arm A, index 0) — joints 0..6 -->

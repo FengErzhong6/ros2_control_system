@@ -294,6 +294,38 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
                      slot.can_node_id);
     }
 
+    // Parse home position (radians, space-separated, 7 values per arm)
+    auto home_l_str = param_str(p, "home_position_L", "");
+    auto home_r_str = param_str(p, "home_position_R", "");
+
+    if (!home_l_str.empty() && !home_r_str.empty()) {
+        double vals[kJointsPerArm];
+        if (std::sscanf(home_l_str.c_str(), "%lf %lf %lf %lf %lf %lf %lf",
+                        &vals[0], &vals[1], &vals[2], &vals[3],
+                        &vals[4], &vals[5], &vals[6]) == 7) {
+            for (size_t j = 0; j < kJointsPerArm; ++j)
+                home_position_deg_[0][j] = vals[j] * kRad2Deg;
+        } else {
+            RCLCPP_ERROR(get_logger(), "Failed to parse 'home_position_L' (expected 7 values).");
+            return hardware_interface::CallbackReturn::ERROR;
+        }
+
+        if (std::sscanf(home_r_str.c_str(), "%lf %lf %lf %lf %lf %lf %lf",
+                        &vals[0], &vals[1], &vals[2], &vals[3],
+                        &vals[4], &vals[5], &vals[6]) == 7) {
+            for (size_t j = 0; j < kJointsPerArm; ++j)
+                home_position_deg_[1][j] = vals[j] * kRad2Deg;
+        } else {
+            RCLCPP_ERROR(get_logger(), "Failed to parse 'home_position_R' (expected 7 values).");
+            return hardware_interface::CallbackReturn::ERROR;
+        }
+
+        has_home_position_ = true;
+        home_timeout_ms_ = param_int(p, "home_timeout_ms", 30000, 1000, 120000);
+        RCLCPP_INFO(get_logger(),
+            "Home position configured (timeout=%d ms).", home_timeout_ms_);
+    }
+
     RCLCPP_INFO(get_logger(), "Configured dual-arm system (vel=%d%%, acc=%d%%, grippers=%zu).",
                 joint_vel_ratio_, joint_acc_ratio_, gripper_count_);
     return hardware_interface::CallbackReturn::SUCCESS;
@@ -393,6 +425,70 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
         OnSetJointCmdPos_A(hold_a);
         OnSetJointCmdPos_B(hold_b);
         OnSetSend();
+    }
+
+    // Move to home position if configured (joints 7→1 for safety)
+    if (has_home_position_) {
+        RCLCPP_INFO(get_logger(), "Moving to home position (Joint7 → Joint1) ...");
+        constexpr double kHomeTolDeg = 0.5;
+
+        double cmd_a[kJointsPerArm], cmd_b[kJointsPerArm];
+        for (size_t j = 0; j < kJointsPerArm; ++j) {
+            cmd_a[j] = static_cast<double>(dcss.m_Out[0].m_FB_Joint_PosE[j]);
+            cmd_b[j] = static_cast<double>(dcss.m_Out[1].m_FB_Joint_PosE[j]);
+        }
+
+        const auto home_deadline =
+            Clock::now() + std::chrono::milliseconds(home_timeout_ms_);
+        bool timed_out = false;
+
+        for (int jt = static_cast<int>(kJointsPerArm) - 1;
+             jt >= 0 && !timed_out; --jt) {
+            cmd_a[jt] = home_position_deg_[0][jt];
+            cmd_b[jt] = home_position_deg_[1][jt];
+
+            RCLCPP_INFO(get_logger(), "Homing Joint%d ...", jt + 1);
+
+            while (true) {
+                OnClearSet();
+                OnSetJointCmdPos_A(cmd_a);
+                OnSetJointCmdPos_B(cmd_b);
+                OnSetSend();
+
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+                if (OnGetBuf(&dcss)) {
+                    for (size_t arm = 0; arm < kArmCount; ++arm) {
+                        if (static_cast<ArmState>(dcss.m_State[arm].m_CurState)
+                            == ARM_STATE_ERROR) {
+                            RCLCPP_ERROR(get_logger(),
+                                "Arm %zu error during homing at Joint%d (err=%d).",
+                                arm, jt + 1, dcss.m_State[arm].m_ERRCode);
+                            return hardware_interface::CallbackReturn::ERROR;
+                        }
+                    }
+
+                    double fb_a = static_cast<double>(
+                        dcss.m_Out[0].m_FB_Joint_PosE[jt]);
+                    double fb_b = static_cast<double>(
+                        dcss.m_Out[1].m_FB_Joint_PosE[jt]);
+
+                    if (std::abs(fb_a - home_position_deg_[0][jt]) <= kHomeTolDeg &&
+                        std::abs(fb_b - home_position_deg_[1][jt]) <= kHomeTolDeg) {
+                        break;
+                    }
+                }
+
+                if (Clock::now() > home_deadline) {
+                    RCLCPP_WARN(get_logger(),
+                        "Home position timeout (%d ms) at Joint%d, continuing.",
+                        home_timeout_ms_, jt + 1);
+                    timed_out = true;
+                    break;
+                }
+            }
+        }
+        RCLCPP_INFO(get_logger(), "Home position sequence complete.");
     }
 
     // Seed ros2_control state & command interfaces from current feedback.

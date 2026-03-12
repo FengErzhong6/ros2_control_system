@@ -1,3 +1,4 @@
+#include <cmath>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -20,29 +21,48 @@ public:
     {
         joint_order_ = declare_parameter<std::vector<std::string>>(
             "joint_names", DEFAULT_JOINTS);
-        last_cmd_.assign(joint_order_.size(), 0.0);
+
+        const auto n = joint_order_.size();
+        last_cmd_.assign(n, 0.0);
+        real_pos_.assign(n, 0.0);
+        gui_initial_.assign(n, 0.0);
 
         auto input_topic = declare_parameter("input_topic", std::string("gui_joint_states"));
         auto output_topic = declare_parameter(
             "output_topic", std::string("/forward_position_controller/commands"));
 
         pub_ = create_publisher<std_msgs::msg::Float64MultiArray>(output_topic, 10);
-        sub_ = create_subscription<sensor_msgs::msg::JointState>(
-            input_topic, 10,
-            [this](const sensor_msgs::msg::JointState::SharedPtr msg) { on_js(msg); });
 
-        // Publish initial all-zeros so the forward controller has a defined target.
-        timer_ = create_wall_timer(std::chrono::milliseconds(200), [this]() {
-            if (initial_published_) return;
-            publish_cmd(last_cmd_);
-            initial_published_ = true;
-        });
+        real_sub_ = create_subscription<sensor_msgs::msg::JointState>(
+            "joint_states", rclcpp::SensorDataQoS(),
+            [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
+                on_real_js(msg);
+            });
+
+        gui_sub_ = create_subscription<sensor_msgs::msg::JointState>(
+            input_topic, 10,
+            [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
+                on_gui_js(msg);
+            });
 
         RCLCPP_INFO(get_logger(), "Bridging %s -> %s (%zu joints)",
-                    input_topic.c_str(), output_topic.c_str(), joint_order_.size());
+                    input_topic.c_str(), output_topic.c_str(), n);
     }
 
 private:
+    void extract_positions(const sensor_msgs::msg::JointState::SharedPtr &msg,
+                           std::vector<double> &out)
+    {
+        std::unordered_map<std::string, size_t> name_to_idx;
+        for (size_t i = 0; i < msg->name.size(); ++i)
+            name_to_idx[msg->name[i]] = i;
+        for (size_t i = 0; i < joint_order_.size(); ++i) {
+            auto it = name_to_idx.find(joint_order_[i]);
+            if (it != name_to_idx.end() && it->second < msg->position.size())
+                out[i] = msg->position[it->second];
+        }
+    }
+
     void publish_cmd(const std::vector<double> &cmd)
     {
         std_msgs::msg::Float64MultiArray msg;
@@ -50,33 +70,51 @@ private:
         pub_->publish(msg);
     }
 
-    void on_js(const sensor_msgs::msg::JointState::SharedPtr msg)
+    void on_real_js(const sensor_msgs::msg::JointState::SharedPtr msg)
     {
-        std::unordered_map<std::string, size_t> name_to_idx;
-        for (size_t i = 0; i < msg->name.size(); ++i) {
-            name_to_idx[msg->name[i]] = i;
+        if (seeded_) return;
+        extract_positions(msg, real_pos_);
+        seeded_ = true;
+        last_cmd_ = real_pos_;
+        publish_cmd(last_cmd_);
+        RCLCPP_INFO(get_logger(),
+            "Seeded initial positions from hardware feedback.");
+    }
+
+    /// Only forward GUI values for joints the user has actually moved
+    /// (i.e., slider value differs from the initial "Centering" value).
+    /// For untouched joints, keep the real hardware position.
+    void on_gui_js(const sensor_msgs::msg::JointState::SharedPtr msg)
+    {
+        if (!seeded_) return;
+
+        std::vector<double> gui_vals(joint_order_.size(), 0.0);
+        extract_positions(msg, gui_vals);
+
+        if (!gui_baseline_set_) {
+            gui_initial_ = gui_vals;
+            gui_baseline_set_ = true;
         }
 
-        std::vector<double> cmd(joint_order_.size(), 0.0);
+        constexpr double kSliderMovedThreshold = 0.001;
         for (size_t i = 0; i < joint_order_.size(); ++i) {
-            auto it = name_to_idx.find(joint_order_[i]);
-            if (it != name_to_idx.end() && it->second < msg->position.size()) {
-                cmd[i] = msg->position[it->second];
-            } else {
-                cmd[i] = last_cmd_[i];
-            }
+            bool user_moved =
+                std::abs(gui_vals[i] - gui_initial_[i]) > kSliderMovedThreshold;
+            last_cmd_[i] = user_moved ? gui_vals[i] : real_pos_[i];
         }
-
-        last_cmd_ = cmd;
-        publish_cmd(cmd);
+        publish_cmd(last_cmd_);
     }
 
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr pub_;
-    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr sub_;
-    rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr real_sub_;
+    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr gui_sub_;
+
     std::vector<std::string> joint_order_;
     std::vector<double> last_cmd_;
-    bool initial_published_{false};
+    std::vector<double> real_pos_;
+    std::vector<double> gui_initial_;
+    bool seeded_{false};
+    bool gui_baseline_set_{false};
 };
 
 int main(int argc, char **argv)

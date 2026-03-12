@@ -35,28 +35,28 @@ def generate_launch_description():
     declared_arguments.append(
         DeclareLaunchArgument(
             "left_xyz",
-            default_value="0 0.4375 0",
+            default_value="0 0.037 0.3618964",
             description="Mount pose (xyz) of Base_L in world",
         )
     )
     declared_arguments.append(
         DeclareLaunchArgument(
             "left_rpy",
-            default_value="0 0 0",
+            default_value="-1.5707963 0 0",
             description="Mount pose (rpy) of Base_L in world",
         )
     )
     declared_arguments.append(
         DeclareLaunchArgument(
             "right_xyz",
-            default_value="0 -0.4375 0",
+            default_value="0 -0.037 0.3618964",
             description="Mount pose (xyz) of Base_R in world",
         )
     )
     declared_arguments.append(
         DeclareLaunchArgument(
             "right_rpy",
-            default_value="0 0 0",
+            default_value="1.5707963 0 0",
             description="Mount pose (rpy) of Base_R in world",
         )
     )
