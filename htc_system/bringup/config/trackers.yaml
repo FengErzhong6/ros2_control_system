@@ -1,0 +1,21 @@
+test_tracker_pose:
+  ros__parameters:
+    # SteamVR → ROS coordinate transform (Y-up → Z-up)
+    coordinate_transform: true
+
+    publish_rate: 100.0  # Hz
+
+    # Tracker definitions (parallel arrays, keep indices aligned)
+    # Run test_tracker_pose without config first to discover serial numbers.
+    trackers:
+      serials:
+        - "LHR-F598CA5E"
+      frame_ids:
+        - "tracker_0"
+      topics:
+        - "/htc/tracker_0/pose"
+
+    # To add more trackers, append to all three arrays:
+    #   serials:   [..., "LHR-ZZZZZZZZ"]
+    #   frame_ids: [..., "tracker_waist"]
+    #   topics:    [..., "/htc/tracker_waist/pose"]

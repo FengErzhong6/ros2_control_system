@@ -32,11 +32,11 @@ def generate_launch_description():
             description="Start joint_state_publisher_gui for slider command input.",
         ),
         DeclareLaunchArgument(
-            "use_gripper_L", default_value="false",
+            "use_gripper_L", default_value="true",
             description="Enable OmniPicker gripper on left arm.",
         ),
         DeclareLaunchArgument(
-            "use_gripper_R", default_value="false",
+            "use_gripper_R", default_value="true",
             description="Enable OmniPicker gripper on right arm.",
         ),
         DeclareLaunchArgument(
