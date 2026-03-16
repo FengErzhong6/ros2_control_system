@@ -1,6 +1,7 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction, OpaqueFunction, RegisterEventHandler
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 
 from launch_ros.actions import Node
@@ -38,6 +39,22 @@ def generate_launch_description():
             "use_gripper_R", default_value="false",
             description="Enable OmniPicker gripper on right arm.",
         ),
+        DeclareLaunchArgument(
+            "left_xyz", default_value="0 0.037 0.3618964",
+            description="Mount pose (xyz) of Base_L in world.",
+        ),
+        DeclareLaunchArgument(
+            "left_rpy", default_value="-1.5707963 0 0",
+            description="Mount pose (rpy) of Base_L in world.",
+        ),
+        DeclareLaunchArgument(
+            "right_xyz", default_value="0 -0.037 0.3618964",
+            description="Mount pose (xyz) of Base_R in world.",
+        ),
+        DeclareLaunchArgument(
+            "right_rpy", default_value="1.5707963 0 0",
+            description="Mount pose (rpy) of Base_R in world.",
+        ),
         OpaqueFunction(function=launch_setup),
     ])
 
@@ -51,12 +68,20 @@ def launch_setup(context):
     ctrl_file_arg = LaunchConfiguration("controllers_file").perform(context)
     grip_L = LaunchConfiguration("use_gripper_L").perform(context).lower() == "true"
     grip_R = LaunchConfiguration("use_gripper_R").perform(context).lower() == "true"
+    left_xyz = LaunchConfiguration("left_xyz")
+    left_rpy = LaunchConfiguration("left_rpy")
+    right_xyz = LaunchConfiguration("right_xyz")
+    right_rpy = LaunchConfiguration("right_rpy")
 
     # ── Robot description (xacro) ─────────────────────────────────────────
     xacro_cmd = [
         PathJoinSubstitution([FindExecutable(name="xacro")]),
         " ",
         PathJoinSubstitution([FindPackageShare(pkg), desc_file]),
+        ' left_xyz:="', left_xyz, '"',
+        ' left_rpy:="', left_rpy, '"',
+        ' right_xyz:="', right_xyz, '"',
+        ' right_rpy:="', right_rpy, '"',
     ]
     if grip_L:
         xacro_cmd.append(" use_gripper_L:=true")
@@ -129,7 +154,10 @@ def launch_setup(context):
         package="joint_state_publisher_gui",
         executable="joint_state_publisher_gui",
         output="both",
-        parameters=[robot_description],
+        parameters=[
+            robot_description,
+            {"source_list": ["/joint_states"]},
+        ],
         remappings=[("joint_states", "gui_joint_states")],
         condition=IfCondition(use_jsp_gui),
     )
@@ -182,15 +210,25 @@ def launch_setup(context):
         ],
     )
 
+    start_gui_after_feedback_ready = RegisterEventHandler(
+        OnProcessExit(
+            target_action=joint_state_broadcaster_spawner,
+            on_exit=[
+                joint_state_publisher_gui_node,
+                gui_to_forward_bridge,
+            ],
+        ),
+        condition=IfCondition(use_jsp_gui),
+    )
+
     # ── Assemble ──────────────────────────────────────────────────────────
 
     return [
         ros2_control_node,
         robot_state_publisher_node,
         rviz_node,
-        joint_state_publisher_gui_node,
-        gui_to_forward_bridge,
         joint_state_broadcaster_spawner,
         forward_position_controller_spawner,
         activate_forward_controller,
+        start_gui_after_feedback_ready,
     ]

@@ -27,23 +27,40 @@ foreach(Dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
   find_package(${Dependency} REQUIRED)
 endforeach()
 
+set(MARVIN_SDK_LIBRARY
+  "${PROJECT_SOURCE_DIR}/third_party/marvinSDK/libMarvinSDK.so"
+)
+set(OMNIPICKER_SDK_LIBRARY
+  "${PROJECT_SOURCE_DIR}/third_party/omnipickerSDK/libomnipicker.so"
+)
+set(MARVIN_KINE_LIBRARY
+  "${PROJECT_SOURCE_DIR}/third_party/marvinKine/libKine.so"
+)
+
 add_library(
   ros2_control_marvin_hardware
   SHARED
   hardware/src/marvin.cpp
+  hardware/src/workspace_guard.cpp
 )
 target_compile_features(ros2_control_marvin_hardware PUBLIC cxx_std_17)
 target_include_directories(ros2_control_marvin_hardware PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/hardware/include>
-  $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
+  $<INSTALL_INTERFACE:include>
+)
+ament_target_dependencies(ros2_control_marvin_hardware PUBLIC
+  hardware_interface
+  pluginlib
+  rclcpp
+  rclcpp_lifecycle
 )
 target_link_libraries(ros2_control_marvin_hardware PUBLIC
   hardware_interface::hardware_interface
   pluginlib::pluginlib
   rclcpp::rclcpp
   rclcpp_lifecycle::rclcpp_lifecycle
-  ${PROJECT_SOURCE_DIR}/third_party/marvinSDK/libMarvinSDK.so
-  ${PROJECT_SOURCE_DIR}/third_party/omnipickerSDK/libomnipicker.so
+  ${MARVIN_SDK_LIBRARY}
+  ${OMNIPICKER_SDK_LIBRARY}
 )
 set_target_properties(ros2_control_marvin_hardware PROPERTIES
   INSTALL_RPATH "$ORIGIN"
@@ -64,18 +81,22 @@ target_compile_features(ros2_control_marvin_ik_controller PUBLIC cxx_std_17)
 target_include_directories(ros2_control_marvin_ik_controller PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/controller/include>
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/third_party/marvinKine>
-  $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
+  $<INSTALL_INTERFACE:include>
+)
+ament_target_dependencies(ros2_control_marvin_ik_controller PUBLIC
+  controller_interface
+  pluginlib
+  rclcpp
+  rclcpp_lifecycle
+  geometry_msgs
+  std_msgs
 )
 target_link_libraries(ros2_control_marvin_ik_controller PUBLIC
   controller_interface::controller_interface
   pluginlib::pluginlib
   rclcpp::rclcpp
   rclcpp_lifecycle::rclcpp_lifecycle
-  ${PROJECT_SOURCE_DIR}/third_party/marvinKine/libKine.so
-)
-ament_target_dependencies(ros2_control_marvin_ik_controller PUBLIC
-  geometry_msgs
-  std_msgs
+  ${MARVIN_KINE_LIBRARY}
 )
 set_target_properties(ros2_control_marvin_ik_controller PROPERTIES
   INSTALL_RPATH "$ORIGIN"
@@ -130,13 +151,10 @@ install(
 )
 
 install(
-  DIRECTORY hardware/include/
-  DESTINATION include/${PROJECT_NAME}
-)
-
-install(
-  DIRECTORY controller/include/
-  DESTINATION include/${PROJECT_NAME}
+  DIRECTORY
+    hardware/include/ros2_control_marvin
+    controller/include/ros2_control_marvin
+  DESTINATION include
 )
 
 install(
@@ -150,20 +168,20 @@ install(
 )
 
 install(
-  FILES third_party/marvinSDK/libMarvinSDK.so
+  FILES ${MARVIN_SDK_LIBRARY}
   DESTINATION lib
 )
 
 install(
   FILES
-    third_party/omnipickerSDK/libomnipicker.so
+    ${OMNIPICKER_SDK_LIBRARY}
     third_party/omnipickerSDK/libomnipicker.so.0
     third_party/omnipickerSDK/libomnipicker.so.0.1.0
   DESTINATION lib
 )
 
 install(
-  FILES third_party/marvinKine/libKine.so
+  FILES ${MARVIN_KINE_LIBRARY}
   DESTINATION lib
 )
 
@@ -173,6 +191,7 @@ install(
   LIBRARY DESTINATION lib
   ARCHIVE DESTINATION lib
   RUNTIME DESTINATION bin
+  INCLUDES DESTINATION include
 )
 
 install(
@@ -181,6 +200,7 @@ install(
 )
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
+ament_export_include_directories(include)
 ament_export_dependencies(${THIS_PACKAGE_INCLUDE_DEPENDS})
 
 ament_package()

@@ -25,7 +25,8 @@ public:
         const auto n = joint_order_.size();
         last_cmd_.assign(n, 0.0);
         real_pos_.assign(n, 0.0);
-        gui_initial_.assign(n, 0.0);
+        prev_gui_.assign(n, 0.0);
+        user_override_.assign(n, false);
 
         auto input_topic = declare_parameter("input_topic", std::string("gui_joint_states"));
         auto output_topic = declare_parameter(
@@ -72,8 +73,8 @@ private:
 
     void on_real_js(const sensor_msgs::msg::JointState::SharedPtr msg)
     {
-        if (seeded_) return;
         extract_positions(msg, real_pos_);
+        if (seeded_) return;
         seeded_ = true;
         last_cmd_ = real_pos_;
         publish_cmd(last_cmd_);
@@ -81,9 +82,10 @@ private:
             "Seeded initial positions from hardware feedback.");
     }
 
-    /// Only forward GUI values for joints the user has actually moved
-    /// (i.e., slider value differs from the initial "Centering" value).
-    /// For untouched joints, keep the real hardware position.
+    /// Only publish when the operator actually moves a slider away from the
+    /// current measured joint angle. Pure GUI refreshes sourced from real
+    /// joint_states should not generate new commands, otherwise the arm can
+    /// end up chasing its own feedback and jittering.
     void on_gui_js(const sensor_msgs::msg::JointState::SharedPtr msg)
     {
         if (!seeded_) return;
@@ -91,18 +93,44 @@ private:
         std::vector<double> gui_vals(joint_order_.size(), 0.0);
         extract_positions(msg, gui_vals);
 
-        if (!gui_baseline_set_) {
-            gui_initial_ = gui_vals;
-            gui_baseline_set_ = true;
+        if (!have_prev_gui_) {
+            prev_gui_ = gui_vals;
+            have_prev_gui_ = true;
+            return;
         }
 
-        constexpr double kSliderMovedThreshold = 0.001;
+        constexpr double kGuiChangeThreshold = 1e-4;
+        constexpr double kUserIntentThreshold = 0.01;
+        bool should_publish = false;
+
         for (size_t i = 0; i < joint_order_.size(); ++i) {
-            bool user_moved =
-                std::abs(gui_vals[i] - gui_initial_[i]) > kSliderMovedThreshold;
-            last_cmd_[i] = user_moved ? gui_vals[i] : real_pos_[i];
+            const bool gui_changed =
+                std::abs(gui_vals[i] - prev_gui_[i]) > kGuiChangeThreshold;
+            const bool away_from_real =
+                std::abs(gui_vals[i] - real_pos_[i]) > kUserIntentThreshold;
+
+            if (gui_changed && away_from_real) {
+                user_override_[i] = true;
+            }
+
+            if (!user_override_[i]) {
+                continue;
+            }
+
+            if (std::abs(gui_vals[i] - last_cmd_[i]) > kGuiChangeThreshold) {
+                last_cmd_[i] = gui_vals[i];
+                should_publish = true;
+            }
+
+            if (std::abs(gui_vals[i] - real_pos_[i]) <= kGuiChangeThreshold) {
+                user_override_[i] = false;
+            }
         }
-        publish_cmd(last_cmd_);
+
+        prev_gui_ = gui_vals;
+        if (should_publish) {
+            publish_cmd(last_cmd_);
+        }
     }
 
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr pub_;
@@ -112,9 +140,10 @@ private:
     std::vector<std::string> joint_order_;
     std::vector<double> last_cmd_;
     std::vector<double> real_pos_;
-    std::vector<double> gui_initial_;
+    std::vector<double> prev_gui_;
+    std::vector<bool> user_override_;
     bool seeded_{false};
-    bool gui_baseline_set_{false};
+    bool have_prev_gui_{false};
 };
 
 int main(int argc, char **argv)

@@ -35,6 +35,22 @@ def generate_launch_description():
             "use_gripper_R", default_value="false",
             description="Enable OmniPicker gripper on right arm.",
         ),
+        DeclareLaunchArgument(
+            "left_xyz", default_value="0 0.037 0.3618964",
+            description="Mount pose (xyz) of Base_L in world.",
+        ),
+        DeclareLaunchArgument(
+            "left_rpy", default_value="-1.5707963 0 0",
+            description="Mount pose (rpy) of Base_L in world.",
+        ),
+        DeclareLaunchArgument(
+            "right_xyz", default_value="0 -0.037 0.3618964",
+            description="Mount pose (xyz) of Base_R in world.",
+        ),
+        DeclareLaunchArgument(
+            "right_rpy", default_value="1.5707963 0 0",
+            description="Mount pose (rpy) of Base_R in world.",
+        ),
         OpaqueFunction(function=launch_setup),
     ])
 
@@ -46,12 +62,20 @@ def launch_setup(context):
     desc_file = LaunchConfiguration("description_file").perform(context)
     grip_L = LaunchConfiguration("use_gripper_L").perform(context).lower() == "true"
     grip_R = LaunchConfiguration("use_gripper_R").perform(context).lower() == "true"
+    left_xyz = LaunchConfiguration("left_xyz")
+    left_rpy = LaunchConfiguration("left_rpy")
+    right_xyz = LaunchConfiguration("right_xyz")
+    right_rpy = LaunchConfiguration("right_rpy")
 
     # ── Robot description (xacro) ─────────────────────────────────────────
     xacro_cmd = [
         PathJoinSubstitution([FindExecutable(name="xacro")]),
         " ",
         PathJoinSubstitution([FindPackageShare(pkg), desc_file]),
+        ' left_xyz:="', left_xyz, '"',
+        ' left_rpy:="', left_rpy, '"',
+        ' right_xyz:="', right_xyz, '"',
+        ' right_rpy:="', right_rpy, '"',
     ]
     if grip_L:
         xacro_cmd.append(" use_gripper_L:=true")

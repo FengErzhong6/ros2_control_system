@@ -5,6 +5,7 @@
 #include <chrono>
 
 #include "ros2_control_marvin/omnipicker.hpp"
+#include "ros2_control_marvin/workspace_guard.hpp"
 
 #include "hardware_interface/handle.hpp"
 #include "hardware_interface/hardware_info.hpp"
@@ -79,6 +80,17 @@ private:
     };
     size_t gripper_count_{0};
     std::array<GripperSlot, kMaxGrippers> grippers_{};
+
+    // ---- Workspace z-floor safety check (optional) ----
+    WorkspaceGuard workspace_guard_;
+
+    // ---- Control loop frequency monitoring ----
+    int loop_stats_interval_cycles_{5000};
+    int loop_cycle_count_{0};
+    std::chrono::steady_clock::time_point loop_stats_start_{};
+    double loop_period_min_us_{1e9};
+    double loop_period_max_us_{0.0};
+    std::chrono::steady_clock::time_point loop_last_write_time_{};
 };
 
 }  // namespace ros2_control_marvin

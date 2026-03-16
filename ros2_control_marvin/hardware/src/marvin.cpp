@@ -15,7 +15,6 @@
 namespace {
 
 using Clock = std::chrono::steady_clock;
-
 constexpr double kDeg2Rad = M_PI / 180.0;
 constexpr double kRad2Deg = 180.0 / M_PI;
 
@@ -326,6 +325,8 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
             "Home position configured (timeout=%d ms).", home_timeout_ms_);
     }
 
+    workspace_guard_.configure(p, get_logger());
+
     RCLCPP_INFO(get_logger(), "Configured dual-arm system (vel=%d%%, acc=%d%%, grippers=%zu).",
                 joint_vel_ratio_, joint_acc_ratio_, gripper_count_);
     return hardware_interface::CallbackReturn::SUCCESS;
@@ -447,6 +448,22 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
             cmd_a[jt] = home_position_deg_[0][jt];
             cmd_b[jt] = home_position_deg_[1][jt];
 
+            if (workspace_guard_.enabled()) {
+                double guarded_a[kJointsPerArm];
+                double guarded_b[kJointsPerArm];
+                std::copy(cmd_a, cmd_a + kJointsPerArm, guarded_a);
+                std::copy(cmd_b, cmd_b + kJointsPerArm, guarded_b);
+                const bool arm_a_safe = workspace_guard_.filter(0, guarded_a, get_logger());
+                const bool arm_b_safe = workspace_guard_.filter(1, guarded_b, get_logger());
+                if (!arm_a_safe || !arm_b_safe) {
+                    RCLCPP_ERROR(
+                        get_logger(),
+                        "Home position for Joint%d violates workspace z-floor safety check.",
+                        jt + 1);
+                    return hardware_interface::CallbackReturn::ERROR;
+                }
+            }
+
             RCLCPP_INFO(get_logger(), "Homing Joint%d ...", jt + 1);
 
             while (true) {
@@ -535,6 +552,16 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
 
     consecutive_write_failures_ = 0;
     total_write_failures_ = 0;
+
+    if (workspace_guard_.enabled()) {
+        for (size_t arm = 0; arm < kArmCount; ++arm) {
+            double fb[kJointsPerArm];
+            for (size_t j = 0; j < kJointsPerArm; ++j)
+                fb[j] = static_cast<double>(dcss.m_Out[arm].m_FB_Joint_PosE[j]);
+            workspace_guard_.seed(arm, fb);
+        }
+    }
+
     activated_ = true;
 
     RCLCPP_INFO(get_logger(), "System activated (position mode, grippers=%zu).",
@@ -681,6 +708,11 @@ hardware_interface::return_type MarvinHardware::write(
             return hardware_interface::return_type::ERROR;
         }
         cmd_b[j] = std::clamp(vb, joint_min_[idx_b], joint_max_[idx_b]) * kRad2Deg;
+    }
+
+    if (workspace_guard_.enabled()) {
+        workspace_guard_.filter(0, cmd_a, get_logger());
+        workspace_guard_.filter(1, cmd_b, get_logger());
     }
 
     // Single atomic send: ClearSet → set A → set B → Send

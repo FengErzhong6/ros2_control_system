@@ -18,6 +18,18 @@
         <param name="sdk_log_enabled">0</param>
         <param name="home_position_L">1.16 -1.28 -1.5707963 -1.25 0 0 0</param>
         <param name="home_position_R">-1.16 -1.28 1.5707963 -1.25 0 0 0</param>
+
+        <!-- Workspace z-floor safety check (optional, remove to disable) -->
+        <param name="workspace_z_min">0.0</param>
+        <param name="workspace_safety_margin">0.06</param>
+        <param name="mount_xyz_L">$(arg left_xyz)</param>
+        <param name="mount_rpy_L">$(arg left_rpy)</param>
+        <param name="mount_xyz_R">$(arg right_xyz)</param>
+        <param name="mount_rpy_R">$(arg right_rpy)</param>
+        <xacro:if value="${str(use_gripper_L).lower() == 'true' or str(use_gripper_R).lower() == 'true'}">
+          <!-- Gripper tip in Link7 frame: flange 9.5cm + finger 15cm = 24.5cm along -Y_link7 -->
+          <param name="tool_offset">0 -0.245 0</param>
+        </xacro:if>
       </hardware>
 
       <!-- Left arm (SDK arm A, index 0) — joints 0..6 -->

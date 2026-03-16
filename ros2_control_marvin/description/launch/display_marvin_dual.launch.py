@@ -13,6 +13,8 @@ def generate_launch_description():
     left_rpy = LaunchConfiguration("left_rpy")
     right_xyz = LaunchConfiguration("right_xyz")
     right_rpy = LaunchConfiguration("right_rpy")
+    use_gripper_L = LaunchConfiguration("use_gripper_L")
+    use_gripper_R = LaunchConfiguration("use_gripper_R")
 
     model = LaunchConfiguration("model")
 
@@ -35,7 +37,13 @@ def generate_launch_description():
             " ",
             "right_rpy:=\"",
             right_rpy,
-            "\"",
+            "\" ",
+            " ",
+            "use_gripper_L:=",
+            use_gripper_L,
+            " ",
+            "use_gripper_R:=",
+            use_gripper_R,
         ]
     )
 
@@ -67,6 +75,16 @@ def generate_launch_description():
                 "right_rpy",
                 default_value="1.5707963 0 0",
                 description="Mount pose (rpy) of Base_R in world",
+            ),
+            DeclareLaunchArgument(
+                "use_gripper_L",
+                default_value="true",
+                description="Enable left gripper visualization",
+            ),
+            DeclareLaunchArgument(
+                "use_gripper_R",
+                default_value="true",
+                description="Enable right gripper visualization",
             ),
             DeclareLaunchArgument(
                 "model",

@@ -22,6 +22,22 @@ def generate_launch_description():
             "use_gripper_R", default_value="false",
             description="Enable OmniPicker gripper on right arm.",
         ),
+        DeclareLaunchArgument(
+            "left_xyz", default_value="0 0.037 0.3618964",
+            description="Mount pose (xyz) of Base_L in world.",
+        ),
+        DeclareLaunchArgument(
+            "left_rpy", default_value="-1.5707963 0 0",
+            description="Mount pose (rpy) of Base_L in world.",
+        ),
+        DeclareLaunchArgument(
+            "right_xyz", default_value="0 -0.037 0.3618964",
+            description="Mount pose (xyz) of Base_R in world.",
+        ),
+        DeclareLaunchArgument(
+            "right_rpy", default_value="1.5707963 0 0",
+            description="Mount pose (rpy) of Base_R in world.",
+        ),
 
         # ── Joy-to-pose arguments ────────────────────────────────────────
         DeclareLaunchArgument(
@@ -64,6 +80,10 @@ def launch_setup(context):
             "gui": LaunchConfiguration("gui"),
             "use_gripper_L": LaunchConfiguration("use_gripper_L"),
             "use_gripper_R": LaunchConfiguration("use_gripper_R"),
+            "left_xyz": LaunchConfiguration("left_xyz"),
+            "left_rpy": LaunchConfiguration("left_rpy"),
+            "right_xyz": LaunchConfiguration("right_xyz"),
+            "right_rpy": LaunchConfiguration("right_rpy"),
         }.items(),
     )
 
