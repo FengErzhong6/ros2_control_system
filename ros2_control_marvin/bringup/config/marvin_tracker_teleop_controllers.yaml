@@ -41,8 +41,8 @@ tracker_teleop_controller:
     base_frame: "base_link"
     default_elbow_direction: [0.0, 0.0, -1.0]  # 无上臂 TF 时的默认 base_v_elbow
     zsp_angle: 0.0             # IK 零空间臂角 (deg)
-    smoothing_alpha: 0.3       # 低通滤波系数 (0, 1]
-    max_joint_velocity: 2.0    # 最大关节速度 (rad/s)
+    smoothing_alpha: 0.9       # 低通滤波系数 (0, 1]，越大响应越快
+    max_joint_velocity: 60.0    # 最大关节速度 (rad/s)
 
     # ── 刚体变换 (position [x,y,z] + orientation [qx,qy,qz,qw])，均为 ROS 系 ──
     #
@@ -56,21 +56,35 @@ tracker_teleop_controller:
     # wrist_T_ee                : {wrist_human} → {ee/TCP}
     # arm_human_T_arm_robot     : {arm_human} → {arm_robot}（肘向参考，仅旋转参与）
 
+    # base_T_chest:
+    #   left:
+    #     position:    [0.0, 0.2, -0.037]  # chest原点在base坐标系下的位置
+    #     orientation: [0.7071, 0.0, 0.0, 0.7071]
+    #   right:
+    #     position:    [0.0, -0.2, -0.037]
+    #     orientation: [-0.7071, 0.0, 0.0, 0.7071]
     base_T_chest:
       left:
-        position:    [0.0, 0.2, -0.037]  # chest原点在base坐标系下的位置
+        position:    [0.0, 0.1, 0.06]  # chest原点在base坐标系下的位置
         orientation: [0.7071, 0.0, 0.0, 0.7071]
       right:
-        position:    [0.0, -0.2, -0.037]
+        position:    [0.0, -0.1, 0.06]
         orientation: [-0.7071, 0.0, 0.0, 0.7071]
 
+    # wrist_T_ee:
+    #   left:
+    #     position:    [0.0, 0.0, 0.0]
+    #     orientation: [-0.7071, 0.0, 0.0, 0.7071]
+    #   right:
+    #     position:    [0.0, 0.0, 0.0]
+    #     orientation: [0.7071, 0.0, 0.0, 0.7071]
     wrist_T_ee:
       left:
         position:    [0.0, 0.0, 0.0]
-        orientation: [-0.7071, 0.0, 0.0, 0.7071]
+        orientation: [0.7071, 0.0, 0.0, 0.7071]
       right:
         position:    [0.0, 0.0, 0.0]
-        orientation: [0.7071, 0.0, 0.0, 0.7071]
+        orientation: [-0.7071, 0.0, 0.0, 0.7071]
 
     arm_human_T_arm_robot:
       left:

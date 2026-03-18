@@ -520,12 +520,13 @@ TrackerTeleopController::update(const rclcpp::Time &, const rclcpp::Duration &pe
             geometry_msgs::msg::Quaternion base_R_arm_robot;
             quatMultiply(base_R_chest_arm, arm_human_T_arm_robot_[arm].q, base_R_arm_robot);
 
+            // Y column of rotation matrix: R[:,1] = (R[0][1], R[1][1], R[2][1])
             base_v_elbow[0] = 2.0 * (base_R_arm_robot.x * base_R_arm_robot.y
-                                     + base_R_arm_robot.w * base_R_arm_robot.z);
+                                     - base_R_arm_robot.w * base_R_arm_robot.z);
             base_v_elbow[1] = 1.0 - 2.0 * (base_R_arm_robot.x * base_R_arm_robot.x
                                            + base_R_arm_robot.z * base_R_arm_robot.z);
             base_v_elbow[2] = 2.0 * (base_R_arm_robot.y * base_R_arm_robot.z
-                                     - base_R_arm_robot.w * base_R_arm_robot.x);
+                                     + base_R_arm_robot.w * base_R_arm_robot.x);
         }
 
         double out_q_joints_rad[kJointsPerArm];
