@@ -3,6 +3,7 @@
 
 #include <array>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -65,6 +66,18 @@ private:
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
     std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
+    // TF cache: populated by non-RT timer, consumed lock-free by RT update()
+    struct CachedTrackerData {
+        geometry_msgs::msg::TransformStamped chest_T_hand;
+        geometry_msgs::msg::TransformStamped chest_T_arm;
+        bool hand_valid{false};
+        bool arm_valid{false};
+    };
+    rclcpp::TimerBase::SharedPtr tf_poll_timer_;
+    std::mutex tf_cache_mutex_;
+    std::array<CachedTrackerData, kArmCount> tf_cache_{};
+    std::array<CachedTrackerData, kArmCount> tf_snapshot_{};
+
     // Tracker TF frame names
     std::string frame_torso_;
     std::string frame_left_hand_;
@@ -79,7 +92,10 @@ private:
 
     // Parameters
     double position_scale_{1.0};
+    double base_x_scale_{1.0};
     bool enable_orientation_{true};
+    bool ik_fallback_near_ref_{true};
+    bool ik_clamp_joint_limits_{true};
     std::string base_frame_{"base_link"};
     std::array<double, 3> base_v_elbow_default_{{0.0, 0.0, -1.0}};
     double zsp_angle_{0.0};
@@ -96,6 +112,10 @@ private:
     double max_joint_velocity_{2.0};  // rad/s
     std::array<std::array<double, kJointsPerArm>, kArmCount> smoothed_joints_rad_{};
 
+    // IK target: last successful solution (smoothing always converges to this)
+    std::array<std::array<double, kJointsPerArm>, kArmCount> target_joints_rad_{};
+    std::array<bool, kArmCount> has_valid_target_{{false, false}};
+
     // TF timestamp tracking: skip IK when tracker data hasn't changed
     std::array<rclcpp::Time, kArmCount> last_hand_tf_stamp_{
         {rclcpp::Time(0, 0, RCL_ROS_TIME), rclcpp::Time(0, 0, RCL_ROS_TIME)}};
@@ -104,6 +124,7 @@ private:
     enum class IKResult : int8_t {
         kSuccess = 0,
         kNoTarget = 1,
+        kJointLimitClamped = 2,
         kInvalidQuaternion = -1,
         kOutOfRange = -2,
         kJointLimitExceeded = -3,
@@ -113,6 +134,7 @@ private:
         {IKResult::kNoTarget, IKResult::kNoTarget}};
 
     // Core methods
+    void pollTfCallback();
     bool lookupTf(const std::string &target_frame,
                   const std::string &source_frame,
                   geometry_msgs::msg::TransformStamped &out_chest_T_source);

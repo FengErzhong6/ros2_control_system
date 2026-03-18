@@ -90,6 +90,9 @@ controller_interface::CallbackReturn TrackerTeleopController::on_init()
 
         auto_declare<double>("smoothing_alpha", 0.3);
         auto_declare<double>("max_joint_velocity", 2.0);
+        auto_declare<double>("base_x_scale", 1.0);
+        auto_declare<bool>("ik_fallback_near_ref", true);
+        auto_declare<bool>("ik_clamp_joint_limits", true);
 
         for (const auto &side : {"left", "right"}) {
             for (const auto &group :
@@ -142,6 +145,23 @@ bool TrackerTeleopController::lookupTf(
     }
 }
 
+void TrackerTeleopController::pollTfCallback()
+{
+    const std::string *frame_hand[] = {&frame_left_hand_, &frame_right_hand_};
+    const std::string *frame_arm[] = {&frame_left_upper_arm_, &frame_right_upper_arm_};
+
+    std::array<CachedTrackerData, kArmCount> fresh{};
+    for (int arm = 0; arm < static_cast<int>(kArmCount); ++arm) {
+        fresh[arm].hand_valid = lookupTf(
+            frame_torso_, *frame_hand[arm], fresh[arm].chest_T_hand);
+        fresh[arm].arm_valid = lookupTf(
+            frame_torso_, *frame_arm[arm], fresh[arm].chest_T_arm);
+    }
+
+    std::lock_guard<std::mutex> lk(tf_cache_mutex_);
+    tf_cache_ = fresh;
+}
+
 TrackerTeleopController::IKResult TrackerTeleopController::solveIK(
     size_t arm,
     const geometry_msgs::msg::PoseStamped &base_T_ee,
@@ -157,48 +177,88 @@ TrackerTeleopController::IKResult TrackerTeleopController::solveIK(
     }
 
     auto &ik = ik_params_[arm];
-    std::memset(&ik, 0, sizeof(FX_InvKineSolvePara));
+    FX_INT32L serial = static_cast<FX_INT32L>(arm);
 
-    poseToMatrix4(base_T_ee, ik.m_Input_IK_TargetTCP);
+    auto setup_common = [&]() {
+        std::memset(&ik, 0, sizeof(FX_InvKineSolvePara));
+        poseToMatrix4(base_T_ee, ik.m_Input_IK_TargetTCP);
+        for (size_t j = 0; j < kJointsPerArm; ++j) {
+            ik.m_Input_IK_RefJoint[j] = last_joint_deg_[arm][j];
+        }
+    };
 
-    for (size_t j = 0; j < kJointsPerArm; ++j) {
-        ik.m_Input_IK_RefJoint[j] = last_joint_deg_[arm][j];
-    }
+    auto evaluate_ik = [&]() -> IKResult {
+        if (!FX_Robot_Kine_IK(serial, &ik)) {
+            return IKResult::kOutOfRange;
+        }
+        if (ik.m_Output_IsJntExd) {
+            return IKResult::kJointLimitExceeded;
+        }
+        for (size_t j = 0; j < kJointsPerArm; ++j) {
+            if (ik.m_Output_IsDeg[j]) {
+                return IKResult::kSingularity;
+            }
+        }
+        for (size_t j = 0; j < kJointsPerArm; ++j) {
+            out_q_joints_rad[j] = ik.m_Output_RetJoint[j] * kDeg2Rad;
+        }
+        return IKResult::kSuccess;
+    };
 
+    // Attempt 1: NEAR_DIR — use tracker elbow direction to constrain null-space
+    setup_common();
     ik.m_Input_IK_ZSPType = FX_PILOT_NSP_TYPES_NEAR_DIR;
     ik.m_Input_IK_ZSPPara[0] = base_v_elbow[0];
     ik.m_Input_IK_ZSPPara[1] = base_v_elbow[1];
     ik.m_Input_IK_ZSPPara[2] = base_v_elbow[2];
     ik.m_Input_ZSP_Angle = zsp_angle_;
 
-    FX_INT32L serial = static_cast<FX_INT32L>(arm);
-    if (!FX_Robot_Kine_IK(serial, &ik)) {
-        RCLCPP_WARN_THROTTLE(logger, *get_node()->get_clock(), 1000,
-                             "Arm %zu: IK failed (out_of_range=%d)",
-                             arm, static_cast<int>(ik.m_Output_IsOutRange));
-        return IKResult::kOutOfRange;
+    IKResult dir_result = evaluate_ik();
+    if (dir_result == IKResult::kSuccess) {
+        return IKResult::kSuccess;
     }
 
-    if (ik.m_Output_IsJntExd) {
-        RCLCPP_WARN_THROTTLE(logger, *get_node()->get_clock(), 1000,
-                             "Arm %zu: joint limits exceeded (max=%.2f deg)",
-                             arm, ik.m_Output_JntExdABS);
-        return IKResult::kJointLimitExceeded;
-    }
+    // Attempt 2 (optional): NEAR_REF — relax elbow constraint, pick solution
+    // nearest to current joint state
+    IKResult ref_result = IKResult::kNoTarget;
+    if (ik_fallback_near_ref_) {
+        setup_common();
+        ik.m_Input_IK_ZSPType = FX_PILOT_NSP_TYPES_NEAR_REF;
 
-    for (size_t j = 0; j < kJointsPerArm; ++j) {
-        if (ik.m_Output_IsDeg[j]) {
-            RCLCPP_WARN_THROTTLE(logger, *get_node()->get_clock(), 1000,
-                                 "Arm %zu: near singularity at J%zu", arm, j + 1);
-            return IKResult::kSingularity;
+        ref_result = evaluate_ik();
+        if (ref_result == IKResult::kSuccess) {
+            RCLCPP_DEBUG_THROTTLE(logger, *get_node()->get_clock(), 2000,
+                                  "Arm %zu: NEAR_DIR failed, solved via NEAR_REF fallback",
+                                  arm);
+            return IKResult::kSuccess;
         }
     }
 
-    for (size_t j = 0; j < kJointsPerArm; ++j) {
-        out_q_joints_rad[j] = ik.m_Output_RetJoint[j] * kDeg2Rad;
+    // Attempt 3 (optional): clamp to joint limits if the best attempt had a
+    // solution that only exceeded limits.
+    // Use whichever attempt last produced a kJointLimitExceeded result;
+    // its data is still in the ik struct.
+    IKResult clamp_candidate = ik_fallback_near_ref_ ? ref_result : dir_result;
+    if (ik_clamp_joint_limits_ &&
+        clamp_candidate == IKResult::kJointLimitExceeded) {
+        for (size_t j = 0; j < kJointsPerArm; ++j) {
+            double val = ik.m_Output_RetJoint[j];
+            double lo  = ik.m_Output_RunLmtN[j];
+            double hi  = ik.m_Output_RunLmtP[j];
+            out_q_joints_rad[j] = std::clamp(val, lo, hi) * kDeg2Rad;
+        }
+        RCLCPP_DEBUG_THROTTLE(logger, *get_node()->get_clock(), 2000,
+                              "Arm %zu: clamped to joint limits (exceedance=%.1f deg)",
+                              arm, ik.m_Output_JntExdABS);
+        return IKResult::kJointLimitClamped;
     }
 
-    return IKResult::kSuccess;
+    RCLCPP_WARN_THROTTLE(logger, *get_node()->get_clock(), 1000,
+                         "Arm %zu: IK failed — NEAR_DIR: %s%s%s",
+                         arm, ikResultToString(dir_result),
+                         ik_fallback_near_ref_ ? ", NEAR_REF: " : "",
+                         ik_fallback_near_ref_ ? ikResultToString(ref_result) : "");
+    return dir_result;
 }
 
 const char *TrackerTeleopController::ikResultToString(IKResult result)
@@ -206,6 +266,7 @@ const char *TrackerTeleopController::ikResultToString(IKResult result)
     switch (result) {
         case IKResult::kSuccess:             return "IK solved successfully";
         case IKResult::kNoTarget:            return "No target";
+        case IKResult::kJointLimitClamped:   return "IK solved (clamped to joint limits)";
         case IKResult::kInvalidQuaternion:   return "Invalid quaternion";
         case IKResult::kOutOfRange:          return "Target out of reachable workspace";
         case IKResult::kJointLimitExceeded:  return "IK solution exceeds joint limits";
@@ -314,6 +375,9 @@ TrackerTeleopController::on_configure(const rclcpp_lifecycle::State &)
     get_node()->get_parameter("zsp_angle", zsp_angle_);
     get_node()->get_parameter("smoothing_alpha", smoothing_alpha_);
     get_node()->get_parameter("max_joint_velocity", max_joint_velocity_);
+    get_node()->get_parameter("base_x_scale", base_x_scale_);
+    get_node()->get_parameter("ik_fallback_near_ref", ik_fallback_near_ref_);
+    get_node()->get_parameter("ik_clamp_joint_limits", ik_clamp_joint_limits_);
 
     smoothing_alpha_ = std::clamp(smoothing_alpha_, 0.01, 1.0);
 
@@ -350,6 +414,10 @@ TrackerTeleopController::on_configure(const rclcpp_lifecycle::State &)
     RCLCPP_INFO(logger, "ZSP angle: %.2f deg", zsp_angle_);
     RCLCPP_INFO(logger, "Smoothing: alpha=%.3f, max_vel=%.2f rad/s",
                 smoothing_alpha_, max_joint_velocity_);
+    RCLCPP_INFO(logger, "Base X scale: %.3f", base_x_scale_);
+    RCLCPP_INFO(logger, "IK fallback NEAR_REF: %s, clamp joint limits: %s",
+                ik_fallback_near_ref_ ? "ON" : "OFF",
+                ik_clamp_joint_limits_ ? "ON" : "OFF");
 
     for (auto &arm : last_joint_deg_) arm.fill(0.0);
     for (auto &arm : smoothed_joints_rad_) arm.fill(0.0);
@@ -370,6 +438,10 @@ TrackerTeleopController::on_configure(const rclcpp_lifecycle::State &)
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_node()->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(
         *tf_buffer_, get_node(), false);
+
+    tf_poll_timer_ = get_node()->create_wall_timer(
+        std::chrono::milliseconds(5),
+        std::bind(&TrackerTeleopController::pollTfCallback, this));
 
     get_node()->get_parameter("tracker_frames.torso", frame_torso_);
     get_node()->get_parameter("tracker_frames.left_hand", frame_left_hand_);
@@ -416,9 +488,11 @@ TrackerTeleopController::on_activate(const rclcpp_lifecycle::State &)
         const double pos_rad = pos_opt.has_value() ? pos_opt.value() : 0.0;
         last_joint_deg_[arm][j] = pos_rad * kRad2Deg;
         smoothed_joints_rad_[arm][j] = pos_rad;
+        target_joints_rad_[arm][j] = pos_rad;
         (void)cmd_interfaces_[i]->set_value(pos_rad);
     }
 
+    has_valid_target_.fill(false);
     last_hand_tf_stamp_.fill(rclcpp::Time(0, 0, RCL_ROS_TIME));
 
     computeAndPublishFK();
@@ -443,6 +517,12 @@ TrackerTeleopController::on_deactivate(const rclcpp_lifecycle::State &)
  *   base_T_ee     = base_T_wrist * wrist_T_ee
  *   base_R_arm_robot = base_R_chest * chest_R_arm * arm_human_R_arm_robot
  *   base_v_elbow = Y 列 of base_R_arm_robot → IK 零空间
+ *
+ * RT safety:
+ *   - TF lookups run in a non-RT timer (pollTfCallback, 200 Hz).
+ *   - update() only does try_lock (never blocks) to grab cached TF.
+ *   - Smoothing runs every cycle (1 kHz) so motion stays fluid even
+ *     when IK fails or no new tracker data arrives.
  */
 controller_interface::return_type
 TrackerTeleopController::update(const rclcpp::Time &, const rclcpp::Duration &period)
@@ -452,88 +532,109 @@ TrackerTeleopController::update(const rclcpp::Time &, const rclcpp::Duration &pe
     }
 
     const double dt = period.seconds();
-    const std::string *frame_hand[] = {&frame_left_hand_, &frame_right_hand_};
-    const std::string *frame_arm[] = {&frame_left_upper_arm_, &frame_right_upper_arm_};
+
+    if (tf_cache_mutex_.try_lock()) {
+        tf_snapshot_ = tf_cache_;
+        tf_cache_mutex_.unlock();
+    }
 
     for (int arm = 0; arm < static_cast<int>(kArmCount); ++arm) {
-        geometry_msgs::msg::TransformStamped chest_T_wrist;
-        if (!lookupTf(frame_torso_, *frame_hand[arm], chest_T_wrist)) {
-            continue;
+
+        const auto &snap = tf_snapshot_[arm];
+
+        if (snap.hand_valid) {
+            rclcpp::Time stamp(snap.chest_T_hand.header.stamp);
+
+            if (stamp != last_hand_tf_stamp_[arm]) {
+                last_hand_tf_stamp_[arm] = stamp;
+
+                const RigidTransform &base_T_chest = base_T_chest_[arm];
+                const auto &chest_t_wrist = snap.chest_T_hand.transform.translation;
+                const auto &chest_R_wrist = snap.chest_T_hand.transform.rotation;
+
+                double chest_t_wrist_scaled[3] = {
+                    chest_t_wrist.x * position_scale_,
+                    chest_t_wrist.y * position_scale_,
+                    chest_t_wrist.z * position_scale_,
+                };
+
+                geometry_msgs::msg::PoseStamped base_T_ee;
+                base_T_ee.header.frame_id = base_frame_;
+                base_T_ee.pose.position.x = base_T_chest.t[0]
+                    + base_T_chest.R[0][0] * chest_t_wrist_scaled[0]
+                    + base_T_chest.R[0][1] * chest_t_wrist_scaled[1]
+                    + base_T_chest.R[0][2] * chest_t_wrist_scaled[2];
+                base_T_ee.pose.position.y = base_T_chest.t[1]
+                    + base_T_chest.R[1][0] * chest_t_wrist_scaled[0]
+                    + base_T_chest.R[1][1] * chest_t_wrist_scaled[1]
+                    + base_T_chest.R[1][2] * chest_t_wrist_scaled[2];
+                base_T_ee.pose.position.z = base_T_chest.t[2]
+                    + base_T_chest.R[2][0] * chest_t_wrist_scaled[0]
+                    + base_T_chest.R[2][1] * chest_t_wrist_scaled[1]
+                    + base_T_chest.R[2][2] * chest_t_wrist_scaled[2];
+
+                geometry_msgs::msg::Quaternion base_R_wrist;
+                if (enable_orientation_) {
+                    quatMultiply(base_T_chest.q, chest_R_wrist, base_R_wrist);
+                } else {
+                    base_R_wrist = base_T_chest.q;
+                }
+
+                const RigidTransform &wrist_T_ee = wrist_T_ee_[arm];
+                double wrist_T_ee_t_in_base[3];
+                quatRotateVector(base_R_wrist, wrist_T_ee.t, wrist_T_ee_t_in_base);
+                base_T_ee.pose.position.x += wrist_T_ee_t_in_base[0];
+                base_T_ee.pose.position.y += wrist_T_ee_t_in_base[1];
+                base_T_ee.pose.position.z += wrist_T_ee_t_in_base[2];
+
+                // Scale x-offset relative to the chest anchor in base frame,
+                // compensating for human-vs-robot arm length mismatch.
+                double offset_x = base_T_ee.pose.position.x - base_T_chest.t[0];
+                base_T_ee.pose.position.x = base_T_chest.t[0] + offset_x * base_x_scale_;
+
+                geometry_msgs::msg::Quaternion base_R_ee;
+                quatMultiply(base_R_wrist, wrist_T_ee.q, base_R_ee);
+                base_T_ee.pose.orientation = base_R_ee;
+
+                double base_v_elbow[3] = {
+                    base_v_elbow_default_[0],
+                    base_v_elbow_default_[1],
+                    base_v_elbow_default_[2]};
+
+                if (snap.arm_valid) {
+                    geometry_msgs::msg::Quaternion base_R_chest_arm;
+                    quatMultiply(base_T_chest.q,
+                                 snap.chest_T_arm.transform.rotation,
+                                 base_R_chest_arm);
+                    geometry_msgs::msg::Quaternion base_R_arm_robot;
+                    quatMultiply(base_R_chest_arm,
+                                 arm_human_T_arm_robot_[arm].q,
+                                 base_R_arm_robot);
+
+                    base_v_elbow[0] = 2.0 * (base_R_arm_robot.x * base_R_arm_robot.y
+                                             - base_R_arm_robot.w * base_R_arm_robot.z);
+                    base_v_elbow[1] = 1.0 - 2.0 * (base_R_arm_robot.x * base_R_arm_robot.x
+                                                   + base_R_arm_robot.z * base_R_arm_robot.z);
+                    base_v_elbow[2] = 2.0 * (base_R_arm_robot.y * base_R_arm_robot.z
+                                             + base_R_arm_robot.w * base_R_arm_robot.x);
+                }
+
+                double out_q_joints_rad[kJointsPerArm];
+                IKResult ik_result = solveIK(arm, base_T_ee, base_v_elbow,
+                                             out_q_joints_rad);
+                publishIKStatus(arm, ik_result);
+
+                if (ik_result == IKResult::kSuccess ||
+                    ik_result == IKResult::kJointLimitClamped) {
+                    for (size_t j = 0; j < kJointsPerArm; ++j) {
+                        target_joints_rad_[arm][j] = out_q_joints_rad[j];
+                    }
+                    has_valid_target_[arm] = true;
+                }
+            }
         }
 
-        rclcpp::Time stamp(chest_T_wrist.header.stamp);
-        if (stamp == last_hand_tf_stamp_[arm]) {
-            continue;
-        }
-        last_hand_tf_stamp_[arm] = stamp;
-
-        const RigidTransform &base_T_chest = base_T_chest_[arm];
-        const auto &chest_t_wrist = chest_T_wrist.transform.translation;
-        const auto &chest_R_wrist = chest_T_wrist.transform.rotation;
-
-        double chest_t_wrist_scaled[3] = {
-            chest_t_wrist.x * position_scale_,
-            chest_t_wrist.y * position_scale_,
-            chest_t_wrist.z * position_scale_,
-        };
-
-        geometry_msgs::msg::PoseStamped base_T_ee;
-        base_T_ee.header.frame_id = base_frame_;
-        base_T_ee.pose.position.x = base_T_chest.t[0]
-            + base_T_chest.R[0][0] * chest_t_wrist_scaled[0]
-            + base_T_chest.R[0][1] * chest_t_wrist_scaled[1]
-            + base_T_chest.R[0][2] * chest_t_wrist_scaled[2];
-        base_T_ee.pose.position.y = base_T_chest.t[1]
-            + base_T_chest.R[1][0] * chest_t_wrist_scaled[0]
-            + base_T_chest.R[1][1] * chest_t_wrist_scaled[1]
-            + base_T_chest.R[1][2] * chest_t_wrist_scaled[2];
-        base_T_ee.pose.position.z = base_T_chest.t[2]
-            + base_T_chest.R[2][0] * chest_t_wrist_scaled[0]
-            + base_T_chest.R[2][1] * chest_t_wrist_scaled[1]
-            + base_T_chest.R[2][2] * chest_t_wrist_scaled[2];
-
-        geometry_msgs::msg::Quaternion base_R_wrist;
-        if (enable_orientation_) {
-            quatMultiply(base_T_chest.q, chest_R_wrist, base_R_wrist);
-        } else {
-            base_R_wrist = base_T_chest.q;
-        }
-
-        const RigidTransform &wrist_T_ee = wrist_T_ee_[arm];
-        double wrist_T_ee_t_in_base[3];
-        quatRotateVector(base_R_wrist, wrist_T_ee.t, wrist_T_ee_t_in_base);
-        base_T_ee.pose.position.x += wrist_T_ee_t_in_base[0];
-        base_T_ee.pose.position.y += wrist_T_ee_t_in_base[1];
-        base_T_ee.pose.position.z += wrist_T_ee_t_in_base[2];
-
-        geometry_msgs::msg::Quaternion base_R_ee;
-        quatMultiply(base_R_wrist, wrist_T_ee.q, base_R_ee);
-        base_T_ee.pose.orientation = base_R_ee;
-
-        double base_v_elbow[3] = {
-            base_v_elbow_default_[0], base_v_elbow_default_[1], base_v_elbow_default_[2]};
-
-        geometry_msgs::msg::TransformStamped chest_T_arm;
-        if (lookupTf(frame_torso_, *frame_arm[arm], chest_T_arm)) {
-            geometry_msgs::msg::Quaternion base_R_chest_arm;
-            quatMultiply(base_T_chest.q, chest_T_arm.transform.rotation, base_R_chest_arm);
-            geometry_msgs::msg::Quaternion base_R_arm_robot;
-            quatMultiply(base_R_chest_arm, arm_human_T_arm_robot_[arm].q, base_R_arm_robot);
-
-            // Y column of rotation matrix: R[:,1] = (R[0][1], R[1][1], R[2][1])
-            base_v_elbow[0] = 2.0 * (base_R_arm_robot.x * base_R_arm_robot.y
-                                     - base_R_arm_robot.w * base_R_arm_robot.z);
-            base_v_elbow[1] = 1.0 - 2.0 * (base_R_arm_robot.x * base_R_arm_robot.x
-                                           + base_R_arm_robot.z * base_R_arm_robot.z);
-            base_v_elbow[2] = 2.0 * (base_R_arm_robot.y * base_R_arm_robot.z
-                                     + base_R_arm_robot.w * base_R_arm_robot.x);
-        }
-
-        double out_q_joints_rad[kJointsPerArm];
-        IKResult ik_result = solveIK(arm, base_T_ee, base_v_elbow, out_q_joints_rad);
-        publishIKStatus(arm, ik_result);
-
-        if (ik_result != IKResult::kSuccess) {
+        if (!has_valid_target_[arm]) {
             continue;
         }
 
@@ -541,12 +642,13 @@ TrackerTeleopController::update(const rclcpp::Time &, const rclcpp::Duration &pe
         const double max_delta = max_joint_velocity_ * dt;
 
         for (size_t j = 0; j < kJointsPerArm; ++j) {
-            double filtered = smoothing_alpha_ * out_q_joints_rad[j] +
+            double filtered = smoothing_alpha_ * target_joints_rad_[arm][j] +
                               (1.0 - smoothing_alpha_) * smoothed_joints_rad_[arm][j];
 
             double delta = filtered - smoothed_joints_rad_[arm][j];
             if (std::abs(delta) > max_delta) {
-                filtered = smoothed_joints_rad_[arm][j] + std::copysign(max_delta, delta);
+                filtered = smoothed_joints_rad_[arm][j] +
+                           std::copysign(max_delta, delta);
             }
 
             smoothed_joints_rad_[arm][j] = filtered;
