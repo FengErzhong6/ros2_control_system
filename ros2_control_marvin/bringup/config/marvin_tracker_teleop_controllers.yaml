@@ -67,10 +67,10 @@ tracker_teleop_controller:
     wrist_T_ee:
       left:
         position:    [0.0, 0.0, 0.0]
-        orientation: [0.7071, 0.0, 0.0, 0.7071]
+        orientation: [-0.7071, 0.0, 0.0, 0.7071]
       right:
         position:    [0.0, 0.0, 0.0]
-        orientation: [-0.7071, 0.0, 0.0, 0.7071]
+        orientation: [0.7071, 0.0, 0.0, 0.7071]
 
     arm_human_T_arm_robot:
       left:
