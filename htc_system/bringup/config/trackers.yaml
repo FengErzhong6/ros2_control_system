@@ -1,21 +1,63 @@
-test_tracker_pose:
+tracker_publisher:
   ros__parameters:
-    # SteamVR → ROS coordinate transform (Y-up → Z-up)
     coordinate_transform: true
-
     publish_rate: 100.0  # Hz
+    parent_frame: "world"  # TF parent frame for all trackers
 
-    # Tracker definitions (parallel arrays, keep indices aligned)
-    # Run test_tracker_pose without config first to discover serial numbers.
+    # Tracker definitions (parallel arrays, keep indices aligned).
+    # Run tracker_publisher without config first to discover serial numbers.
     trackers:
       serials:
         - "LHR-F598CA5E"
+        - "LHR-67851455"
+        - "LHR-094A7FFB"
+        - "LHR-DEC53BB0"
+        - "LHR-62A745DD"
       frame_ids:
-        - "tracker_0"
-      topics:
-        - "/htc/tracker_0/pose"
+        - "tracker_left_hand"
+        - "tracker_right_hand"
+        - "tracker_left_upper_arm"
+        - "tracker_right_upper_arm"
+        - "tracker_torso"
 
-    # To add more trackers, append to all three arrays:
-    #   serials:   [..., "LHR-ZZZZZZZZ"]
-    #   frame_ids: [..., "tracker_waist"]
-    #   topics:    [..., "/htc/tracker_waist/pose"]
+      # Body-part roles for per-tracker corrections (optional).
+      # Must match a key under 'corrections' below; trackers without a
+      # matching correction entry use identity (no offset, no rotation).
+      roles:
+        - "left_wrist"
+        - "right_wrist"
+        - "left_arm"
+        - "right_arm"
+        - "chest"
+
+    # Per-role mounting corrections, applied BEFORE the SteamVR→ROS
+    # coordinate transform.
+    #
+    #   position:    [x, y, z] metres, in tracker-local frame.
+    #                Compensates for the physical gap between the tracker
+    #                centre and the actual joint (e.g. wrist).
+    #
+    #   orientation: [qx, qy, qz, qw] quaternion, right-multiplied onto
+    #                the raw tracker rotation to re-align body-part axes.
+    #
+    # Pipeline:  raw_pose  →  +position (local)  →  ×orientation  →  SVR→ROS
+    corrections:
+      chest:
+        position:    [0.0, 0.0, 0.12]
+        orientation: [0.0, 0.0, 0.0, 1.0]
+
+      left_wrist:
+        position:    [0.04, 0.0, 0.02]
+        orientation: [0.0, 0.0, 0.0, 1.0]
+
+      right_wrist:
+        position:    [-0.04, 0.0, 0.02]
+        orientation: [0.0, 0.0, 0.0, 1.0] 
+
+      left_arm:
+        position:    [0.0, 0.0, 0.0]
+        orientation: [0.0, 0.0, 0.0, 1.0]               
+
+      right_arm:
+        position:    [0.0, 0.0, 0.0]
+        orientation: [0.0, 0.0, 0.0, 1.0]                

@@ -9,17 +9,18 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(tf2_ros REQUIRED)
 
 # --- OpenVR ---
 set(OPENVR_INCLUDE_DIR "${PROJECT_SOURCE_DIR}/third_party/openvr")
 set(OPENVR_LIBRARY     "${PROJECT_SOURCE_DIR}/third_party/openvr/libopenvr_api.so")
 
-# --- test: tracker pose ---
-add_executable(test_tracker_pose test/test_tracker_pose.cpp)
-target_compile_features(test_tracker_pose PUBLIC cxx_std_17)
-target_include_directories(test_tracker_pose PRIVATE ${OPENVR_INCLUDE_DIR})
-ament_target_dependencies(test_tracker_pose rclcpp geometry_msgs std_msgs)
-target_link_libraries(test_tracker_pose ${OPENVR_LIBRARY})
+# --- Tracker publisher node ---
+add_executable(tracker_publisher src/tracker_publisher.cpp)
+target_compile_features(tracker_publisher PUBLIC cxx_std_17)
+target_include_directories(tracker_publisher PRIVATE ${OPENVR_INCLUDE_DIR})
+ament_target_dependencies(tracker_publisher rclcpp geometry_msgs std_msgs tf2_ros)
+target_link_libraries(tracker_publisher ${OPENVR_LIBRARY})
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
@@ -29,12 +30,12 @@ if(BUILD_TESTING)
 endif()
 
 install(
-  DIRECTORY bringup/config
+  DIRECTORY bringup/config bringup/launch
   DESTINATION share/${PROJECT_NAME}/bringup
 )
 
 install(
-  TARGETS test_tracker_pose
+  TARGETS tracker_publisher
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 

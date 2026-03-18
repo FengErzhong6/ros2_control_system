@@ -110,6 +110,12 @@ def generate_launch_description():
             Node(
                 package="joint_state_publisher_gui",
                 executable="joint_state_publisher_gui",
+                parameters=[
+                    PathJoinSubstitution([
+                        FindPackageShare("ros2_control_marvin"),
+                        "description", "config", "home_joint_positions.yaml"
+                    ]),
+                ],
             ),
             Node(
                 package="rviz2",

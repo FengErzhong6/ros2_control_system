@@ -9,3 +9,15 @@
     </description>
   </class>
 </library>
+
+<library path="ros2_control_marvin_tracker_teleop_controller">
+  <class
+    name="ros2_control_marvin/TrackerTeleopController"
+    type="ros2_control_marvin::TrackerTeleopController"
+    base_class_type="controller_interface::ControllerInterface">
+    <description>
+      Tracker teleop controller: subscribes to 5 HTC Tracker poses (hands, upper arms, torso),
+      uses torso as reference frame and elbow direction for null-space, solves IK for dual-arm.
+    </description>
+  </class>
+</library>

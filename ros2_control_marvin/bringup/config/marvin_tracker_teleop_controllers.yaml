@@ -1,0 +1,81 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 1000  # Hz
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    tracker_teleop_controller:
+      type: ros2_control_marvin/TrackerTeleopController
+
+tracker_teleop_controller:
+  ros__parameters:
+    joints:
+      - Joint1_L
+      - Joint2_L
+      - Joint3_L
+      - Joint4_L
+      - Joint5_L
+      - Joint6_L
+      - Joint7_L
+      - Joint1_R
+      - Joint2_R
+      - Joint3_R
+      - Joint4_R
+      - Joint5_R
+      - Joint6_R
+      - Joint7_R
+    kine_config_path: ""  # set by launch file via FindPackageShare
+
+    # TF frame names published by tracker_publisher.
+    # Must match the frame_ids in trackers.yaml.
+    tracker_frames:
+      torso: "tracker_torso"
+      left_hand: "tracker_left_hand"
+      right_hand: "tracker_right_hand"
+      left_upper_arm: "tracker_left_upper_arm"
+      right_upper_arm: "tracker_right_upper_arm"
+
+    position_scale: 1.0        # chest_T_wrist 平移缩放因子
+    enable_orientation: true   # 是否跟踪手腕姿态
+    base_frame: "base_link"
+    default_elbow_direction: [0.0, 0.0, -1.0]  # 无上臂 TF 时的默认 base_v_elbow
+    zsp_angle: 0.0             # IK 零空间臂角 (deg)
+    smoothing_alpha: 0.3       # 低通滤波系数 (0, 1]
+    max_joint_velocity: 2.0    # 最大关节速度 (rad/s)
+
+    # ── 刚体变换 (position [x,y,z] + orientation [qx,qy,qz,qw])，均为 ROS 系 ──
+    #
+    # chest_T_wrist = TF(torso→hand)；chest_T_arm = TF(torso→upper_arm)
+    # base_T_wrist  = base_T_chest × chest_T_wrist
+    # base_T_ee     = base_T_wrist × wrist_T_ee
+    # base_v_elbow  = base_R_arm_robot 的第 2 列（Y 轴）
+    # base_R_arm_robot = base_R_chest × chest_R_arm × arm_human_R_arm_robot
+    #
+    # base_T_chest              : {chest} → {base}
+    # wrist_T_ee                : {wrist_human} → {ee/TCP}
+    # arm_human_T_arm_robot     : {arm_human} → {arm_robot}（肘向参考，仅旋转参与）
+
+    base_T_chest:
+      left:
+        position:    [0.0, 0.2, -0.037]  # chest原点在base坐标系下的位置
+        orientation: [0.7071, 0.0, 0.0, 0.7071]
+      right:
+        position:    [0.0, -0.2, -0.037]
+        orientation: [-0.7071, 0.0, 0.0, 0.7071]
+
+    wrist_T_ee:
+      left:
+        position:    [0.0, 0.0, 0.0]
+        orientation: [0.7071, 0.0, 0.0, 0.7071]
+      right:
+        position:    [0.0, 0.0, 0.0]
+        orientation: [-0.7071, 0.0, 0.0, 0.7071]
+
+    arm_human_T_arm_robot:
+      left:
+        position:    [0.0, 0.0, 0.0]
+        orientation: [-0.5, 0.5, -0.5, 0.5]
+      right:
+        position:    [0.0, 0.0, 0.0]
+        orientation: [-0.5, -0.5, 0.5, 0.5]

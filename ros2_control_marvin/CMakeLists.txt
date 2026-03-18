@@ -21,6 +21,7 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
   rclcpp_lifecycle
   sensor_msgs
   std_msgs
+  tf2_ros
 )
 
 foreach(Dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
@@ -107,6 +108,38 @@ pluginlib_export_plugin_description_file(
   ros2_control_marvin_controller_plugins.xml
 )
 
+# Tracker Teleop Controller plugin
+add_library(
+  ros2_control_marvin_tracker_teleop_controller
+  SHARED
+  controller/src/tracker_teleop_controller.cpp
+)
+target_compile_features(ros2_control_marvin_tracker_teleop_controller PUBLIC cxx_std_17)
+target_include_directories(ros2_control_marvin_tracker_teleop_controller PUBLIC
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/controller/include>
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/third_party/marvinKine>
+  $<INSTALL_INTERFACE:include>
+)
+ament_target_dependencies(ros2_control_marvin_tracker_teleop_controller PUBLIC
+  controller_interface
+  pluginlib
+  rclcpp
+  rclcpp_lifecycle
+  geometry_msgs
+  std_msgs
+  tf2_ros
+)
+target_link_libraries(ros2_control_marvin_tracker_teleop_controller PUBLIC
+  controller_interface::controller_interface
+  pluginlib::pluginlib
+  rclcpp::rclcpp
+  rclcpp_lifecycle::rclcpp_lifecycle
+  ${MARVIN_KINE_LIBRARY}
+)
+set_target_properties(ros2_control_marvin_tracker_teleop_controller PROPERTIES
+  INSTALL_RPATH "$ORIGIN"
+)
+
 add_executable(gui_joint_state_to_forward_command
   bringup/src/gui_joint_state_to_forward_command.cpp
 )
@@ -186,7 +219,7 @@ install(
 )
 
 install(
-  TARGETS ros2_control_marvin_hardware ros2_control_marvin_ik_controller
+  TARGETS ros2_control_marvin_hardware ros2_control_marvin_ik_controller ros2_control_marvin_tracker_teleop_controller
   EXPORT export_${PROJECT_NAME}
   LIBRARY DESTINATION lib
   ARCHIVE DESTINATION lib

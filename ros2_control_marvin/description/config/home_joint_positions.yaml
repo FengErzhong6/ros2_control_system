@@ -1,0 +1,17 @@
+joint_state_publisher_gui:
+  ros__parameters:
+    zeros:
+      Joint1_L:  1.16
+      Joint2_L: -1.28
+      Joint3_L: -1.5707963
+      Joint4_L: -1.25
+      Joint5_L:  0.0
+      Joint6_L:  0.0
+      Joint7_L:  0.0
+      Joint1_R: -1.16
+      Joint2_R: -1.28
+      Joint3_R:  1.5707963
+      Joint4_R: -1.25
+      Joint5_R:  0.0
+      Joint6_R:  0.0
+      Joint7_R:  0.0
