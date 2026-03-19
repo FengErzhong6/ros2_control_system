@@ -13,6 +13,9 @@
 #include "rclcpp/publisher.hpp"
 #include "rclcpp_lifecycle/node_interfaces/lifecycle_node_interface.hpp"
 #include "std_msgs/msg/string.hpp"
+#include "tf2/LinearMath/Transform.h"
+#include "tf2/LinearMath/Quaternion.h"
+#include "tf2/LinearMath/Vector3.h"
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
 
@@ -38,13 +41,6 @@ public:
         const rclcpp_lifecycle::State &previous_state) override;
     controller_interface::CallbackReturn on_deactivate(
         const rclcpp_lifecycle::State &previous_state) override;
-
-    /** SE(3) from YAML: t + quaternion; R is 3×3 from q (base_R_child). */
-    struct RigidTransform {
-        double t[3] = {};
-        geometry_msgs::msg::Quaternion q;
-        double R[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
-    };
 
 private:
     static constexpr int kLeft = 0;
@@ -75,8 +71,8 @@ private:
     };
     rclcpp::TimerBase::SharedPtr tf_poll_timer_;
     std::mutex tf_cache_mutex_;
-    std::array<CachedTrackerData, kArmCount> tf_cache_{};
-    std::array<CachedTrackerData, kArmCount> tf_snapshot_{};
+    std::array<CachedTrackerData, kArmCount> tf_cache_;
+    std::array<CachedTrackerData, kArmCount> tf_snapshot_;
 
     // Tracker TF frame names
     std::string frame_torso_;
@@ -101,11 +97,11 @@ private:
     double zsp_angle_{0.0};
 
     /** chest → base (标定人机胸系到臂基). */
-    std::array<RigidTransform, kArmCount> base_T_chest_;
+    std::array<tf2::Transform, kArmCount> base_T_chest_;
     /** wrist_human → ee (人手腕系 → TCP). */
-    std::array<RigidTransform, kArmCount> wrist_T_ee_;
+    std::array<tf2::Transform, kArmCount> wrist_T_ee_;
     /** arm_human → arm_robot (人上臂系 → 肘向参考系，仅用旋转). */
-    std::array<RigidTransform, kArmCount> arm_human_T_arm_robot_;
+    std::array<tf2::Transform, kArmCount> arm_human_T_arm_robot_;
 
     // Smoothing parameters (low-pass + velocity clamping)
     double smoothing_alpha_{0.3};

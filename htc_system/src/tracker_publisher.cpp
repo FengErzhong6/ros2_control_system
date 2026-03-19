@@ -6,6 +6,9 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
+#include "tf2/LinearMath/Transform.h"
+#include "tf2/LinearMath/Quaternion.h"
+#include "tf2/LinearMath/Matrix3x3.h"
 #include "tf2_ros/transform_broadcaster.h"
 #include "openvr.h"
 
@@ -16,70 +19,9 @@ struct TrackerConfig {
 };
 
 struct RoleCorrection {
-    double offset[3] = {0.0, 0.0, 0.0};
-    double rot[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    tf2::Vector3 offset{0.0, 0.0, 0.0};
+    tf2::Quaternion rotation{0.0, 0.0, 0.0, 1.0};
 };
-
-// ── helpers ──────────────────────────────────────────────────────────────
-
-static void quaternionToRotationMatrix(double qx, double qy, double qz, double qw,
-                                       double (&rot)[3][3])
-{
-    rot[0][0] = 1.0 - 2.0 * (qy * qy + qz * qz);
-    rot[0][1] = 2.0 * (qx * qy - qz * qw);
-    rot[0][2] = 2.0 * (qx * qz + qy * qw);
-    rot[1][0] = 2.0 * (qx * qy + qz * qw);
-    rot[1][1] = 1.0 - 2.0 * (qx * qx + qz * qz);
-    rot[1][2] = 2.0 * (qy * qz - qx * qw);
-    rot[2][0] = 2.0 * (qx * qz - qy * qw);
-    rot[2][1] = 2.0 * (qy * qz + qx * qw);
-    rot[2][2] = 1.0 - 2.0 * (qx * qx + qy * qy);
-}
-
-static void applyRotationCorrection(double (&rot)[3][3], const double (&corr)[3][3])
-{
-    double tmp[3][3];
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j) {
-            tmp[i][j] = 0.0;
-            for (int k = 0; k < 3; ++k)
-                tmp[i][j] += rot[i][k] * corr[k][j];
-        }
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j)
-            rot[i][j] = tmp[i][j];
-}
-
-static void rotationToQuaternion(const double (&rot)[3][3],
-                                 double &qx, double &qy, double &qz, double &qw)
-{
-    double trace = rot[0][0] + rot[1][1] + rot[2][2];
-    if (trace > 0) {
-        double s = 0.5 / std::sqrt(trace + 1.0);
-        qw = 0.25 / s;
-        qx = (rot[2][1] - rot[1][2]) * s;
-        qy = (rot[0][2] - rot[2][0]) * s;
-        qz = (rot[1][0] - rot[0][1]) * s;
-    } else if (rot[0][0] > rot[1][1] && rot[0][0] > rot[2][2]) {
-        double s = 2.0 * std::sqrt(1.0 + rot[0][0] - rot[1][1] - rot[2][2]);
-        qw = (rot[2][1] - rot[1][2]) / s;
-        qx = 0.25 * s;
-        qy = (rot[0][1] + rot[1][0]) / s;
-        qz = (rot[0][2] + rot[2][0]) / s;
-    } else if (rot[1][1] > rot[2][2]) {
-        double s = 2.0 * std::sqrt(1.0 + rot[1][1] - rot[0][0] - rot[2][2]);
-        qw = (rot[0][2] - rot[2][0]) / s;
-        qx = (rot[0][1] + rot[1][0]) / s;
-        qy = 0.25 * s;
-        qz = (rot[1][2] + rot[2][1]) / s;
-    } else {
-        double s = 2.0 * std::sqrt(1.0 + rot[2][2] - rot[0][0] - rot[1][1]);
-        qw = (rot[1][0] - rot[0][1]) / s;
-        qx = (rot[0][2] + rot[2][0]) / s;
-        qy = (rot[1][2] + rot[2][1]) / s;
-        qz = 0.25 * s;
-    }
-}
 
 // SteamVR 3×4 HmdMatrix34_t → TF TransformStamped.
 //
@@ -90,7 +32,6 @@ static void rotationToQuaternion(const double (&rot)[3][3],
 //
 // SteamVR: X=right, Y=up, Z=backward   (right-handed)
 // ROS:     X=forward, Y=left, Z=up     (right-handed, REP-103)
-// 链: world_vr_T_tracker → 腕部偏置/姿态校正 → world_ros_T_tracker (等价于 ros_R_vr * …)
 static geometry_msgs::msg::TransformStamped matrixToTransform(
     const vr::HmdMatrix34_t &m,
     const std::string &parent_frame, const std::string &child_frame,
@@ -103,60 +44,46 @@ static geometry_msgs::msg::TransformStamped matrixToTransform(
     world_ros_T_tracker.child_frame_id = child_frame;
 
     // Step 1: vr_T_tracker（OpenVR standing 系下设备位姿）
-    double vr_R_tracker[3][3];
-    double vr_t_tracker[3] = {m.m[0][3], m.m[1][3], m.m[2][3]};
-    for (int i = 0; i < 3; i++)
-        for (int j = 0; j < 3; j++)
-            vr_R_tracker[i][j] = m.m[i][j];
+    tf2::Matrix3x3 vr_R(m.m[0][0], m.m[0][1], m.m[0][2],
+                         m.m[1][0], m.m[1][1], m.m[1][2],
+                         m.m[2][0], m.m[2][1], m.m[2][2]);
+    tf2::Vector3 vr_t(m.m[0][3], m.m[1][3], m.m[2][3]);
 
-    // Step 2: tracker 局部偏置 vr_p_wrist = vr_p_tracker + vr_R_tracker * p_offset（corrections.yaml）
-    const auto &off = correction.offset;
-    vr_t_tracker[0] += vr_R_tracker[0][0] * off[0] + vr_R_tracker[0][1] * off[1]
-                        + vr_R_tracker[0][2] * off[2];
-    vr_t_tracker[1] += vr_R_tracker[1][0] * off[0] + vr_R_tracker[1][1] * off[1]
-                        + vr_R_tracker[1][2] * off[2];
-    vr_t_tracker[2] += vr_R_tracker[2][0] * off[0] + vr_R_tracker[2][1] * off[1]
-                        + vr_R_tracker[2][2] * off[2];
+    // Step 2: tracker 局部偏置（corrections.yaml）
+    //   vr_p_wrist = vr_p_tracker + vr_R_tracker * p_offset
+    vr_t += vr_R * correction.offset;
 
-    // Step 3: VR 系下右乘姿态校正 vr_R_tracker ← vr_R_tracker * R_corr
-    applyRotationCorrection(vr_R_tracker, correction.rot);
+    // Step 3: VR 系下右乘姿态校正 vr_R ← vr_R * R_corr
+    tf2::Matrix3x3 R_corr(correction.rotation);
+    vr_R *= R_corr;
 
     // Step 4: ros_T_vr：SteamVR → ROS（REP-103）
-    double ros_t_tracker[3];
-    double ros_R_tracker[3][3];
+    tf2::Vector3 ros_t;
+    tf2::Matrix3x3 ros_R;
 
     if (apply_ros_T_vr) {
-        ros_t_tracker[0] = -vr_t_tracker[2];
-        ros_t_tracker[1] = -vr_t_tracker[0];
-        ros_t_tracker[2] =  vr_t_tracker[1];
-        ros_R_tracker[0][0] =  vr_R_tracker[2][2];
-        ros_R_tracker[0][1] =  vr_R_tracker[2][0];
-        ros_R_tracker[0][2] = -vr_R_tracker[2][1];
-        ros_R_tracker[1][0] =  vr_R_tracker[0][2];
-        ros_R_tracker[1][1] =  vr_R_tracker[0][0];
-        ros_R_tracker[1][2] = -vr_R_tracker[0][1];
-        ros_R_tracker[2][0] = -vr_R_tracker[1][2];
-        ros_R_tracker[2][1] = -vr_R_tracker[1][0];
-        ros_R_tracker[2][2] =  vr_R_tracker[1][1];
+        // ros_T_vr = [[-Z], [-X], [Y]]  for both position and rotation basis
+        tf2::Matrix3x3 ros_T_vr(
+             0,  0, -1,
+            -1,  0,  0,
+             0,  1,  0);
+        ros_t = ros_T_vr * vr_t;
+        ros_R = ros_T_vr * vr_R * ros_T_vr.transpose();
     } else {
-        ros_t_tracker[0] = vr_t_tracker[0];
-        ros_t_tracker[1] = vr_t_tracker[1];
-        ros_t_tracker[2] = vr_t_tracker[2];
-        for (int i = 0; i < 3; i++)
-            for (int j = 0; j < 3; j++)
-                ros_R_tracker[i][j] = vr_R_tracker[i][j];
+        ros_t = vr_t;
+        ros_R = vr_R;
     }
 
-    world_ros_T_tracker.transform.translation.x = ros_t_tracker[0];
-    world_ros_T_tracker.transform.translation.y = ros_t_tracker[1];
-    world_ros_T_tracker.transform.translation.z = ros_t_tracker[2];
+    world_ros_T_tracker.transform.translation.x = ros_t.x();
+    world_ros_T_tracker.transform.translation.y = ros_t.y();
+    world_ros_T_tracker.transform.translation.z = ros_t.z();
 
-    double qx, qy, qz, qw;
-    rotationToQuaternion(ros_R_tracker, qx, qy, qz, qw);
-    world_ros_T_tracker.transform.rotation.x = qx;
-    world_ros_T_tracker.transform.rotation.y = qy;
-    world_ros_T_tracker.transform.rotation.z = qz;
-    world_ros_T_tracker.transform.rotation.w = qw;
+    tf2::Quaternion q;
+    ros_R.getRotation(q);
+    world_ros_T_tracker.transform.rotation.x = q.x();
+    world_ros_T_tracker.transform.rotation.y = q.y();
+    world_ros_T_tracker.transform.rotation.z = q.z();
+    world_ros_T_tracker.transform.rotation.w = q.w();
     return world_ros_T_tracker;
 }
 
@@ -235,7 +162,6 @@ private:
 
     void loadCorrections(const std::vector<std::string> &roles)
     {
-        // Collect unique role names
         std::vector<std::string> unique_roles;
         for (const auto &r : roles) {
             if (!r.empty() && role_corrections_.find(r) == role_corrections_.end()) {
@@ -256,27 +182,21 @@ private:
                 ori_key, {0.0, 0.0, 0.0, 1.0});
 
             if (offset_vec.size() >= 3) {
-                corr.offset[0] = offset_vec[0];
-                corr.offset[1] = offset_vec[1];
-                corr.offset[2] = offset_vec[2];
+                corr.offset.setValue(offset_vec[0], offset_vec[1], offset_vec[2]);
             }
 
             if (rotation_vec.size() >= 4) {
-                quaternionToRotationMatrix(
-                    rotation_vec[0], rotation_vec[1],
-                    rotation_vec[2], rotation_vec[3],
-                    corr.rot);
+                corr.rotation.setValue(rotation_vec[0], rotation_vec[1],
+                                      rotation_vec[2], rotation_vec[3]);
             }
 
             RCLCPP_INFO(get_logger(),
                 "Correction [%s]: offset=[%.4f, %.4f, %.4f]  "
                 "rotation=[%.4f, %.4f, %.4f, %.4f]",
                 role.c_str(),
-                corr.offset[0], corr.offset[1], corr.offset[2],
-                rotation_vec.size() >= 4 ? rotation_vec[0] : 0.0,
-                rotation_vec.size() >= 4 ? rotation_vec[1] : 0.0,
-                rotation_vec.size() >= 4 ? rotation_vec[2] : 0.0,
-                rotation_vec.size() >= 4 ? rotation_vec[3] : 1.0);
+                corr.offset.x(), corr.offset.y(), corr.offset.z(),
+                corr.rotation.x(), corr.rotation.y(),
+                corr.rotation.z(), corr.rotation.w());
         }
     }
 

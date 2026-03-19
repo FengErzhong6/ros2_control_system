@@ -8,6 +8,7 @@
 #include "rclcpp/logging.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 #include "tf2/exceptions.h"
+#include "tf2/LinearMath/Matrix3x3.h"
 
 using config_type = controller_interface::interface_configuration_type;
 
@@ -25,41 +26,6 @@ LoanedInterfaceT *find_loaned_interface(
         }
     }
     return nullptr;
-}
-
-void quatMultiply(const geometry_msgs::msg::Quaternion &a,
-                  const geometry_msgs::msg::Quaternion &b,
-                  geometry_msgs::msg::Quaternion &out_R)
-{
-    out_R.w = a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z;
-    out_R.x = a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y;
-    out_R.y = a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x;
-    out_R.z = a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w;
-}
-
-void quatToR(const geometry_msgs::msg::Quaternion &q, double (&out_R)[3][3])
-{
-    out_R[0][0] = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
-    out_R[0][1] = 2.0 * (q.x * q.y - q.z * q.w);
-    out_R[0][2] = 2.0 * (q.x * q.z + q.y * q.w);
-    out_R[1][0] = 2.0 * (q.x * q.y + q.z * q.w);
-    out_R[1][1] = 1.0 - 2.0 * (q.x * q.x + q.z * q.z);
-    out_R[1][2] = 2.0 * (q.y * q.z - q.x * q.w);
-    out_R[2][0] = 2.0 * (q.x * q.z - q.y * q.w);
-    out_R[2][1] = 2.0 * (q.y * q.z + q.x * q.w);
-    out_R[2][2] = 1.0 - 2.0 * (q.x * q.x + q.y * q.y);
-}
-
-void quatRotateVector(const geometry_msgs::msg::Quaternion &R_q,
-                      const double (&v)[3],
-                      double (&out_v)[3])
-{
-    double t0 = 2.0 * (R_q.y * v[2] - R_q.z * v[1]);
-    double t1 = 2.0 * (R_q.z * v[0] - R_q.x * v[2]);
-    double t2 = 2.0 * (R_q.x * v[1] - R_q.y * v[0]);
-    out_v[0] = v[0] + R_q.w * t0 + (R_q.y * t2 - R_q.z * t1);
-    out_v[1] = v[1] + R_q.w * t1 + (R_q.z * t0 - R_q.x * t2);
-    out_v[2] = v[2] + R_q.w * t2 + (R_q.x * t1 - R_q.y * t0);
 }
 
 }  // namespace
@@ -150,7 +116,7 @@ void TrackerTeleopController::pollTfCallback()
     const std::string *frame_hand[] = {&frame_left_hand_, &frame_right_hand_};
     const std::string *frame_arm[] = {&frame_left_upper_arm_, &frame_right_upper_arm_};
 
-    std::array<CachedTrackerData, kArmCount> fresh{};
+    std::array<CachedTrackerData, kArmCount> fresh;
     for (int arm = 0; arm < static_cast<int>(kArmCount); ++arm) {
         fresh[arm].hand_valid = lookupTf(
             frame_torso_, *frame_hand[arm], fresh[arm].chest_T_hand);
@@ -319,26 +285,24 @@ void TrackerTeleopController::computeAndPublishFK()
     }
 }
 
-static void readRigidTransform(
+static tf2::Transform readRigidTransform(
     const rclcpp_lifecycle::LifecycleNode::SharedPtr &node,
-    const std::string &prefix,
-    TrackerTeleopController::RigidTransform &out_T)
+    const std::string &prefix)
 {
     std::vector<double> pos_vec, ori_vec;
     node->get_parameter(prefix + ".position", pos_vec);
     node->get_parameter(prefix + ".orientation", ori_vec);
+
+    tf2::Vector3 t(0, 0, 0);
+    tf2::Quaternion q(0, 0, 0, 1);
+
     if (pos_vec.size() >= 3) {
-        out_T.t[0] = pos_vec[0];
-        out_T.t[1] = pos_vec[1];
-        out_T.t[2] = pos_vec[2];
+        t.setValue(pos_vec[0], pos_vec[1], pos_vec[2]);
     }
     if (ori_vec.size() >= 4) {
-        out_T.q.x = ori_vec[0];
-        out_T.q.y = ori_vec[1];
-        out_T.q.z = ori_vec[2];
-        out_T.q.w = ori_vec[3];
+        q.setValue(ori_vec[0], ori_vec[1], ori_vec[2], ori_vec[3]);
     }
-    quatToR(out_T.q, out_T.R);
+    return tf2::Transform(q, t);
 }
 
 controller_interface::CallbackReturn
@@ -391,7 +355,7 @@ TrackerTeleopController::on_configure(const rclcpp_lifecycle::State &)
     static const char *side_tags[]   = {"LEFT", "RIGHT"};
     struct {
         const char *name;
-        std::array<RigidTransform, kArmCount> &arr;
+        std::array<tf2::Transform, kArmCount> &arr;
     } param_groups[] = {
         {"base_T_chest", base_T_chest_},
         {"wrist_T_ee", wrist_T_ee_},
@@ -399,13 +363,15 @@ TrackerTeleopController::on_configure(const rclcpp_lifecycle::State &)
     };
     for (auto &[name, arr] : param_groups) {
         for (int i = 0; i < static_cast<int>(kArmCount); ++i) {
-            readRigidTransform(get_node(),
-                               std::string(name) + "." + side_labels[i], arr[i]);
+            arr[i] = readRigidTransform(get_node(),
+                                        std::string(name) + "." + side_labels[i]);
+            const auto &t = arr[i].getOrigin();
+            const auto &q = arr[i].getRotation();
             RCLCPP_INFO(logger,
                         "%s %s: t=[%.3f, %.3f, %.3f] quat=[%.4f, %.4f, %.4f, %.4f]",
                         name, side_tags[i],
-                        arr[i].t[0], arr[i].t[1], arr[i].t[2],
-                        arr[i].q.x, arr[i].q.y, arr[i].q.z, arr[i].q.w);
+                        t.x(), t.y(), t.z(),
+                        q.x(), q.y(), q.z(), q.w());
         }
     }
 
@@ -548,53 +514,39 @@ TrackerTeleopController::update(const rclcpp::Time &, const rclcpp::Duration &pe
             if (stamp != last_hand_tf_stamp_[arm]) {
                 last_hand_tf_stamp_[arm] = stamp;
 
-                const RigidTransform &base_T_chest = base_T_chest_[arm];
-                const auto &chest_t_wrist = snap.chest_T_hand.transform.translation;
-                const auto &chest_R_wrist = snap.chest_T_hand.transform.rotation;
+                const tf2::Transform &base_T_chest = base_T_chest_[arm];
+                const auto &tf_wrist = snap.chest_T_hand.transform;
 
-                double chest_t_wrist_scaled[3] = {
-                    chest_t_wrist.x * position_scale_,
-                    chest_t_wrist.y * position_scale_,
-                    chest_t_wrist.z * position_scale_,
-                };
+                tf2::Transform chest_T_wrist(
+                    tf2::Quaternion(tf_wrist.rotation.x, tf_wrist.rotation.y,
+                                   tf_wrist.rotation.z, tf_wrist.rotation.w),
+                    tf2::Vector3(tf_wrist.translation.x * position_scale_,
+                                tf_wrist.translation.y * position_scale_,
+                                tf_wrist.translation.z * position_scale_));
+
+                if (!enable_orientation_) {
+                    chest_T_wrist.setRotation(tf2::Quaternion::getIdentity());
+                }
+
+                tf2::Transform base_T_wrist = base_T_chest * chest_T_wrist;
+                tf2::Transform base_T_ee_tf = base_T_wrist * wrist_T_ee_[arm];
+
+                // Scale x-offset relative to the chest anchor in base frame
+                tf2::Vector3 ee_pos = base_T_ee_tf.getOrigin();
+                double offset_x = ee_pos.x() - base_T_chest.getOrigin().x();
+                ee_pos.setX(base_T_chest.getOrigin().x() + offset_x * base_x_scale_);
+                base_T_ee_tf.setOrigin(ee_pos);
 
                 geometry_msgs::msg::PoseStamped base_T_ee;
                 base_T_ee.header.frame_id = base_frame_;
-                base_T_ee.pose.position.x = base_T_chest.t[0]
-                    + base_T_chest.R[0][0] * chest_t_wrist_scaled[0]
-                    + base_T_chest.R[0][1] * chest_t_wrist_scaled[1]
-                    + base_T_chest.R[0][2] * chest_t_wrist_scaled[2];
-                base_T_ee.pose.position.y = base_T_chest.t[1]
-                    + base_T_chest.R[1][0] * chest_t_wrist_scaled[0]
-                    + base_T_chest.R[1][1] * chest_t_wrist_scaled[1]
-                    + base_T_chest.R[1][2] * chest_t_wrist_scaled[2];
-                base_T_ee.pose.position.z = base_T_chest.t[2]
-                    + base_T_chest.R[2][0] * chest_t_wrist_scaled[0]
-                    + base_T_chest.R[2][1] * chest_t_wrist_scaled[1]
-                    + base_T_chest.R[2][2] * chest_t_wrist_scaled[2];
-
-                geometry_msgs::msg::Quaternion base_R_wrist;
-                if (enable_orientation_) {
-                    quatMultiply(base_T_chest.q, chest_R_wrist, base_R_wrist);
-                } else {
-                    base_R_wrist = base_T_chest.q;
-                }
-
-                const RigidTransform &wrist_T_ee = wrist_T_ee_[arm];
-                double wrist_T_ee_t_in_base[3];
-                quatRotateVector(base_R_wrist, wrist_T_ee.t, wrist_T_ee_t_in_base);
-                base_T_ee.pose.position.x += wrist_T_ee_t_in_base[0];
-                base_T_ee.pose.position.y += wrist_T_ee_t_in_base[1];
-                base_T_ee.pose.position.z += wrist_T_ee_t_in_base[2];
-
-                // Scale x-offset relative to the chest anchor in base frame,
-                // compensating for human-vs-robot arm length mismatch.
-                double offset_x = base_T_ee.pose.position.x - base_T_chest.t[0];
-                base_T_ee.pose.position.x = base_T_chest.t[0] + offset_x * base_x_scale_;
-
-                geometry_msgs::msg::Quaternion base_R_ee;
-                quatMultiply(base_R_wrist, wrist_T_ee.q, base_R_ee);
-                base_T_ee.pose.orientation = base_R_ee;
+                base_T_ee.pose.position.x = base_T_ee_tf.getOrigin().x();
+                base_T_ee.pose.position.y = base_T_ee_tf.getOrigin().y();
+                base_T_ee.pose.position.z = base_T_ee_tf.getOrigin().z();
+                const tf2::Quaternion &ee_q = base_T_ee_tf.getRotation();
+                base_T_ee.pose.orientation.x = ee_q.x();
+                base_T_ee.pose.orientation.y = ee_q.y();
+                base_T_ee.pose.orientation.z = ee_q.z();
+                base_T_ee.pose.orientation.w = ee_q.w();
 
                 double base_v_elbow[3] = {
                     base_v_elbow_default_[0],
@@ -602,21 +554,19 @@ TrackerTeleopController::update(const rclcpp::Time &, const rclcpp::Duration &pe
                     base_v_elbow_default_[2]};
 
                 if (snap.arm_valid) {
-                    geometry_msgs::msg::Quaternion base_R_chest_arm;
-                    quatMultiply(base_T_chest.q,
-                                 snap.chest_T_arm.transform.rotation,
-                                 base_R_chest_arm);
-                    geometry_msgs::msg::Quaternion base_R_arm_robot;
-                    quatMultiply(base_R_chest_arm,
-                                 arm_human_T_arm_robot_[arm].q,
-                                 base_R_arm_robot);
+                    const auto &tf_arm = snap.chest_T_arm.transform;
+                    tf2::Quaternion chest_R_arm(
+                        tf_arm.rotation.x, tf_arm.rotation.y,
+                        tf_arm.rotation.z, tf_arm.rotation.w);
+                    tf2::Quaternion base_R_arm_robot =
+                        base_T_chest.getRotation() * chest_R_arm *
+                        arm_human_T_arm_robot_[arm].getRotation();
 
-                    base_v_elbow[0] = 2.0 * (base_R_arm_robot.x * base_R_arm_robot.y
-                                             - base_R_arm_robot.w * base_R_arm_robot.z);
-                    base_v_elbow[1] = 1.0 - 2.0 * (base_R_arm_robot.x * base_R_arm_robot.x
-                                                   + base_R_arm_robot.z * base_R_arm_robot.z);
-                    base_v_elbow[2] = 2.0 * (base_R_arm_robot.y * base_R_arm_robot.z
-                                             + base_R_arm_robot.w * base_R_arm_robot.x);
+                    tf2::Matrix3x3 base_M_arm_robot(base_R_arm_robot);
+                    tf2::Vector3 y_col = base_M_arm_robot.getColumn(1);
+                    base_v_elbow[0] = y_col.x();
+                    base_v_elbow[1] = y_col.y();
+                    base_v_elbow[2] = y_col.z();
                 }
 
                 double out_q_joints_rad[kJointsPerArm];

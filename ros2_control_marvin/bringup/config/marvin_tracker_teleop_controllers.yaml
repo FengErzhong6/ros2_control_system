@@ -71,7 +71,7 @@ tracker_teleop_controller:
         position:    [0.0, 0.18, 0.02]  # chest原点在base坐标系下的位置
         orientation: [0.7071, 0.0, 0.0, 0.7071]
       right:
-        position:    [0.0, -0.18, 0.03]
+        position:    [0.0, -0.18, 0.02]
         orientation: [-0.7071, 0.0, 0.0, 0.7071]
 
     # wrist_T_ee:
