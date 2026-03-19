@@ -55,6 +55,11 @@ controller_interface::CallbackReturn TrackerTeleopController::on_init()
         auto_declare<double>("zsp_angle", 0.0);
         auto_declare<double>("j4_bound", 0.0);
 
+        auto_declare<std::vector<double>>("ik_ee_position_offset",
+                                          {0.0, 0.0, 0.17455});
+        auto_declare<double>("dh_d1", 0.17455);
+        auto_declare<double>("dh_d3", 0.287);
+
         auto_declare<double>("smoothing_alpha", 0.3);
         auto_declare<double>("max_joint_velocity", 2.0);
         auto_declare<double>("base_x_scale", 1.0);
@@ -173,10 +178,10 @@ TrackerTeleopController::IKResult TrackerTeleopController::solveIK(
     };
 
     auto classify_j4 = [this](double j4) -> const char * {
-        return (j4 < j4_bound_) ? "Case A (type -1)" : "Case B (type +1)";
+        return (j4 < j4_bound_) ? "A" : "B";
     };
 
-    // Attempt 1: NEAR_DIR — use tracker elbow direction to constrain null-space
+    // --- Attempt 1: NEAR_DIR ---
     setup_common();
     ik.m_Input_IK_ZSPType = FX_PILOT_NSP_TYPES_NEAR_DIR;
     ik.m_Input_IK_ZSPPara[0] = base_v_elbow[0];
@@ -186,117 +191,93 @@ TrackerTeleopController::IKResult TrackerTeleopController::solveIK(
 
     IKResult dir_result = evaluate_ik();
 
-    if (!first_ik_logged_[arm]) {
-        RCLCPP_INFO(logger,
-            "Arm %zu IK input: ee_T_base pos=[%.4f, %.4f, %.4f] m  "
-            "quat=[%.4f, %.4f, %.4f, %.4f]  "
-            "elbow_ref_vec=[%.3f, %.3f, %.3f]",
+    // --- Attempt 2: NEAR_REF (optional fallback) ---
+    IKResult ref_result = IKResult::kNoTarget;
+    if (dir_result != IKResult::kSuccess && ik_fallback_near_ref_) {
+        setup_common();
+        ik.m_Input_IK_ZSPType = FX_PILOT_NSP_TYPES_NEAR_REF;
+        ref_result = evaluate_ik();
+    }
+
+    // --- Attempt 3: Clamp (optional) ---
+    bool clamped = false;
+    if (dir_result != IKResult::kSuccess && ref_result != IKResult::kSuccess) {
+        IKResult clamp_src = ik_fallback_near_ref_ ? ref_result : dir_result;
+        if (ik_clamp_joint_limits_ &&
+            clamp_src == IKResult::kJointLimitExceeded) {
+            for (size_t j = 0; j < kJointsPerArm; ++j) {
+                out_q_joints_rad[j] = std::clamp(ik.m_Output_RetJoint[j],
+                                                  ik.m_Output_RunLmtN[j],
+                                                  ik.m_Output_RunLmtP[j]) * kDeg2Rad;
+            }
+            clamped = true;
+        }
+    }
+
+    // --- Determine final result ---
+    IKResult final_result;
+    if (dir_result == IKResult::kSuccess) {
+        final_result = IKResult::kSuccess;
+    } else if (ref_result == IKResult::kSuccess) {
+        final_result = IKResult::kSuccess;
+    } else if (clamped) {
+        final_result = IKResult::kJointLimitClamped;
+    } else {
+        final_result = dir_result;
+    }
+
+    // --- Consolidated single-line log ---
+    const bool solved = (final_result == IKResult::kSuccess ||
+                         final_result == IKResult::kJointLimitClamped);
+
+    std::string chain = "NEAR_DIR ";
+    if (dir_result == IKResult::kSuccess) {
+        chain += std::string("OK(") + classify_j4(ik.m_Output_RetJoint[3]) + ")";
+    } else {
+        chain += std::string("FAIL(") + ikResultToString(dir_result) + ")";
+        if (ik_fallback_near_ref_) {
+            chain += " -> NEAR_REF ";
+            if (ref_result == IKResult::kSuccess) {
+                chain += std::string("OK(") + classify_j4(ik.m_Output_RetJoint[3]) + ")";
+            } else {
+                chain += std::string("FAIL(") + ikResultToString(ref_result) + ")";
+            }
+        }
+        if (clamped) {
+            chain += " -> CLAMPED";
+        }
+    }
+
+    if (solved) {
+        RCLCPP_INFO_THROTTLE(logger, *get_node()->get_clock(), 1000,
+            "Arm %zu IK | tcp=[%.4f, %.4f, %.4f] quat=[%.4f, %.4f, %.4f, %.4f] "
+            "| elbow=[%.3f, %.3f, %.3f] | %s "
+            "| q=[%.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f] deg",
             arm,
             base_T_ee.pose.position.x, base_T_ee.pose.position.y,
             base_T_ee.pose.position.z,
             base_T_ee.pose.orientation.x, base_T_ee.pose.orientation.y,
             base_T_ee.pose.orientation.z, base_T_ee.pose.orientation.w,
-            base_v_elbow[0], base_v_elbow[1], base_v_elbow[2]);
-        RCLCPP_INFO(logger,
-            "Arm %zu: NEAR_DIR result=%s  refJoint=[%.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f]",
-            arm, ikResultToString(dir_result),
-            last_joint_deg_[arm][0], last_joint_deg_[arm][1], last_joint_deg_[arm][2],
-            last_joint_deg_[arm][3], last_joint_deg_[arm][4], last_joint_deg_[arm][5],
-            last_joint_deg_[arm][6]);
-        if (dir_result == IKResult::kSuccess) {
-            double j4 = ik.m_Output_RetJoint[3];
-            RCLCPP_INFO(logger,
-                "Arm %zu: NEAR_DIR solved [%s] (J4=%.2f deg, bound=%.2f deg)  "
-                "retJoint=[%.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f]",
-                arm, classify_j4(j4), j4, j4_bound_,
-                ik.m_Output_RetJoint[0], ik.m_Output_RetJoint[1], ik.m_Output_RetJoint[2],
-                ik.m_Output_RetJoint[3], ik.m_Output_RetJoint[4], ik.m_Output_RetJoint[5],
-                ik.m_Output_RetJoint[6]);
-        }
-        first_ik_logged_[arm] = true;
-    }
-
-    if (dir_result == IKResult::kSuccess) {
-        return IKResult::kSuccess;
-    }
-
-    // Attempt 2 (optional): NEAR_REF — relax elbow constraint, pick solution
-    // nearest to current joint state
-    IKResult ref_result = IKResult::kNoTarget;
-    if (ik_fallback_near_ref_) {
+            base_v_elbow[0], base_v_elbow[1], base_v_elbow[2],
+            chain.c_str(),
+            out_q_joints_rad[0] * kRad2Deg, out_q_joints_rad[1] * kRad2Deg,
+            out_q_joints_rad[2] * kRad2Deg, out_q_joints_rad[3] * kRad2Deg,
+            out_q_joints_rad[4] * kRad2Deg, out_q_joints_rad[5] * kRad2Deg,
+            out_q_joints_rad[6] * kRad2Deg);
+    } else {
         RCLCPP_WARN_THROTTLE(logger, *get_node()->get_clock(), 1000,
-            "Arm %zu: NEAR_DIR failed (%s), falling back to NEAR_REF  "
-            "target pos=[%.4f, %.4f, %.4f] quat=[%.4f, %.4f, %.4f, %.4f]  "
-            "elbow_ref=[%.3f, %.3f, %.3f]  refJoint=[%.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f]",
-            arm, ikResultToString(dir_result),
+            "Arm %zu IK | tcp=[%.4f, %.4f, %.4f] quat=[%.4f, %.4f, %.4f, %.4f] "
+            "| elbow=[%.3f, %.3f, %.3f] | %s",
+            arm,
             base_T_ee.pose.position.x, base_T_ee.pose.position.y,
             base_T_ee.pose.position.z,
             base_T_ee.pose.orientation.x, base_T_ee.pose.orientation.y,
             base_T_ee.pose.orientation.z, base_T_ee.pose.orientation.w,
             base_v_elbow[0], base_v_elbow[1], base_v_elbow[2],
-            last_joint_deg_[arm][0], last_joint_deg_[arm][1], last_joint_deg_[arm][2],
-            last_joint_deg_[arm][3], last_joint_deg_[arm][4], last_joint_deg_[arm][5],
-            last_joint_deg_[arm][6]);
-
-        setup_common();
-        ik.m_Input_IK_ZSPType = FX_PILOT_NSP_TYPES_NEAR_REF;
-
-        ref_result = evaluate_ik();
-        if (ref_result == IKResult::kSuccess) {
-            double j4 = ik.m_Output_RetJoint[3];
-            RCLCPP_WARN_THROTTLE(logger, *get_node()->get_clock(), 1000,
-                "Arm %zu: NEAR_REF fallback solved [%s] (J4=%.2f deg, bound=%.2f deg)  "
-                "retJoint=[%.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f]",
-                arm, classify_j4(j4), j4, j4_bound_,
-                ik.m_Output_RetJoint[0], ik.m_Output_RetJoint[1], ik.m_Output_RetJoint[2],
-                ik.m_Output_RetJoint[3], ik.m_Output_RetJoint[4], ik.m_Output_RetJoint[5],
-                ik.m_Output_RetJoint[6]);
-            return IKResult::kSuccess;
-        }
-        RCLCPP_WARN_THROTTLE(logger, *get_node()->get_clock(), 1000,
-            "Arm %zu: NEAR_REF also failed (%s)", arm, ikResultToString(ref_result));
+            chain.c_str());
     }
 
-    // Attempt 3 (optional): clamp to joint limits if the best attempt had a
-    // solution that only exceeded limits.
-    // Use whichever attempt last produced a kJointLimitExceeded result;
-    // its data is still in the ik struct.
-    IKResult clamp_candidate = ik_fallback_near_ref_ ? ref_result : dir_result;
-    if (ik_clamp_joint_limits_ &&
-        clamp_candidate == IKResult::kJointLimitExceeded) {
-        for (size_t j = 0; j < kJointsPerArm; ++j) {
-            double val = ik.m_Output_RetJoint[j];
-            double lo  = ik.m_Output_RunLmtN[j];
-            double hi  = ik.m_Output_RunLmtP[j];
-            out_q_joints_rad[j] = std::clamp(val, lo, hi) * kDeg2Rad;
-        }
-        double j4_clamped = std::clamp(ik.m_Output_RetJoint[3],
-                                       ik.m_Output_RunLmtN[3],
-                                       ik.m_Output_RunLmtP[3]);
-        RCLCPP_WARN_THROTTLE(logger, *get_node()->get_clock(), 2000,
-            "Arm %zu: clamped to joint limits [%s] (J4=%.2f deg, bound=%.2f deg, "
-            "exceedance=%.1f deg)",
-            arm, classify_j4(j4_clamped), j4_clamped, j4_bound_,
-            ik.m_Output_JntExdABS);
-        return IKResult::kJointLimitClamped;
-    }
-
-    RCLCPP_WARN_THROTTLE(logger, *get_node()->get_clock(), 1000,
-        "Arm %zu: IK all attempts failed — NEAR_DIR: %s%s%s  "
-        "target pos=[%.4f, %.4f, %.4f] quat=[%.4f, %.4f, %.4f, %.4f]  "
-        "elbow_ref=[%.3f, %.3f, %.3f]  refJoint=[%.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f]",
-        arm, ikResultToString(dir_result),
-        ik_fallback_near_ref_ ? ", NEAR_REF: " : "",
-        ik_fallback_near_ref_ ? ikResultToString(ref_result) : "",
-        base_T_ee.pose.position.x, base_T_ee.pose.position.y,
-        base_T_ee.pose.position.z,
-        base_T_ee.pose.orientation.x, base_T_ee.pose.orientation.y,
-        base_T_ee.pose.orientation.z, base_T_ee.pose.orientation.w,
-        base_v_elbow[0], base_v_elbow[1], base_v_elbow[2],
-        last_joint_deg_[arm][0], last_joint_deg_[arm][1], last_joint_deg_[arm][2],
-        last_joint_deg_[arm][3], last_joint_deg_[arm][4], last_joint_deg_[arm][5],
-        last_joint_deg_[arm][6]);
-    return dir_result;
+    return final_result;
 }
 
 const char *TrackerTeleopController::ikResultToString(IKResult result)
@@ -416,6 +397,14 @@ TrackerTeleopController::on_configure(const rclcpp_lifecycle::State &)
     get_node()->get_parameter("ik_fallback_near_ref", ik_fallback_near_ref_);
     get_node()->get_parameter("ik_clamp_joint_limits", ik_clamp_joint_limits_);
 
+    std::vector<double> ee_offset_param;
+    if (get_node()->get_parameter("ik_ee_position_offset", ee_offset_param) &&
+        ee_offset_param.size() >= 3) {
+        ik_ee_position_offset_ = {{ee_offset_param[0], ee_offset_param[1], ee_offset_param[2]}};
+    }
+    get_node()->get_parameter("dh_d1", dh_d1_);
+    get_node()->get_parameter("dh_d3", dh_d3_);
+
     smoothing_alpha_ = std::clamp(smoothing_alpha_, 0.01, 1.0);
 
     std::vector<double> elbow_dir_param;
@@ -457,6 +446,10 @@ TrackerTeleopController::on_configure(const rclcpp_lifecycle::State &)
     RCLCPP_INFO(logger, "IK fallback NEAR_REF: %s, clamp joint limits: %s",
                 ik_fallback_near_ref_ ? "ON" : "OFF",
                 ik_clamp_joint_limits_ ? "ON" : "OFF");
+    RCLCPP_INFO(logger, "IK ee position offset: [%.5f, %.5f, %.5f]",
+                ik_ee_position_offset_[0], ik_ee_position_offset_[1],
+                ik_ee_position_offset_[2]);
+    RCLCPP_INFO(logger, "DH d1=%.5f m, d3=%.5f m", dh_d1_, dh_d3_);
 
     for (auto &arm : last_joint_deg_) arm.fill(0.0);
     for (auto &arm : smoothed_joints_rad_) arm.fill(0.0);
@@ -610,6 +603,11 @@ TrackerTeleopController::update(const rclcpp::Time &, const rclcpp::Duration &pe
                 tf2::Vector3 ee_pos = base_T_ee_tf.getOrigin();
                 double offset_x = ee_pos.x() - base_T_chest.getOrigin().x();
                 ee_pos.setX(base_T_chest.getOrigin().x() + offset_x * base_x_scale_);
+
+                // Compensate link1 height: shift from link1-end frame to true base
+                ee_pos += tf2::Vector3(ik_ee_position_offset_[0],
+                                       ik_ee_position_offset_[1],
+                                       ik_ee_position_offset_[2]);
                 base_T_ee_tf.setOrigin(ee_pos);
 
                 geometry_msgs::msg::PoseStamped base_T_ee;
@@ -645,12 +643,26 @@ TrackerTeleopController::update(const rclcpp::Time &, const rclcpp::Duration &pe
 
                     if (!first_ik_logged_[arm]) {
                         RCLCPP_INFO(logger,
-                            "Arm %d elbow dir: base_v_elbow=[%.3f, %.3f, %.3f]  "
+                            "Arm %d elbow dir (raw): base_v_elbow=[%.3f, %.3f, %.3f]  "
                             "chest_R_arm quat=[%.3f, %.3f, %.3f, %.3f]",
                             arm,
                             base_v_elbow[0], base_v_elbow[1], base_v_elbow[2],
                             tf_arm.rotation.x, tf_arm.rotation.y,
                             tf_arm.rotation.z, tf_arm.rotation.w);
+                    }
+                }
+
+                // Scale elbow direction to d3 length, then offset by +d1 along Z
+                // to form a vector from true base origin to the elbow position.
+                {
+                    double len = std::sqrt(base_v_elbow[0] * base_v_elbow[0] +
+                                           base_v_elbow[1] * base_v_elbow[1] +
+                                           base_v_elbow[2] * base_v_elbow[2]);
+                    if (len > 1e-9) {
+                        double scale = dh_d3_ / len;
+                        base_v_elbow[0] *= scale;
+                        base_v_elbow[1] *= scale;
+                        base_v_elbow[2] = base_v_elbow[2] * scale + dh_d1_;
                     }
                 }
 
@@ -665,6 +677,7 @@ TrackerTeleopController::update(const rclcpp::Time &, const rclcpp::Duration &pe
                         base_T_ee.pose.orientation.x, base_T_ee.pose.orientation.y,
                         base_T_ee.pose.orientation.z, base_T_ee.pose.orientation.w,
                         base_v_elbow[0], base_v_elbow[1], base_v_elbow[2]);
+                    first_ik_logged_[arm] = true;
                 }
 
                 double out_q_joints_rad[kJointsPerArm];

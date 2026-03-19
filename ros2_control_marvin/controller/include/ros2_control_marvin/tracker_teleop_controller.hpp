@@ -96,6 +96,9 @@ private:
     std::array<double, 3> base_v_elbow_default_{{0.0, 0.0, -1.0}};
     double zsp_angle_{0.0};
     double j4_bound_{0.0};
+    std::array<double, 3> ik_ee_position_offset_{{0.0, 0.0, 0.0}};
+    double dh_d1_{0.17455};
+    double dh_d3_{0.287};
 
     /** chest → base (标定人机胸系到臂基). */
     std::array<tf2::Transform, kArmCount> base_T_chest_;
