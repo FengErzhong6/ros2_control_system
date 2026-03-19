@@ -176,6 +176,14 @@ endif()
 install(
   DIRECTORY description/
   DESTINATION share/${PROJECT_NAME}/description
+  PATTERN "scripts/*.py" EXCLUDE
+)
+
+install(
+  PROGRAMS
+    description/scripts/joint_gui_publisher.py
+    description/scripts/vector_marker_publisher.py
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 install(

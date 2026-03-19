@@ -95,6 +95,7 @@ private:
     std::string base_frame_{"base_link"};
     std::array<double, 3> base_v_elbow_default_{{0.0, 0.0, -1.0}};
     double zsp_angle_{0.0};
+    double j4_bound_{0.0};
 
     /** chest → base (标定人机胸系到臂基). */
     std::array<tf2::Transform, kArmCount> base_T_chest_;
@@ -111,6 +112,7 @@ private:
     // IK target: last successful solution (smoothing always converges to this)
     std::array<std::array<double, kJointsPerArm>, kArmCount> target_joints_rad_{};
     std::array<bool, kArmCount> has_valid_target_{{false, false}};
+    std::array<bool, kArmCount> first_ik_logged_{{false, false}};
 
     // TF timestamp tracking: skip IK when tracker data hasn't changed
     std::array<rclcpp::Time, kArmCount> last_hand_tf_stamp_{

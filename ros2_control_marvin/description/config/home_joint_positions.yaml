@@ -1,6 +1,6 @@
-joint_state_publisher_gui:
+joint_gui_publisher:
   ros__parameters:
-    zeros:
+    initial_positions:
       Joint1_L:  1.16
       Joint2_L: -1.28
       Joint3_L: -1.5707963
