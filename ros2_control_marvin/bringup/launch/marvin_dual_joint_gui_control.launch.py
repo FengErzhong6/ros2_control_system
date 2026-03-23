@@ -16,6 +16,10 @@ def generate_launch_description():
             description="Start RViz2 automatically.",
         ),
         DeclareLaunchArgument(
+            "use_mock_hardware", default_value="false",
+            description="Use mock hardware (GenericSystem) instead of real robot.",
+        ),
+        DeclareLaunchArgument(
             "description_package", default_value="ros2_control_marvin",
             description="Package with the composite URDF/XACRO file.",
         ),
@@ -29,7 +33,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "use_jsp_gui", default_value="true",
-            description="Start joint_state_publisher_gui for slider command input.",
+            description="Start the custom joint GUI publisher for slider command input.",
         ),
         DeclareLaunchArgument(
             "use_gripper_L", default_value="true",
@@ -61,6 +65,7 @@ def generate_launch_description():
 
 def launch_setup(context):
     gui = LaunchConfiguration("gui")
+    use_mock_hardware = LaunchConfiguration("use_mock_hardware")
     use_jsp_gui = LaunchConfiguration("use_jsp_gui")
 
     pkg = LaunchConfiguration("description_package").perform(context)
@@ -82,6 +87,7 @@ def launch_setup(context):
         ' left_rpy:="', left_rpy, '"',
         ' right_xyz:="', right_xyz, '"',
         ' right_rpy:="', right_rpy, '"',
+        " use_mock_hardware:=", use_mock_hardware,
     ]
     if grip_L:
         xacro_cmd.append(" use_gripper_L:=true")
@@ -137,6 +143,9 @@ def launch_setup(context):
     rviz_config_file = PathJoinSubstitution(
         [FindPackageShare("ros2_control_marvin"), "description", "rviz", "marvin_dual.rviz"]
     )
+    home_joint_positions_file = PathJoinSubstitution(
+        [FindPackageShare("ros2_control_marvin"), "description", "config", "home_joint_positions.yaml"]
+    )
 
     rviz_node = Node(
         package="rviz2",
@@ -151,13 +160,10 @@ def launch_setup(context):
     # ── GUI slider → forward controller bridge ────────────────────────────
 
     joint_state_publisher_gui_node = Node(
-        package="joint_state_publisher_gui",
-        executable="joint_state_publisher_gui",
+        package="ros2_control_marvin",
+        executable="joint_gui_publisher.py",
         output="both",
-        parameters=[
-            robot_description,
-            {"source_list": ["/joint_states"]},
-        ],
+        parameters=[home_joint_positions_file],
         remappings=[("joint_states", "gui_joint_states")],
         condition=IfCondition(use_jsp_gui),
     )

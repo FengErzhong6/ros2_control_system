@@ -55,9 +55,9 @@ tracker_publisher:
         orientation: [0.0, 0.0, 0.0, 1.0] 
 
       left_arm:
-        position:    [0.0, 0.0, 0.0]
+        position:    [0.0, 0.0, 0.05]
         orientation: [0.0, 0.0, 0.0, 1.0]               
 
       right_arm:
-        position:    [0.0, 0.0, 0.0]
+        position:    [0.0, 0.0, 0.05]
         orientation: [0.0, 0.0, 0.0, 1.0]                

@@ -90,6 +90,18 @@ Visualization Manager:
         Reliability Policy: Reliable
         Value: /target_vectors
       Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: TeleopViz
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /tracker_teleop_controller/viz_markers
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48

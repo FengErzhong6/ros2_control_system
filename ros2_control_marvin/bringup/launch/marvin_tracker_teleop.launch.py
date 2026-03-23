@@ -29,6 +29,10 @@ def generate_launch_description():
             description="Use mock hardware (GenericSystem) instead of real robot.",
         ),
         DeclareLaunchArgument(
+            "use_keyboard_gate", default_value="true",
+            description="Start keyboard gate helper (Space=start/pause teleop).",
+        ),
+        DeclareLaunchArgument(
             "description_package", default_value="ros2_control_marvin",
             description="Package with the composite URDF/XACRO file.",
         ),
@@ -67,6 +71,7 @@ def generate_launch_description():
 def launch_setup(context):
     gui = LaunchConfiguration("gui")
     use_mock_hardware = LaunchConfiguration("use_mock_hardware")
+    use_keyboard_gate = LaunchConfiguration("use_keyboard_gate")
 
     pkg = LaunchConfiguration("description_package").perform(context)
     desc_file = LaunchConfiguration("description_file").perform(context)
@@ -174,6 +179,15 @@ def launch_setup(context):
         parameters=[trackers_config],
     )
 
+    tracker_teleop_keyboard_node = Node(
+        package="ros2_control_marvin",
+        executable="tracker_teleop_keyboard.py",
+        name="tracker_teleop_keyboard",
+        output="screen",
+        emulate_tty=True,
+        condition=IfCondition(use_keyboard_gate),
+    )
+
     # ── Visualisation ─────────────────────────────────────────────────────
     rviz_config_file = PathJoinSubstitution(
         [FindPackageShare("ros2_control_marvin"), "description", "rviz", "marvin_dual.rviz"]
@@ -223,6 +237,7 @@ def launch_setup(context):
         ros2_control_node,
         robot_state_publisher_node,
         tracker_publisher_node,
+        tracker_teleop_keyboard_node,
         rviz_node,
         joint_state_broadcaster_spawner,
         tracker_teleop_controller_spawner,

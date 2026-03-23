@@ -21,7 +21,9 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
   rclcpp_lifecycle
   sensor_msgs
   std_msgs
+  std_srvs
   tf2_ros
+  visualization_msgs
 )
 
 foreach(Dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
@@ -126,8 +128,11 @@ ament_target_dependencies(ros2_control_marvin_tracker_teleop_controller PUBLIC
   rclcpp
   rclcpp_lifecycle
   geometry_msgs
+  sensor_msgs
   std_msgs
+  std_srvs
   tf2_ros
+  visualization_msgs
 )
 target_link_libraries(ros2_control_marvin_tracker_teleop_controller PUBLIC
   controller_interface::controller_interface
@@ -161,6 +166,20 @@ ament_target_dependencies(joy_to_pose
   std_msgs
 )
 
+add_executable(ik_solution_explorer
+  test/ik_solution_explorer.cpp
+)
+target_compile_features(ik_solution_explorer PUBLIC cxx_std_17)
+target_include_directories(ik_solution_explorer PUBLIC
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/third_party/marvinKine>
+)
+target_link_libraries(ik_solution_explorer PUBLIC
+  ${MARVIN_KINE_LIBRARY}
+)
+set_target_properties(ik_solution_explorer PROPERTIES
+  INSTALL_RPATH "$ORIGIN/.."
+)
+
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights
@@ -181,6 +200,7 @@ install(
 
 install(
   PROGRAMS
+    bringup/scripts/tracker_teleop_keyboard.py
     description/scripts/joint_gui_publisher.py
     description/scripts/vector_marker_publisher.py
   DESTINATION lib/${PROJECT_NAME}
@@ -236,7 +256,7 @@ install(
 )
 
 install(
-  TARGETS gui_joint_state_to_forward_command joy_to_pose
+  TARGETS gui_joint_state_to_forward_command joy_to_pose ik_solution_explorer
   RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
 
