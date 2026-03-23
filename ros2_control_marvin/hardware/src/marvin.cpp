@@ -236,15 +236,39 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
     }
     connected_ = true;
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    OnClearSet();
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    OnClearErr_A();
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    OnClearErr_B();
-    std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    OnSetSend();
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    constexpr auto kPostLinkSettle = std::chrono::milliseconds(100);
+    constexpr auto kPreClearSetDelay = std::chrono::milliseconds(10);
+    constexpr auto kClearErrCommandDelay = std::chrono::milliseconds(200);
+    constexpr auto kPostClearSendSettle = std::chrono::milliseconds(300);
+
+    auto clear_arm_error = [this, kPreClearSetDelay, kClearErrCommandDelay, kPostClearSendSettle](
+                               const char *arm_name,
+                               void (*clear_fn)()) -> hardware_interface::CallbackReturn {
+        std::this_thread::sleep_for(kPreClearSetDelay);
+        if (!OnClearSet()) {
+            RCLCPP_ERROR(get_logger(), "OnClearSet failed before clearing %s error.", arm_name);
+            return hardware_interface::CallbackReturn::ERROR;
+        }
+        std::this_thread::sleep_for(kPreClearSetDelay);
+        clear_fn();
+        std::this_thread::sleep_for(kClearErrCommandDelay);
+        if (!OnSetSend()) {
+            RCLCPP_ERROR(get_logger(), "OnSetSend failed while clearing %s error.", arm_name);
+            return hardware_interface::CallbackReturn::ERROR;
+        }
+        std::this_thread::sleep_for(kPostClearSendSettle);
+        return hardware_interface::CallbackReturn::SUCCESS;
+    };
+
+    std::this_thread::sleep_for(kPostLinkSettle);
+    RCLCPP_INFO(get_logger(), "Clearing Arm A errors with conservative timing.");
+    if (clear_arm_error("Arm A", OnClearErr_A) != hardware_interface::CallbackReturn::SUCCESS) {
+        return hardware_interface::CallbackReturn::ERROR;
+    }
+    RCLCPP_INFO(get_logger(), "Clearing Arm B errors with conservative timing.");
+    if (clear_arm_error("Arm B", OnClearErr_B) != hardware_interface::CallbackReturn::SUCCESS) {
+        return hardware_interface::CallbackReturn::ERROR;
+    }
 
     if (param_int(p, "sdk_log_enabled", 0, 0, 1) == 0) {
         OnLogOff();
