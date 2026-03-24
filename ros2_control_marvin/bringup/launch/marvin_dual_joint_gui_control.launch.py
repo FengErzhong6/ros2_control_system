@@ -1,5 +1,5 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, TimerAction, OpaqueFunction, RegisterEventHandler
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, RegisterEventHandler
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
@@ -194,37 +194,35 @@ def launch_setup(context):
         executable="spawner",
         arguments=[
             "forward_position_controller",
-            "--inactive",
             "--param-file",
             controllers_yaml,
+            "--controller-manager-timeout",
+            "30.0",
+            "--service-call-timeout",
+            "30.0",
+            "--switch-timeout",
+            "30.0",
         ],
         output="screen",
     )
 
-    activate_forward_controller = TimerAction(
-        period=8.0,
-        actions=[
-            ExecuteProcess(
-                cmd=[
-                    "ros2", "control", "switch_controllers",
-                    "--controller-manager", "/controller_manager",
-                    "--activate", "forward_position_controller",
-                ],
-                output="screen",
-                condition=IfCondition(use_jsp_gui),
-            )
-        ],
-    )
-
-    start_gui_after_feedback_ready = RegisterEventHandler(
+    start_bridge_after_feedback_ready = RegisterEventHandler(
         OnProcessExit(
             target_action=joint_state_broadcaster_spawner,
             on_exit=[
-                joint_state_publisher_gui_node,
+                forward_position_controller_spawner,
                 gui_to_forward_bridge,
             ],
         ),
-        condition=IfCondition(use_jsp_gui),
+    )
+
+    start_gui_after_forward_controller_ready = RegisterEventHandler(
+        OnProcessExit(
+            target_action=forward_position_controller_spawner,
+            on_exit=[
+                joint_state_publisher_gui_node,
+            ],
+        ),
     )
 
     # ── Assemble ──────────────────────────────────────────────────────────
@@ -234,7 +232,6 @@ def launch_setup(context):
         robot_state_publisher_node,
         rviz_node,
         joint_state_broadcaster_spawner,
-        forward_position_controller_spawner,
-        activate_forward_controller,
-        start_gui_after_feedback_ready,
+        start_bridge_after_feedback_ready,
+        start_gui_after_forward_controller_ready,
     ]

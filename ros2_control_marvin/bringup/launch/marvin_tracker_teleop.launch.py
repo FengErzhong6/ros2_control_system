@@ -16,8 +16,9 @@ import tty
 from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, RegisterEventHandler
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 
 from launch_ros.actions import Node
@@ -165,6 +166,20 @@ class TrackerTeleopTerminalGate:
             self._restore_terminal()
 
 
+def maybe_start_terminal_gate(context, *args, **kwargs):
+    global _terminal_gate
+
+    use_keyboard_gate = LaunchConfiguration("use_keyboard_gate").perform(context).lower() == "true"
+    if not use_keyboard_gate:
+        return []
+
+    if _terminal_gate is None:
+        _terminal_gate = TrackerTeleopTerminalGate()
+        _terminal_gate.start()
+
+    return []
+
+
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -216,11 +231,8 @@ def generate_launch_description():
 
 
 def launch_setup(context):
-    global _terminal_gate
-
     gui = LaunchConfiguration("gui")
     use_mock_hardware = LaunchConfiguration("use_mock_hardware")
-    use_keyboard_gate = LaunchConfiguration("use_keyboard_gate")
 
     pkg = LaunchConfiguration("description_package").perform(context)
     desc_file = LaunchConfiguration("description_file").perform(context)
@@ -328,10 +340,6 @@ def launch_setup(context):
         parameters=[trackers_config],
     )
 
-    if use_keyboard_gate.perform(context).lower() == "true":
-        _terminal_gate = TrackerTeleopTerminalGate()
-        _terminal_gate.start()
-
     # ── Visualisation ─────────────────────────────────────────────────────
     rviz_config_file = PathJoinSubstitution(
         [FindPackageShare("ros2_control_marvin"), "description", "rviz", "marvin_dual.rviz"]
@@ -351,7 +359,15 @@ def launch_setup(context):
     joint_state_broadcaster_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=["joint_state_broadcaster"],
+        arguments=[
+            "joint_state_broadcaster",
+            "--controller-manager-timeout",
+            "30.0",
+            "--service-call-timeout",
+            "30.0",
+            "--switch-timeout",
+            "30.0",
+        ],
         output="screen",
     )
 
@@ -364,6 +380,12 @@ def launch_setup(context):
             controllers_yaml,
             "--param-file",
             tracker_teleop_params_file,
+            "--controller-manager-timeout",
+            "30.0",
+            "--service-call-timeout",
+            "30.0",
+            "--switch-timeout",
+            "30.0",
         ],
         output="screen",
     )
@@ -373,9 +395,35 @@ def launch_setup(context):
         gripper_spawners.append(Node(
             package="controller_manager",
             executable="spawner",
-            arguments=[name],
+            arguments=[
+                name,
+                "--controller-manager-timeout",
+                "30.0",
+                "--service-call-timeout",
+                "30.0",
+                "--switch-timeout",
+                "30.0",
+            ],
             output="screen",
         ))
+
+    start_teleop_controllers_after_feedback_ready = RegisterEventHandler(
+        OnProcessExit(
+            target_action=joint_state_broadcaster_spawner,
+            on_exit=[
+                tracker_teleop_controller_spawner,
+            ] + gripper_spawners,
+        ),
+    )
+
+    start_keyboard_gate_after_teleop_controller_ready = RegisterEventHandler(
+        OnProcessExit(
+            target_action=tracker_teleop_controller_spawner,
+            on_exit=[
+                OpaqueFunction(function=maybe_start_terminal_gate),
+            ],
+        ),
+    )
 
     return [
         ros2_control_node,
@@ -383,5 +431,6 @@ def launch_setup(context):
         tracker_publisher_node,
         rviz_node,
         joint_state_broadcaster_spawner,
-        tracker_teleop_controller_spawner,
-    ] + gripper_spawners
+        start_teleop_controllers_after_feedback_ready,
+        start_keyboard_gate_after_teleop_controller_ready,
+    ]

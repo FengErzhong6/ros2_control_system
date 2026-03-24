@@ -14,9 +14,8 @@ cameras:
     profile: "wrist_default"
 
   cam_high:
-    driver: orbbec
+    driver: realsense
     serial_number: "REPLACE_WITH_CAM_HIGH_SERIAL"
     frame_id: "cam_high_color_optical_frame"
     namespace: "cam_high"
     profile: "high_default"
-    
