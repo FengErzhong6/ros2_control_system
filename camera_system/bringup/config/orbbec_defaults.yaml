@@ -1,0 +1,20 @@
+profiles:
+  wrist_default:
+    color_enabled: true
+    color_width: 640
+    color_height: 480
+    color_fps: 60
+    color_encoding: "rgb8"
+    depth_enabled: false
+    infrared_enabled: false
+    point_cloud_enabled: false
+
+  high_default:
+    color_enabled: true
+    color_width: 640
+    color_height: 480
+    color_fps: 60
+    color_encoding: "rgb8"
+    depth_enabled: false
+    infrared_enabled: false
+    point_cloud_enabled: false

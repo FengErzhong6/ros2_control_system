@@ -3,8 +3,15 @@ Launch HTC Tracker teleop: tracker_publisher (htc_system) + ros2_control with Tr
 Requires htc_system and ros2_control_marvin to be in the same workspace.
 """
 
+import atexit
 import os
+import select
+import sys
 import tempfile
+import termios
+import threading
+import time
+import tty
 
 from ament_index_python.packages import get_package_share_directory
 
@@ -16,6 +23,146 @@ from launch.substitutions import Command, FindExecutable, LaunchConfiguration, P
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
+
+import rclpy
+from std_srvs.srv import SetBool
+
+
+_terminal_gate = None
+
+
+class TrackerTeleopTerminalGate:
+    def __init__(self) -> None:
+        self._stop_event = threading.Event()
+        self._thread = None
+        self._node = None
+        self._arm_client = None
+        self._enable_client = None
+        self._input_file = None
+        self._stdin_fd = None
+        self._stdin_settings = None
+        self._last_key_time = 0.0
+        self._debounce_sec = 0.25
+        self._started = False
+
+    def start(self) -> None:
+        try:
+            input_file, input_label = self._open_input_tty()
+        except OSError as exc:
+            print(f"[tracker_teleop_gate] Failed to attach terminal input: {exc}", flush=True)
+            return
+
+        self._input_file = input_file
+        self._stdin_fd = input_file.fileno()
+        self._stdin_settings = termios.tcgetattr(self._stdin_fd)
+        tty.setcbreak(self._stdin_fd)
+
+        if not rclpy.ok():
+            rclpy.init(args=None)
+
+        self._node = rclpy.create_node("tracker_teleop_terminal_gate")
+        self._arm_client = self._node.create_client(SetBool, "/tracker_teleop_controller/set_armed")
+        self._enable_client = self._node.create_client(SetBool, "/tracker_teleop_controller/set_enabled")
+
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        atexit.register(self.shutdown)
+        print(
+            f"[tracker_teleop_gate] Keyboard attached to {input_label}. "
+            "[Space]=start/stop teleop",
+            flush=True,
+        )
+
+    def shutdown(self) -> None:
+        self._stop_event.set()
+        self._restore_terminal()
+        if self._node is not None:
+            self._node.destroy_node()
+            self._node = None
+        if rclpy.ok():
+            rclpy.shutdown()
+
+    def _open_input_tty(self):
+        if sys.stdin.isatty():
+            return sys.stdin, "stdin"
+        return open("/dev/tty", "rb", buffering=0), "/dev/tty"
+
+    def _restore_terminal(self) -> None:
+        if self._stdin_fd is not None and self._stdin_settings is not None:
+            termios.tcsetattr(self._stdin_fd, termios.TCSADRAIN, self._stdin_settings)
+            self._stdin_fd = None
+            self._stdin_settings = None
+        if self._input_file is not None and self._input_file is not sys.stdin:
+            self._input_file.close()
+        self._input_file = None
+
+    def _wait_for_service(self, client, label: str, timeout_sec: float) -> bool:
+        deadline = time.monotonic() + timeout_sec
+        while not self._stop_event.is_set() and rclpy.ok():
+            if client.service_is_ready() or client.wait_for_service(timeout_sec=0.2):
+                return True
+            if time.monotonic() >= deadline:
+                break
+        print(f"[tracker_teleop_gate] {label} service timeout", flush=True)
+        return False
+
+    def _call_set_bool(self, client, label: str, value: bool) -> bool:
+        request = SetBool.Request()
+        request.data = value
+        future = client.call_async(request)
+
+        deadline = time.monotonic() + 2.0
+        while not future.done() and not self._stop_event.is_set() and rclpy.ok():
+            rclpy.spin_once(self._node, timeout_sec=0.05)
+            if time.monotonic() >= deadline:
+                break
+
+        if not future.done() or future.result() is None:
+            print(f"[tracker_teleop_gate] {label} request timed out", flush=True)
+            return False
+
+        response = future.result()
+        if not response.success:
+            print(f"[tracker_teleop_gate] {label} rejected: {response.message}", flush=True)
+            return False
+
+        print(f"[tracker_teleop_gate] {label}: {response.message}", flush=True)
+        return True
+
+    def _handle_space(self) -> None:
+        if not self._wait_for_service(self._arm_client, "arm", 10.0):
+            return
+        if not self._wait_for_service(self._enable_client, "enable", 10.0):
+            return
+
+        if self._started:
+            if self._call_set_bool(self._enable_client, "stop", False):
+                self._started = False
+            return
+
+        if not self._call_set_bool(self._arm_client, "start-arm", True):
+            return
+        if self._call_set_bool(self._enable_client, "start-enable", True):
+            self._started = True
+
+    def _run(self) -> None:
+        try:
+            while not self._stop_event.is_set() and rclpy.ok():
+                ready, _, _ = select.select([self._stdin_fd], [], [], 0.1)
+                if not ready:
+                    continue
+
+                ch = os.read(self._stdin_fd, 1).decode(errors="ignore")
+                if ch != " ":
+                    continue
+
+                now = time.monotonic()
+                if now - self._last_key_time < self._debounce_sec:
+                    continue
+                self._last_key_time = now
+                self._handle_space()
+        finally:
+            self._restore_terminal()
 
 
 def generate_launch_description():
@@ -30,7 +177,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "use_keyboard_gate", default_value="true",
-            description="Start keyboard gate helper (Space=start/pause teleop).",
+            description="Enable terminal Space key start/stop gate for tracker teleop.",
         ),
         DeclareLaunchArgument(
             "description_package", default_value="ros2_control_marvin",
@@ -69,6 +216,8 @@ def generate_launch_description():
 
 
 def launch_setup(context):
+    global _terminal_gate
+
     gui = LaunchConfiguration("gui")
     use_mock_hardware = LaunchConfiguration("use_mock_hardware")
     use_keyboard_gate = LaunchConfiguration("use_keyboard_gate")
@@ -179,14 +328,9 @@ def launch_setup(context):
         parameters=[trackers_config],
     )
 
-    tracker_teleop_keyboard_node = Node(
-        package="ros2_control_marvin",
-        executable="tracker_teleop_keyboard.py",
-        name="tracker_teleop_keyboard",
-        output="screen",
-        emulate_tty=True,
-        condition=IfCondition(use_keyboard_gate),
-    )
+    if use_keyboard_gate.perform(context).lower() == "true":
+        _terminal_gate = TrackerTeleopTerminalGate()
+        _terminal_gate.start()
 
     # ── Visualisation ─────────────────────────────────────────────────────
     rviz_config_file = PathJoinSubstitution(
@@ -237,7 +381,6 @@ def launch_setup(context):
         ros2_control_node,
         robot_state_publisher_node,
         tracker_publisher_node,
-        tracker_teleop_keyboard_node,
         rviz_node,
         joint_state_broadcaster_spawner,
         tracker_teleop_controller_spawner,

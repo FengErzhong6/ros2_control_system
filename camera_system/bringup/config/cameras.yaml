@@ -1,0 +1,22 @@
+cameras:
+  cam_left_wrist:
+    driver: orbbec
+    serial_number: "CPCBC5300064"
+    frame_id: "cam_left_wrist_color_optical_frame"
+    namespace: "cam_left_wrist"
+    profile: "wrist_default"
+
+  cam_right_wrist:
+    driver: orbbec
+    serial_number: "CPCBC53000BJ"
+    frame_id: "cam_right_wrist_color_optical_frame"
+    namespace: "cam_right_wrist"
+    profile: "wrist_default"
+
+  cam_high:
+    driver: orbbec
+    serial_number: "REPLACE_WITH_CAM_HIGH_SERIAL"
+    frame_id: "cam_high_color_optical_frame"
+    namespace: "cam_high"
+    profile: "high_default"
+    
