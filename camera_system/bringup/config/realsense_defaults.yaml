@@ -1,0 +1,25 @@
+profiles:
+  high_default:
+    color_enabled: true
+    color_width: 640
+    color_height: 480
+    color_fps: 30
+    color_format: "RGB8"
+
+    depth_enabled: false
+    depth_width: 640
+    depth_height: 480
+    depth_fps: 30
+    depth_format: "Z16"
+
+    infrared_enabled: false
+    infrared_width: 640
+    infrared_height: 480
+    infrared_fps: 30
+
+    point_cloud_enabled: false
+    align_depth_enabled: false
+
+    publish_tf: true
+    tf_publish_rate: 0.0
+    base_frame_id: "link"
