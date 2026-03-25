@@ -13,6 +13,7 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 from std_srvs.srv import SetBool
+from std_srvs.srv import Trigger
 
 
 class TrackerTeleopKeyboard(Node):
@@ -25,6 +26,8 @@ class TrackerTeleopKeyboard(Node):
             "arm_service", "/tracker_teleop_controller/set_armed").value
         self.enable_service_name = self.declare_parameter(
             "enable_service", "/tracker_teleop_controller/set_enabled").value
+        self.home_service_name = self.declare_parameter(
+            "home_service", "/tracker_teleop_controller/go_home").value
         self.debounce_sec = float(self.declare_parameter("debounce_sec", 0.25).value)
         self.auto_enable_without_tty = bool(
             self.declare_parameter("auto_enable_without_tty", False).value)
@@ -36,6 +39,7 @@ class TrackerTeleopKeyboard(Node):
 
         self.arm_client = self.create_client(SetBool, self.arm_service_name)
         self.enable_client = self.create_client(SetBool, self.enable_service_name)
+        self.home_client = self.create_client(Trigger, self.home_service_name)
         state_qos = rclpy.qos.QoSProfile(
             depth=1,
             durability=rclpy.qos.DurabilityPolicy.TRANSIENT_LOCAL,
@@ -93,7 +97,7 @@ class TrackerTeleopKeyboard(Node):
 
     def print_help(self) -> None:
         self.get_logger().info(
-            "Keyboard gate ready: [Space]=start/stop teleop")
+            "Keyboard gate ready: [Space]=start/pause teleop, [n]=next sample (go home)")
 
     def on_state(self, msg: String) -> None:
         state = msg.data.split("|", 1)[0].strip()
@@ -118,6 +122,8 @@ class TrackerTeleopKeyboard(Node):
 
             if ch == " ":
                 self.handle_space()
+            elif ch in ("n", "N"):
+                self.handle_next()
 
     def ensure_service(self, client, label: str, service_name: str) -> bool:
         if client.service_is_ready():
@@ -160,6 +166,28 @@ class TrackerTeleopKeyboard(Node):
         self.get_logger().info(f"{label}: {response.message}")
         return True
 
+    def call_trigger(self, client, label: str, service_name: str) -> bool:
+        if not self.ensure_service(client, label, service_name):
+            return False
+
+        request = Trigger.Request()
+        future = client.call_async(request)
+        deadline = time.monotonic() + 2.0
+        while not future.done() and time.monotonic() < deadline and rclpy.ok():
+            time.sleep(0.01)
+
+        if not future.done() or future.result() is None:
+            self.get_logger().warn(f"{label} request timed out.")
+            return False
+
+        response = future.result()
+        if not response.success:
+            self.get_logger().warn(f"{label} rejected: {response.message}")
+            return False
+
+        self.get_logger().info(f"{label}: {response.message}")
+        return True
+
     def handle_space(self) -> None:
         if self.current_state == "ENABLED":
             self.call_set_bool(self.enable_client, "stop", self.enable_service_name, False)
@@ -168,6 +196,9 @@ class TrackerTeleopKeyboard(Node):
         if not self.call_set_bool(self.arm_client, "start-arm", self.arm_service_name, True):
             return
         self.call_set_bool(self.enable_client, "start-enable", self.enable_service_name, True)
+
+    def handle_next(self) -> None:
+        self.call_trigger(self.home_client, "next-sample", self.home_service_name)
 
     def auto_enable_once(self) -> None:
         time.sleep(0.2)

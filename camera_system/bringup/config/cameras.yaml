@@ -15,7 +15,7 @@ cameras:
 
   cam_high:
     driver: realsense
-    serial_number: "REPLACE_WITH_CAM_HIGH_SERIAL"
+    serial_number: "348122071366"
     frame_id: "cam_high_color_optical_frame"
     namespace: "cam_high"
     profile: "high_default"

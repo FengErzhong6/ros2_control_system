@@ -47,6 +47,10 @@ tracker_teleop_controller:
     ik_fallback_near_ref: true    # 是否启用 NEAR_REF 回退（臂角约束放松）
     ik_clamp_joint_limits: false   # 是否启用关节限位钳位（近似解）
     tracker_timeout_sec: 0.1      # tracker 输入超时后进入 hold，停止追踪旧目标
+    home_joint_positions:
+      left: [1.16, -1.28, -1.5707963, -1.25, 0.0, 0.0, 0.0]
+      right: [-1.16, -1.28, 1.5707963, -1.25, 0.0, 0.0, 0.0]
+    home_tolerance_deg: 0.5
     j4_bound: -3.59 # 机械臂肘部A, B构型的分界线，用于日志输出
     dh_d1: 0.1745   # link1 长度 (m)，shoulder→base 偏置 [0,0,+d1]
     viz_base_frames: ["Base_L", "Base_R"]  # 可视化 marker 使用的左/右臂 base frame

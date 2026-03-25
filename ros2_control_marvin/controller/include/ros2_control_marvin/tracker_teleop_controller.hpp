@@ -15,6 +15,7 @@
 #include "rclcpp_lifecycle/node_interfaces/lifecycle_node_interface.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "std_srvs/srv/set_bool.hpp"
+#include "std_srvs/srv/trigger.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 #include "tf2/LinearMath/Transform.h"
 #include "tf2/LinearMath/Quaternion.h"
@@ -124,6 +125,9 @@ private:
     // IK target: last successful solution (smoothing always converges to this)
     std::array<std::array<double, kJointsPerArm>, kArmCount> target_joints_rad_{};
     std::array<bool, kArmCount> has_valid_target_{{false, false}};
+    std::array<std::array<double, kJointsPerArm>, kArmCount> home_joints_rad_{};
+    bool has_home_joints_{false};
+    double home_tolerance_rad_{0.5 * kDeg2Rad};
 
     // TF timestamp tracking: recompute IK when either hand or upper-arm input changes
     std::array<rclcpp::Time, kArmCount> last_hand_tf_stamp_{
@@ -155,8 +159,12 @@ private:
     };
     std::atomic<int> teleop_state_{static_cast<int>(TeleopState::kDisarmed)};
     std::atomic<bool> force_tracker_reacquire_{false};
+    std::atomic<bool> go_home_requested_{false};
+    std::atomic<bool> go_home_active_{false};
+    std::atomic<int> active_home_joint_index_{-1};
     rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr srv_set_armed_;
     rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr srv_set_enabled_;
+    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_go_home_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr pub_teleop_state_;
 
     struct ArmDiagnostics {
@@ -187,6 +195,27 @@ private:
         bool tracker_input_changed{false};
         bool hand_fresh{false};
     };
+
+    // Configuration helpers
+    bool readJointNames();
+    bool initializeKinematics();
+    bool loadControllerParameters();
+    void loadTransformParameters();
+    void loadElbowCorrectionParameters();
+    bool loadHomeJointParameters(const std::vector<double> &home_left,
+                                 const std::vector<double> &home_right,
+                                 double home_tolerance_deg);
+    void loadTrackerFrameParameters();
+    void logConfigurationSummary(double home_tolerance_deg) const;
+    void resetRuntimeState();
+    void createRosInterfaces();
+
+    // Activation/runtime helpers
+    bool bindJointInterfaces();
+    void initializeJointTargetsFromState();
+    void resetTrackerState();
+    void resetTeleopRuntime(TeleopState teleop_state);
+    void holdAllArms(double dt);
 
     // Core methods
     void pollTfCallback();
@@ -224,10 +253,16 @@ private:
     void handleSetEnabled(
         const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
         std::shared_ptr<std_srvs::srv::SetBool::Response> response);
+    void handleGoHome(
+        const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+        std::shared_ptr<std_srvs::srv::Trigger::Response> response);
     TeleopState getTeleopState() const;
     void setTeleopState(TeleopState new_state, const std::string &reason);
     bool isTeleopEnabled(const rclcpp::Time &now);
     void publishTeleopState(const std::string &reason);
+    void processGoHome(double dt);
+    void startGoHomeSequence();
+    bool isHomeJointReached(size_t arm, size_t joint) const;
     static const char *teleopStateToString(TeleopState state);
     static const char *ikResultToString(IKResult result);
 };

@@ -27,6 +27,7 @@ from launch_ros.substitutions import FindPackageShare
 
 import rclpy
 from std_srvs.srv import SetBool
+from std_srvs.srv import Trigger
 
 
 _terminal_gate = None
@@ -39,6 +40,7 @@ class TrackerTeleopTerminalGate:
         self._node = None
         self._arm_client = None
         self._enable_client = None
+        self._home_client = None
         self._input_file = None
         self._stdin_fd = None
         self._stdin_settings = None
@@ -64,13 +66,14 @@ class TrackerTeleopTerminalGate:
         self._node = rclpy.create_node("tracker_teleop_terminal_gate")
         self._arm_client = self._node.create_client(SetBool, "/tracker_teleop_controller/set_armed")
         self._enable_client = self._node.create_client(SetBool, "/tracker_teleop_controller/set_enabled")
+        self._home_client = self._node.create_client(Trigger, "/tracker_teleop_controller/go_home")
 
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         atexit.register(self.shutdown)
         print(
             f"[tracker_teleop_gate] Keyboard attached to {input_label}. "
-            "[Space]=start/stop teleop",
+            "[Space]=start/pause teleop, [n]=next sample (go home)",
             flush=True,
         )
 
@@ -130,6 +133,28 @@ class TrackerTeleopTerminalGate:
         print(f"[tracker_teleop_gate] {label}: {response.message}", flush=True)
         return True
 
+    def _call_trigger(self, client, label: str) -> bool:
+        request = Trigger.Request()
+        future = client.call_async(request)
+
+        deadline = time.monotonic() + 2.0
+        while not future.done() and not self._stop_event.is_set() and rclpy.ok():
+            rclpy.spin_once(self._node, timeout_sec=0.05)
+            if time.monotonic() >= deadline:
+                break
+
+        if not future.done() or future.result() is None:
+            print(f"[tracker_teleop_gate] {label} request timed out", flush=True)
+            return False
+
+        response = future.result()
+        if not response.success:
+            print(f"[tracker_teleop_gate] {label} rejected: {response.message}", flush=True)
+            return False
+
+        print(f"[tracker_teleop_gate] {label}: {response.message}", flush=True)
+        return True
+
     def _handle_space(self) -> None:
         if not self._wait_for_service(self._arm_client, "arm", 10.0):
             return
@@ -146,6 +171,12 @@ class TrackerTeleopTerminalGate:
         if self._call_set_bool(self._enable_client, "start-enable", True):
             self._started = True
 
+    def _handle_next(self) -> None:
+        if not self._wait_for_service(self._home_client, "go_home", 10.0):
+            return
+        if self._call_trigger(self._home_client, "next-sample"):
+            self._started = False
+
     def _run(self) -> None:
         try:
             while not self._stop_event.is_set() and rclpy.ok():
@@ -154,14 +185,14 @@ class TrackerTeleopTerminalGate:
                     continue
 
                 ch = os.read(self._stdin_fd, 1).decode(errors="ignore")
-                if ch != " ":
-                    continue
-
                 now = time.monotonic()
                 if now - self._last_key_time < self._debounce_sec:
                     continue
                 self._last_key_time = now
-                self._handle_space()
+                if ch == " ":
+                    self._handle_space()
+                elif ch in ("n", "N"):
+                    self._handle_next()
         finally:
             self._restore_terminal()
 

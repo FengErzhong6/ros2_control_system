@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <functional>
+#include <utility>
 
 #include "rclcpp/logging.hpp"
 #include "rclcpp_lifecycle/state.hpp"
@@ -18,6 +19,9 @@ using config_type = controller_interface::interface_configuration_type;
 namespace ros2_control_marvin {
 
 namespace {
+
+constexpr std::array<const char *, kArmCount> kSideLabels{{"left", "right"}};
+constexpr std::array<const char *, kArmCount> kSideTags{{"LEFT", "RIGHT"}};
 
 template <typename LoanedInterfaceT>
 LoanedInterfaceT *find_loaned_interface(
@@ -66,6 +70,9 @@ controller_interface::CallbackReturn TrackerTeleopController::on_init()
         auto_declare<bool>("ik_fallback_near_ref", true);
         auto_declare<bool>("ik_clamp_joint_limits", true);
         auto_declare<double>("tracker_timeout_sec", 0.1);
+        auto_declare<std::vector<double>>("home_joint_positions.left", {});
+        auto_declare<std::vector<double>>("home_joint_positions.right", {});
+        auto_declare<double>("home_tolerance_deg", 0.5);
         for (const auto &side : {"left", "right"}) {
             for (const auto &group :
                  {"shoulder_T_chest", "wrist_T_ee", "arm_human_T_arm_robot"}) {
@@ -348,6 +355,14 @@ void TrackerTeleopController::holdCurrentPosition(size_t arm)
     }
 }
 
+void TrackerTeleopController::holdAllArms(double dt)
+{
+    for (size_t arm = 0; arm < kArmCount; ++arm) {
+        holdCurrentPosition(arm);
+        applySmoothedCommand(arm, dt);
+    }
+}
+
 void TrackerTeleopController::applySmoothedCommand(size_t arm, double dt)
 {
     if (!has_valid_target_[arm]) {
@@ -480,6 +495,92 @@ void TrackerTeleopController::handleFreshTrackerUpdate(size_t arm, const CachedT
     holdCurrentPosition(arm);
 }
 
+void TrackerTeleopController::startGoHomeSequence()
+{
+    if (!has_home_joints_) {
+        return;
+    }
+
+    for (size_t arm = 0; arm < kArmCount; ++arm) {
+        for (size_t j = 0; j < kJointsPerArm; ++j) {
+            target_joints_rad_[arm][j] = smoothed_joints_rad_[arm][j];
+        }
+        has_valid_target_[arm] = true;
+        target_joints_rad_[arm][kJointsPerArm - 1] =
+            home_joints_rad_[arm][kJointsPerArm - 1];
+    }
+
+    active_home_joint_index_.store(
+        static_cast<int>(kJointsPerArm) - 1, std::memory_order_relaxed);
+    go_home_active_.store(true, std::memory_order_relaxed);
+
+    RCLCPP_INFO(
+        get_node()->get_logger(),
+        "Go-home sequence started (Joint%zu -> Joint1).",
+        kJointsPerArm);
+}
+
+bool TrackerTeleopController::isHomeJointReached(size_t arm, size_t joint) const
+{
+    const size_t idx = arm * kJointsPerArm + joint;
+    if (!state_interfaces_pos_[idx]) {
+        return false;
+    }
+
+    const auto pos_opt = state_interfaces_pos_[idx]->get_optional<double>();
+    const double pos_rad = pos_opt.has_value() ?
+        pos_opt.value() : smoothed_joints_rad_[arm][joint];
+    return std::abs(pos_rad - home_joints_rad_[arm][joint]) <= home_tolerance_rad_;
+}
+
+void TrackerTeleopController::processGoHome(double dt)
+{
+    if (go_home_requested_.exchange(false, std::memory_order_relaxed)) {
+        startGoHomeSequence();
+    }
+
+    if (!go_home_active_.load(std::memory_order_relaxed)) {
+        return;
+    }
+
+    const int joint_index = active_home_joint_index_.load(std::memory_order_relaxed);
+    if (joint_index < 0) {
+        go_home_active_.store(false, std::memory_order_relaxed);
+        return;
+    }
+
+    const size_t jt = static_cast<size_t>(joint_index);
+    for (size_t arm = 0; arm < kArmCount; ++arm) {
+        target_joints_rad_[arm][jt] = home_joints_rad_[arm][jt];
+        has_valid_target_[arm] = true;
+        applySmoothedCommand(arm, dt);
+    }
+
+    bool reached = true;
+    for (size_t arm = 0; arm < kArmCount; ++arm) {
+        reached = reached && isHomeJointReached(arm, jt);
+    }
+    if (!reached) {
+        return;
+    }
+
+    const int next_joint_index = joint_index - 1;
+    active_home_joint_index_.store(next_joint_index, std::memory_order_relaxed);
+
+    if (next_joint_index >= 0) {
+        const size_t next_jt = static_cast<size_t>(next_joint_index);
+        for (size_t arm = 0; arm < kArmCount; ++arm) {
+            target_joints_rad_[arm][next_jt] = home_joints_rad_[arm][next_jt];
+        }
+        RCLCPP_INFO(get_node()->get_logger(), "Go-home reached Joint%zu, continuing to Joint%zu.",
+                    jt + 1, next_jt + 1);
+        return;
+    }
+
+    go_home_active_.store(false, std::memory_order_relaxed);
+    RCLCPP_INFO(get_node()->get_logger(), "Go-home sequence completed.");
+}
+
 void TrackerTeleopController::processArmUpdate(
     size_t arm, const CachedTrackerData &snap, const rclcpp::Time &now, double dt,
     bool force_reacquire)
@@ -511,6 +612,9 @@ void TrackerTeleopController::handleSetArmed(
         return;
     }
 
+    go_home_requested_.store(false, std::memory_order_relaxed);
+    go_home_active_.store(false, std::memory_order_relaxed);
+    active_home_joint_index_.store(-1, std::memory_order_relaxed);
     setTeleopState(TeleopState::kDisarmed, "service disarm");
     response->success = true;
     response->message = "Tracker teleop disarmed; holding current position.";
@@ -526,6 +630,9 @@ void TrackerTeleopController::handleSetEnabled(
             response->message = "Teleop is disarmed; arm before enabling.";
             return;
         }
+        go_home_requested_.store(false, std::memory_order_relaxed);
+        go_home_active_.store(false, std::memory_order_relaxed);
+        active_home_joint_index_.store(-1, std::memory_order_relaxed);
         setTeleopState(TeleopState::kEnabled, "service enable");
         response->success = true;
         response->message = "Tracker teleop enabled.";
@@ -537,6 +644,24 @@ void TrackerTeleopController::handleSetEnabled(
     }
     response->success = true;
     response->message = "Tracker teleop disabled; holding current position.";
+}
+
+void TrackerTeleopController::handleGoHome(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+{
+    (void)request;
+
+    if (!has_home_joints_) {
+        response->success = false;
+        response->message = "Home joint positions are not configured.";
+        return;
+    }
+
+    setTeleopState(TeleopState::kArmed, "service go_home");
+    go_home_requested_.store(true, std::memory_order_relaxed);
+    response->success = true;
+    response->message = "Go-home accepted; moving to default pose.";
 }
 
 TrackerTeleopController::TeleopState TrackerTeleopController::getTeleopState() const
@@ -832,227 +957,380 @@ static tf2::Transform readRigidTransform(
     return tf2::Transform(q, t);
 }
 
-controller_interface::CallbackReturn
-TrackerTeleopController::on_configure(const rclcpp_lifecycle::State &)
+bool TrackerTeleopController::readJointNames()
 {
-    const auto logger = get_node()->get_logger();
+    auto node = get_node();
+    const auto logger = node->get_logger();
 
     std::vector<std::string> joints_param;
-    if (!get_node()->get_parameter("joints", joints_param)) {
+    if (!node->get_parameter("joints", joints_param)) {
         RCLCPP_ERROR(logger, "Missing required parameter 'joints'.");
-        return CallbackReturn::ERROR;
+        return false;
     }
     if (joints_param.size() != kTotalJoints) {
-        RCLCPP_ERROR(logger, "Parameter 'joints' must have exactly %zu entries (got %zu).",
-                     kTotalJoints, joints_param.size());
-        return CallbackReturn::ERROR;
+        RCLCPP_ERROR(
+            logger, "Parameter 'joints' must have exactly %zu entries (got %zu).",
+            kTotalJoints, joints_param.size());
+        return false;
     }
-    joint_names_ = joints_param;
 
-    if (!get_node()->get_parameter("kine_config_path", kine_config_path_) ||
+    joint_names_ = std::move(joints_param);
+    return true;
+}
+
+bool TrackerTeleopController::initializeKinematics()
+{
+    auto node = get_node();
+    const auto logger = node->get_logger();
+
+    if (!node->get_parameter("kine_config_path", kine_config_path_) ||
         kine_config_path_.empty()) {
         RCLCPP_ERROR(logger, "Missing or empty parameter 'kine_config_path'.");
-        return CallbackReturn::ERROR;
+        return false;
     }
     if (!initMarvinKinematics(kine_config_path_, kine_data_, logger)) {
         RCLCPP_ERROR(logger, "Kinematics initialization failed.");
-        return CallbackReturn::ERROR;
+        return false;
     }
-    kine_initialized_ = true;
 
-    get_node()->get_parameter("position_scale", position_scale_);
-    get_node()->get_parameter("enable_orientation", enable_orientation_);
-    get_node()->get_parameter("base_frame", base_frame_);
-    get_node()->get_parameter("zsp_angle", zsp_angle_);
-    get_node()->get_parameter("j4_bound", j4_bound_);
-    get_node()->get_parameter("dh_d1", dh_d1_);
+    kine_initialized_ = true;
+    return true;
+}
+
+bool TrackerTeleopController::loadControllerParameters()
+{
+    auto node = get_node();
+
+    node->get_parameter("position_scale", position_scale_);
+    node->get_parameter("enable_orientation", enable_orientation_);
+    node->get_parameter("base_frame", base_frame_);
+    node->get_parameter("zsp_angle", zsp_angle_);
+    node->get_parameter("j4_bound", j4_bound_);
+    node->get_parameter("dh_d1", dh_d1_);
+    node->get_parameter("smoothing_alpha", smoothing_alpha_);
+    node->get_parameter("max_joint_velocity", max_joint_velocity_);
+    node->get_parameter("base_x_scale", base_x_scale_);
+    node->get_parameter("ik_fallback_near_ref", ik_fallback_near_ref_);
+    node->get_parameter("ik_clamp_joint_limits", ik_clamp_joint_limits_);
 
     std::vector<std::string> viz_frames;
-    if (get_node()->get_parameter("viz_base_frames", viz_frames) && viz_frames.size() >= 2) {
-        viz_base_frames_[0] = viz_frames[0];
-        viz_base_frames_[1] = viz_frames[1];
+    if (node->get_parameter("viz_base_frames", viz_frames) && viz_frames.size() >= 2) {
+        viz_base_frames_[kLeft] = viz_frames[kLeft];
+        viz_base_frames_[kRight] = viz_frames[kRight];
     }
-    get_node()->get_parameter("smoothing_alpha", smoothing_alpha_);
-    get_node()->get_parameter("max_joint_velocity", max_joint_velocity_);
-    get_node()->get_parameter("base_x_scale", base_x_scale_);
-    get_node()->get_parameter("ik_fallback_near_ref", ik_fallback_near_ref_);
-    get_node()->get_parameter("ik_clamp_joint_limits", ik_clamp_joint_limits_);
-    double tracker_timeout_sec = tracker_timeout_.seconds();
-    get_node()->get_parameter("tracker_timeout_sec", tracker_timeout_sec);
 
-    smoothing_alpha_ = std::clamp(smoothing_alpha_, 0.01, 1.0);
+    double tracker_timeout_sec = tracker_timeout_.seconds();
+    node->get_parameter("tracker_timeout_sec", tracker_timeout_sec);
     tracker_timeout_ = rclcpp::Duration::from_seconds(std::max(0.0, tracker_timeout_sec));
 
-    std::vector<double> elbow_dir_param;
-    if (get_node()->get_parameter("default_elbow_direction", elbow_dir_param) &&
-        elbow_dir_param.size() >= 3) {
-        shoulder_v_elbow_default_ = {{elbow_dir_param[0], elbow_dir_param[1], elbow_dir_param[2]}};
+    double home_tolerance_deg = home_tolerance_rad_ * kRad2Deg;
+    node->get_parameter("home_tolerance_deg", home_tolerance_deg);
+    home_tolerance_rad_ = std::max(0.0, home_tolerance_deg) * kDeg2Rad;
+
+    std::vector<double> default_elbow_direction;
+    if (node->get_parameter("default_elbow_direction", default_elbow_direction) &&
+        default_elbow_direction.size() >= 3) {
+        shoulder_v_elbow_default_ = {
+            {default_elbow_direction[0], default_elbow_direction[1], default_elbow_direction[2]}};
     }
 
-    static const char *side_labels[] = {"left", "right"};
-    static const char *side_tags[]   = {"LEFT", "RIGHT"};
-    struct {
+    smoothing_alpha_ = std::clamp(smoothing_alpha_, 0.01, 1.0);
+
+    loadTransformParameters();
+    loadElbowCorrectionParameters();
+
+    const auto home_left = node->get_parameter("home_joint_positions.left").as_double_array();
+    const auto home_right = node->get_parameter("home_joint_positions.right").as_double_array();
+    if (!loadHomeJointParameters(home_left, home_right, home_tolerance_deg)) {
+        return false;
+    }
+
+    loadTrackerFrameParameters();
+    logConfigurationSummary(home_tolerance_deg);
+    return true;
+}
+
+void TrackerTeleopController::loadTransformParameters()
+{
+    auto node = get_node();
+    const auto logger = node->get_logger();
+
+    struct TransformGroup {
         const char *name;
-        std::array<tf2::Transform, kArmCount> &arr;
-    } param_groups[] = {
-        {"shoulder_T_chest", shoulder_T_chest_},
-        {"wrist_T_ee", wrist_T_ee_},
-        {"arm_human_T_arm_robot", arm_human_T_arm_robot_},
+        std::array<tf2::Transform, kArmCount> *storage;
     };
-    for (auto &[name, arr] : param_groups) {
-        for (int i = 0; i < static_cast<int>(kArmCount); ++i) {
-            arr[i] = readRigidTransform(get_node(),
-                                        std::string(name) + "." + side_labels[i]);
-            const auto &t = arr[i].getOrigin();
-            const auto &q = arr[i].getRotation();
-            RCLCPP_INFO(logger,
-                        "%s %s: t=[%.3f, %.3f, %.3f] quat=[%.4f, %.4f, %.4f, %.4f]",
-                        name, side_tags[i],
-                        t.x(), t.y(), t.z(),
-                        q.x(), q.y(), q.z(), q.w());
+
+    const std::array<TransformGroup, 3> transform_groups{{
+        {"shoulder_T_chest", &shoulder_T_chest_},
+        {"wrist_T_ee", &wrist_T_ee_},
+        {"arm_human_T_arm_robot", &arm_human_T_arm_robot_},
+    }};
+
+    for (const auto &group : transform_groups) {
+        for (size_t arm = 0; arm < kArmCount; ++arm) {
+            (*group.storage)[arm] = readRigidTransform(
+                node, std::string(group.name) + "." + kSideLabels[arm]);
+            const auto &transform = (*group.storage)[arm];
+            const auto &t = transform.getOrigin();
+            const auto &q = transform.getRotation();
+            RCLCPP_INFO(
+                logger,
+                "%s %s: t=[%.3f, %.3f, %.3f] quat=[%.4f, %.4f, %.4f, %.4f]",
+                group.name, kSideTags[arm],
+                t.x(), t.y(), t.z(),
+                q.x(), q.y(), q.z(), q.w());
         }
     }
+}
 
-    static const char *side_labels_elbow[] = {"left", "right"};
-    for (int i = 0; i < static_cast<int>(kArmCount); ++i) {
+void TrackerTeleopController::loadElbowCorrectionParameters()
+{
+    auto node = get_node();
+    const auto logger = node->get_logger();
+
+    for (size_t arm = 0; arm < kArmCount; ++arm) {
         std::vector<double> rpy_deg;
-        get_node()->get_parameter(
-            std::string("elbow_direction_correction.") + side_labels_elbow[i], rpy_deg);
+        node->get_parameter(
+            std::string("elbow_direction_correction.") + kSideLabels[arm], rpy_deg);
+
         if (rpy_deg.size() >= 3 &&
             (rpy_deg[0] != 0.0 || rpy_deg[1] != 0.0 || rpy_deg[2] != 0.0)) {
-            elbow_dir_correction_[i].setRPY(
+            elbow_dir_correction_[arm].setRPY(
                 rpy_deg[0] * kDeg2Rad, rpy_deg[1] * kDeg2Rad, rpy_deg[2] * kDeg2Rad);
-            RCLCPP_INFO(logger, "Elbow dir correction %s: RPY=[%.1f, %.1f, %.1f] deg",
-                        side_tags[i], rpy_deg[0], rpy_deg[1], rpy_deg[2]);
-        } else {
-            elbow_dir_correction_[i] = tf2::Quaternion::getIdentity();
+            RCLCPP_INFO(
+                logger, "Elbow dir correction %s: RPY=[%.1f, %.1f, %.1f] deg",
+                kSideTags[arm], rpy_deg[0], rpy_deg[1], rpy_deg[2]);
+            continue;
         }
+
+        elbow_dir_correction_[arm] = tf2::Quaternion::getIdentity();
+    }
+}
+
+bool TrackerTeleopController::loadHomeJointParameters(
+    const std::vector<double> &home_left,
+    const std::vector<double> &home_right,
+    double home_tolerance_deg)
+{
+    const auto logger = get_node()->get_logger();
+
+    if (home_left.empty() && home_right.empty()) {
+        has_home_joints_ = false;
+        RCLCPP_WARN(logger, "Go-home service disabled: home_joint_positions not configured.");
+        return true;
     }
 
-    RCLCPP_INFO(logger, "Default shoulder_v_elbow: [%.2f, %.2f, %.2f]",
-                shoulder_v_elbow_default_[0], shoulder_v_elbow_default_[1], shoulder_v_elbow_default_[2]);
-    RCLCPP_INFO(logger, "ZSP angle: %.2f deg, J4 bound: %.2f deg", zsp_angle_, j4_bound_);
-    RCLCPP_INFO(logger, "Smoothing: alpha=%.3f, max_vel=%.2f rad/s",
-                smoothing_alpha_, max_joint_velocity_);
-    RCLCPP_INFO(logger, "Base X scale: %.3f", base_x_scale_);
-    RCLCPP_INFO(logger, "IK fallback NEAR_REF: %s, clamp joint limits: %s",
-                ik_fallback_near_ref_ ? "ON" : "OFF",
-                ik_clamp_joint_limits_ ? "ON" : "OFF");
-    RCLCPP_INFO(logger, "Tracker timeout: %.3f s", tracker_timeout_.seconds());
-    RCLCPP_INFO(
-        logger,
-        "Teleop gate: startup=%s, control=service + keyboard helper",
-        teleopStateToString(getTeleopState()));
+    if (home_left.size() != kJointsPerArm || home_right.size() != kJointsPerArm) {
+        RCLCPP_ERROR(
+            logger,
+            "Invalid home_joint_positions size (left=%zu, right=%zu, expected=%zu).",
+            home_left.size(), home_right.size(), kJointsPerArm);
+        return false;
+    }
 
+    for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+        home_joints_rad_[kLeft][joint] = home_left[joint];
+        home_joints_rad_[kRight][joint] = home_right[joint];
+    }
+
+    has_home_joints_ = true;
+    RCLCPP_INFO(logger, "Go-home pose configured (tol=%.2f deg).", home_tolerance_deg);
+    return true;
+}
+
+void TrackerTeleopController::loadTrackerFrameParameters()
+{
+    auto node = get_node();
+    node->get_parameter("tracker_frames.torso", frame_torso_);
+    node->get_parameter("tracker_frames.left_hand", frame_left_hand_);
+    node->get_parameter("tracker_frames.right_hand", frame_right_hand_);
+    node->get_parameter("tracker_frames.left_upper_arm", frame_left_upper_arm_);
+    node->get_parameter("tracker_frames.right_upper_arm", frame_right_upper_arm_);
+}
+
+void TrackerTeleopController::logConfigurationSummary(double home_tolerance_deg) const
+{
+    const auto logger = get_node()->get_logger();
+
+    RCLCPP_INFO(
+        logger, "Default shoulder_v_elbow: [%.2f, %.2f, %.2f]",
+        shoulder_v_elbow_default_[0], shoulder_v_elbow_default_[1], shoulder_v_elbow_default_[2]);
+    RCLCPP_INFO(logger, "ZSP angle: %.2f deg, J4 bound: %.2f deg", zsp_angle_, j4_bound_);
+    RCLCPP_INFO(
+        logger, "Smoothing: alpha=%.3f, max_vel=%.2f rad/s",
+        smoothing_alpha_, max_joint_velocity_);
+    RCLCPP_INFO(logger, "Base X scale: %.3f", base_x_scale_);
+    RCLCPP_INFO(
+        logger, "IK fallback NEAR_REF: %s, clamp joint limits: %s",
+        ik_fallback_near_ref_ ? "ON" : "OFF",
+        ik_clamp_joint_limits_ ? "ON" : "OFF");
+    RCLCPP_INFO(logger, "Tracker timeout: %.3f s", tracker_timeout_.seconds());
+    if (has_home_joints_) {
+        RCLCPP_INFO(logger, "Home tolerance: %.2f deg", home_tolerance_deg);
+    }
+    RCLCPP_INFO(
+        logger, "TF frames: torso=%s, L_hand=%s, R_hand=%s, L_arm=%s, R_arm=%s",
+        frame_torso_.c_str(), frame_left_hand_.c_str(), frame_right_hand_.c_str(),
+        frame_left_upper_arm_.c_str(), frame_right_upper_arm_.c_str());
+    RCLCPP_INFO(
+        logger, "Teleop gate: startup=%s, control=service + keyboard helper",
+        teleopStateToString(getTeleopState()));
+}
+
+void TrackerTeleopController::resetTrackerState()
+{
+    last_hand_tf_stamp_.fill(rclcpp::Time(0, 0, RCL_ROS_TIME));
+    last_arm_tf_stamp_.fill(rclcpp::Time(0, 0, RCL_ROS_TIME));
+    last_hand_tf_valid_.fill(false);
+    last_arm_tf_valid_.fill(false);
+    tracker_fresh_.fill(false);
+    marker_visible_.fill(false);
+    tf_cache_.fill(CachedTrackerData());
+    tf_snapshot_.fill(CachedTrackerData());
+}
+
+void TrackerTeleopController::resetTeleopRuntime(TeleopState teleop_state)
+{
+    teleop_state_.store(static_cast<int>(teleop_state), std::memory_order_relaxed);
+    force_tracker_reacquire_.store(false, std::memory_order_relaxed);
+    go_home_requested_.store(false, std::memory_order_relaxed);
+    go_home_active_.store(false, std::memory_order_relaxed);
+    active_home_joint_index_.store(-1, std::memory_order_relaxed);
+}
+
+void TrackerTeleopController::resetRuntimeState()
+{
     for (auto &arm : last_joint_deg_) arm.fill(0.0);
     for (auto &arm : smoothed_joints_rad_) arm.fill(0.0);
     for (auto &arm : target_joints_rad_) arm.fill(0.0);
+    has_valid_target_.fill(false);
     cmd_interfaces_.fill(nullptr);
     state_interfaces_pos_.fill(nullptr);
     pending_diagnostics_.fill(ArmDiagnostics());
-    marker_visible_.fill(false);
-    tracker_fresh_.fill(false);
     last_ik_result_.fill(IKResult::kNoTarget);
-    teleop_state_.store(static_cast<int>(TeleopState::kDisarmed), std::memory_order_relaxed);
-    force_tracker_reacquire_.store(false, std::memory_order_relaxed);
+    resetTrackerState();
+    resetTeleopRuntime(TeleopState::kDisarmed);
+}
 
-    pub_viz_markers_ = get_node()->create_publisher<visualization_msgs::msg::MarkerArray>(
+void TrackerTeleopController::createRosInterfaces()
+{
+    auto node = get_node();
+
+    pub_viz_markers_ = node->create_publisher<visualization_msgs::msg::MarkerArray>(
         "~/viz_markers", rclcpp::SystemDefaultsQoS());
-
-    pub_ik_status_[0] = get_node()->create_publisher<std_msgs::msg::String>(
+    pub_ik_status_[kLeft] = node->create_publisher<std_msgs::msg::String>(
         "~/ik_status_left", rclcpp::SystemDefaultsQoS());
-    pub_ik_status_[1] = get_node()->create_publisher<std_msgs::msg::String>(
+    pub_ik_status_[kRight] = node->create_publisher<std_msgs::msg::String>(
         "~/ik_status_right", rclcpp::SystemDefaultsQoS());
-    pub_teleop_state_ = get_node()->create_publisher<std_msgs::msg::String>(
+    pub_teleop_state_ = node->create_publisher<std_msgs::msg::String>(
         "~/teleop_state", rclcpp::QoS(1).transient_local());
 
     auto fk_qos = rclcpp::QoS(1).transient_local();
-    pub_current_pose_[0] = get_node()->create_publisher<geometry_msgs::msg::PoseStamped>(
+    pub_current_pose_[kLeft] = node->create_publisher<geometry_msgs::msg::PoseStamped>(
         "~/current_pose_left", fk_qos);
-    pub_current_pose_[1] = get_node()->create_publisher<geometry_msgs::msg::PoseStamped>(
+    pub_current_pose_[kRight] = node->create_publisher<geometry_msgs::msg::PoseStamped>(
         "~/current_pose_right", fk_qos);
 
-    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_node()->get_clock());
-    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(
-        *tf_buffer_, get_node(), false);
+    tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node->get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, node, false);
 
-    tf_poll_timer_ = get_node()->create_wall_timer(
+    tf_poll_timer_ = node->create_wall_timer(
         std::chrono::milliseconds(5),
         std::bind(&TrackerTeleopController::pollTfCallback, this));
-    diagnostics_timer_ = get_node()->create_wall_timer(
+    diagnostics_timer_ = node->create_wall_timer(
         std::chrono::milliseconds(20),
         std::bind(&TrackerTeleopController::diagnosticsTimerCallback, this));
-    srv_set_armed_ = get_node()->create_service<std_srvs::srv::SetBool>(
+    srv_set_armed_ = node->create_service<std_srvs::srv::SetBool>(
         "~/set_armed",
         std::bind(
             &TrackerTeleopController::handleSetArmed, this,
             std::placeholders::_1, std::placeholders::_2));
-    srv_set_enabled_ = get_node()->create_service<std_srvs::srv::SetBool>(
+    srv_set_enabled_ = node->create_service<std_srvs::srv::SetBool>(
         "~/set_enabled",
         std::bind(
             &TrackerTeleopController::handleSetEnabled, this,
             std::placeholders::_1, std::placeholders::_2));
+    srv_go_home_ = node->create_service<std_srvs::srv::Trigger>(
+        "~/go_home",
+        std::bind(
+            &TrackerTeleopController::handleGoHome, this,
+            std::placeholders::_1, std::placeholders::_2));
+}
 
-    get_node()->get_parameter("tracker_frames.torso", frame_torso_);
-    get_node()->get_parameter("tracker_frames.left_hand", frame_left_hand_);
-    get_node()->get_parameter("tracker_frames.right_hand", frame_right_hand_);
-    get_node()->get_parameter("tracker_frames.left_upper_arm", frame_left_upper_arm_);
-    get_node()->get_parameter("tracker_frames.right_upper_arm", frame_right_upper_arm_);
+controller_interface::CallbackReturn
+TrackerTeleopController::on_configure(const rclcpp_lifecycle::State &)
+{
+    if (!readJointNames() || !initializeKinematics() || !loadControllerParameters()) {
+        return CallbackReturn::ERROR;
+    }
 
-    RCLCPP_INFO(logger, "TF frames: torso=%s, L_hand=%s, R_hand=%s, L_arm=%s, R_arm=%s",
-                frame_torso_.c_str(), frame_left_hand_.c_str(), frame_right_hand_.c_str(),
-                frame_left_upper_arm_.c_str(), frame_right_upper_arm_.c_str());
+    resetRuntimeState();
+    createRosInterfaces();
 
+    const auto logger = get_node()->get_logger();
     RCLCPP_INFO(logger, "TrackerTeleopController configured (scale=%.2f, orientation=%s)",
                 position_scale_, enable_orientation_ ? "ON" : "OFF");
     publishTeleopState("configured: teleop locked until armed");
     return CallbackReturn::SUCCESS;
 }
 
-controller_interface::CallbackReturn
-TrackerTeleopController::on_activate(const rclcpp_lifecycle::State &)
+bool TrackerTeleopController::bindJointInterfaces()
 {
     const auto logger = get_node()->get_logger();
 
-    for (size_t i = 0; i < kTotalJoints; ++i) {
-        const std::string name = joint_names_[i] + "/position";
+    for (size_t index = 0; index < kTotalJoints; ++index) {
+        const std::string interface_name = joint_names_[index] + "/position";
 
-        auto *cmd = find_loaned_interface(command_interfaces_, name);
+        auto *cmd = find_loaned_interface(command_interfaces_, interface_name);
         if (!cmd) {
-            RCLCPP_ERROR(logger, "Missing command interface '%s'.", name.c_str());
-            return CallbackReturn::ERROR;
+            RCLCPP_ERROR(logger, "Missing command interface '%s'.", interface_name.c_str());
+            return false;
         }
-        cmd_interfaces_[i] = cmd;
+        cmd_interfaces_[index] = cmd;
 
-        auto *state = find_loaned_interface(state_interfaces_, name);
+        auto *state = find_loaned_interface(state_interfaces_, interface_name);
         if (!state) {
-            RCLCPP_ERROR(logger, "Missing state interface '%s'.", name.c_str());
-            return CallbackReturn::ERROR;
+            RCLCPP_ERROR(logger, "Missing state interface '%s'.", interface_name.c_str());
+            return false;
         }
-        state_interfaces_pos_[i] = state;
+        state_interfaces_pos_[index] = state;
     }
 
-    for (size_t i = 0; i < kTotalJoints; ++i) {
-        const size_t arm = i / kJointsPerArm;
-        const size_t j = i % kJointsPerArm;
-        const auto pos_opt = state_interfaces_pos_[i]->get_optional<double>();
+    return true;
+}
+
+void TrackerTeleopController::initializeJointTargetsFromState()
+{
+    for (size_t index = 0; index < kTotalJoints; ++index) {
+        const size_t arm = index / kJointsPerArm;
+        const size_t joint = index % kJointsPerArm;
+        const auto pos_opt = state_interfaces_pos_[index]->get_optional<double>();
         const double pos_rad = pos_opt.has_value() ? pos_opt.value() : 0.0;
-        last_joint_deg_[arm][j] = pos_rad * kRad2Deg;
-        smoothed_joints_rad_[arm][j] = pos_rad;
-        target_joints_rad_[arm][j] = pos_rad;
-        (void)cmd_interfaces_[i]->set_value(pos_rad);
+
+        last_joint_deg_[arm][joint] = pos_rad * kRad2Deg;
+        smoothed_joints_rad_[arm][joint] = pos_rad;
+        target_joints_rad_[arm][joint] = pos_rad;
+        (void)cmd_interfaces_[index]->set_value(pos_rad);
     }
 
     has_valid_target_.fill(true);
-    last_hand_tf_stamp_.fill(rclcpp::Time(0, 0, RCL_ROS_TIME));
-    last_arm_tf_stamp_.fill(rclcpp::Time(0, 0, RCL_ROS_TIME));
-    last_hand_tf_valid_.fill(false);
-    last_arm_tf_valid_.fill(false);
-    tracker_fresh_.fill(false);
+}
+
+controller_interface::CallbackReturn
+TrackerTeleopController::on_activate(const rclcpp_lifecycle::State &)
+{
+    if (!bindJointInterfaces()) {
+        return CallbackReturn::ERROR;
+    }
+
+    initializeJointTargetsFromState();
+    resetTrackerState();
+    resetTeleopRuntime(TeleopState::kDisarmed);
     setTeleopState(TeleopState::kDisarmed, "controller activated: teleop locked");
 
     computeAndPublishFK();
 
+    const auto logger = get_node()->get_logger();
     RCLCPP_INFO(
         logger,
         "TrackerTeleopController activated (absolute mapping mode, startup state=%s).",
@@ -1063,8 +1341,7 @@ TrackerTeleopController::on_activate(const rclcpp_lifecycle::State &)
 controller_interface::CallbackReturn
 TrackerTeleopController::on_deactivate(const rclcpp_lifecycle::State &)
 {
-    teleop_state_.store(static_cast<int>(TeleopState::kDisarmed), std::memory_order_relaxed);
-    force_tracker_reacquire_.store(false, std::memory_order_relaxed);
+    resetTeleopRuntime(TeleopState::kDisarmed);
     cmd_interfaces_.fill(nullptr);
     state_interfaces_pos_.fill(nullptr);
     return CallbackReturn::SUCCESS;
@@ -1101,17 +1378,23 @@ TrackerTeleopController::update(const rclcpp::Time &, const rclcpp::Duration &pe
     const double dt = period.seconds();
     const auto now = get_node()->get_clock()->now();
     (void)updateTfSnapshot();
+    if (go_home_requested_.load(std::memory_order_relaxed) ||
+        go_home_active_.load(std::memory_order_relaxed)) {
+        processGoHome(dt);
+        return controller_interface::return_type::OK;
+    }
+
     const bool teleop_enabled = isTeleopEnabled(now);
     const bool force_reacquire = teleop_enabled &&
         force_tracker_reacquire_.exchange(false, std::memory_order_relaxed);
 
-    for (int arm = 0; arm < static_cast<int>(kArmCount); ++arm) {
-        if (!teleop_enabled) {
-            holdCurrentPosition(static_cast<size_t>(arm));
-            applySmoothedCommand(static_cast<size_t>(arm), dt);
-            continue;
-        }
-        processArmUpdate(static_cast<size_t>(arm), tf_snapshot_[arm], now, dt, force_reacquire);
+    if (!teleop_enabled) {
+        holdAllArms(dt);
+        return controller_interface::return_type::OK;
+    }
+
+    for (size_t arm = 0; arm < kArmCount; ++arm) {
+        processArmUpdate(arm, tf_snapshot_[arm], now, dt, force_reacquire);
     }
 
     return controller_interface::return_type::OK;
