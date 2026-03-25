@@ -1,0 +1,9 @@
+<library path="wujihand_system">
+    <class name="wujihand_system/WujiHandHardware"
+            type="wujihand_system::WujiHandHardware"
+            base_class_type="hardware_interface::SystemInterface">
+            <description>
+                Hardware interface for the Wuji hand using wujihandcpp.
+            </description>
+    </class>
+</library>

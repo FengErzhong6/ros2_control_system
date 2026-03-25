@@ -1,0 +1,23 @@
+<library path="marvin_system_ik_controller">
+  <class
+    name="marvin_system/IKController"
+    type="marvin_system::IKController"
+    base_class_type="controller_interface::ControllerInterface">
+    <description>
+      IK controller for Marvin dual-arm: subscribes to end-effector pose targets
+      and uses the Marvin kinematics SDK to solve inverse kinematics.
+    </description>
+  </class>
+</library>
+
+<library path="marvin_system_tracker_teleop_controller">
+  <class
+    name="marvin_system/TrackerTeleopController"
+    type="marvin_system::TrackerTeleopController"
+    base_class_type="controller_interface::ControllerInterface">
+    <description>
+      Tracker teleop controller: subscribes to 5 HTC Tracker poses (hands, upper arms, torso),
+      uses torso as reference frame and elbow direction for null-space, solves IK for dual-arm.
+    </description>
+  </class>
+</library>

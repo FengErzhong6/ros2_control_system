@@ -1,0 +1,10 @@
+<library path="wujihand_system_rl_controller">
+  <class
+    name="wujihand_system/RLController"
+    type="wujihand_system::RLController"
+    base_class_type="controller_interface::ControllerInterface">
+    <description>
+      RL controller plugin for the Wuji hand.
+    </description>
+  </class>
+</library>

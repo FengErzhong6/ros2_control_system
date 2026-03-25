@@ -12,15 +12,15 @@
 - **控制器管理**：由 `controller_manager` 加载、切换多种控制器（如位置控制、速度控制、关节状态广播等），同一套上层逻辑可复用于不同机器人。
 - **配置驱动**：机器人的关节限位、控制器参数等通过 URDF/XACRO 与 YAML 描述，便于维护和复用。
 
-因此，为某款机器人编写一次 ros2_control 的 **硬件接口 (Hardware Interface)** 后，即可使用 ROS 2 生态中的 `forward_command_controller`、`joint_state_broadcaster`、MoveIt2 等标准组件进行控制与规划。本仓库中的 **ros2_control_wujihand** 和 **ros2_control_marvin** 即分别为舞肌手和 Marvin 双臂提供的这类实现。
+因此，为某款机器人编写一次 ros2_control 的 **硬件接口 (Hardware Interface)** 后，即可使用 ROS 2 生态中的 `forward_command_controller`、`joint_state_broadcaster`、MoveIt2 等标准组件进行控制与规划。本仓库中的 **wujihand_system** 和 **marvin_system** 即分别为舞肌手和 Marvin 双臂提供的这类实现。
 
 ---
 
 ## 二、仓库中的两个库
 
-### 1. ros2_control_wujihand（舞肌灵巧手）
+### 1. wujihand_system（舞肌灵巧手）
 
-**ros2_control_wujihand** 为 **舞肌灵巧手 (WujiHand)** 提供 ros2_control 硬件接口与启动、配置，支持单右手模型（可扩展为左手或双手）。
+**wujihand_system** 为 **舞肌灵巧手 (WujiHand)** 提供 ros2_control 硬件接口与启动、配置，支持单右手模型（可扩展为左手或双手）。
 
 | 项目 | 说明 |
 |------|------|
@@ -42,18 +42,18 @@
 
 - 启动右手控制（含 RViz、joint_state_publisher_gui、GUI 到 forward 的桥接）：
   ```bash
-  ros2 launch ros2_control_wujihand wujihand_right_control.launch.py
+  ros2 launch wujihand_system wujihand_right_control.launch.py
   ```
 - 仅查看模型：
   ```bash
-  ros2 launch ros2_control_wujihand view_wujihand_right.launch.py
+  ros2 launch wujihand_system view_wujihand_right.launch.py
   ```
 
 ---
 
-### 2. ros2_control_marvin（Marvin 双臂机器人 + OmniPicker 夹爪）
+### 2. marvin_system（Marvin 双臂机器人 + OmniPicker 夹爪）
 
-**ros2_control_marvin** 为 **Marvin 双臂机器人** 提供 ros2_control 硬件接口与启动、配置，当前为 **双臂一体** 描述：左臂 + 右臂共 14 个关节，通过同一硬件插件与 Marvin SDK 通信。可选集成 **OmniPicker 夹爪**（每臂最多 1 个，共最多 2 个）。
+**marvin_system** 为 **Marvin 双臂机器人** 提供 ros2_control 硬件接口与启动、配置，当前为 **双臂一体** 描述：左臂 + 右臂共 14 个关节，通过同一硬件插件与 Marvin SDK 通信。可选集成 **OmniPicker 夹爪**（每臂最多 1 个，共最多 2 个）。
 
 | 项目 | 说明 |
 |------|------|
@@ -83,20 +83,20 @@
 
 - 启动双臂控制（不含夹爪，和原来完全一致）：
   ```bash
-  ros2 launch ros2_control_marvin marvin_dual_joint_gui_control.launch.py
+  ros2 launch marvin_system marvin_dual_joint_gui_control.launch.py
   ```
 - 启动双臂 + 双夹爪控制（GUI 滑条可控制 0～1 夹爪开合）：
   ```bash
-  ros2 launch ros2_control_marvin marvin_dual_joint_gui_control.launch.py \
+  ros2 launch marvin_system marvin_dual_joint_gui_control.launch.py \
       use_gripper_L:=true use_gripper_R:=true
   ```
 - 仅显示模型：
   ```bash
-  ros2 launch ros2_control_marvin view_marvin_dual.launch.py
+  ros2 launch marvin_system view_marvin_dual.launch.py
   ```
 - 启动双臂 IK 控制（通过发布末端位姿，控制器自动进行逆运动学求解并驱动关节）：
   ```bash
-  ros2 launch ros2_control_marvin marvin_ik_control.launch.py
+  ros2 launch marvin_system marvin_ik_control.launch.py
   ```
 - 使用前请根据实际设备修改 ros2_control 中的 `ip` 及超时等参数（在 `description/ros2_control/marvin_dual_system.ros2_control.xacro` 或对应 xacro 中）。
 
@@ -172,7 +172,7 @@ ros2 topic echo /ik_controller/ik_status_right
 在 workspace 根目录下：
 
 ```bash
-colcon build --packages-select ros2_control_wujihand ros2_control_marvin asset_description
+colcon build --packages-select wujihand_system marvin_system asset_description
 source install/setup.bash
 ```
 
@@ -186,8 +186,8 @@ source install/setup.bash
 ros2_control_system/
 ├── README.md
 ├── asset_description/          # 舞肌手、Marvin 的 URDF/mesh/RViz 等描述资源
-├── ros2_control_wujihand/      # 舞肌灵巧手 ros2_control 接口与启动
-└── ros2_control_marvin/       # Marvin 双臂 ros2_control 接口与启动
+├── wujihand_system/      # 舞肌灵巧手 ros2_control 接口与启动
+└── marvin_system/       # Marvin 双臂 ros2_control 接口与启动
 ```
 
 两个库均包含：**硬件接口实现**、**ros2_control 的 xacro 描述**、**控制器配置** 以及 **launch 与可选 GUI 桥接**，便于在仿真或实机上统一使用 ros2_control 进行控制与开发。

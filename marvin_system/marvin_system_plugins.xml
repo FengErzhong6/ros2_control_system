@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<library path="marvin_system_hardware">
+  <class
+    name="marvin_system/MarvinHardware"
+    type="marvin_system::MarvinHardware"
+    base_class_type="hardware_interface::SystemInterface">
+    <description>
+      Marvin dual-arm hardware (SDK position control).
+    </description>
+  </class>
+</library>

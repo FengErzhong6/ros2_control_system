@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="wujihand-right">
+
+	<!--
+		Composite URDF (xacro) for the right Wuji hand.
+		- Includes the visual/collision/inertial model from `asset_description`.
+		- Includes ros2_control tags from this package.
+		Note: no RViz materials/colors are included.
+	-->
+
+	<!-- Hand model (links/joints/meshes) -->
+	<xacro:include filename="$(find asset_description)/wuji/urdf/wujihand-right.urdf.xacro" />
+
+	<!-- ros2_control description -->
+	<xacro:include filename="$(find wujihand_system)/ros2_control/wujihand-right.ros2_control.xacro" />
+
+	<xacro:wujihand_right_ros2_control name="wujihand_right" />
+
+</robot>
