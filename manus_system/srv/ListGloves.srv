@@ -1,0 +1,8 @@
+---
+bool success
+string message
+uint32[] glove_ids
+string[] sides
+bool[] is_haptics
+string[] paired_states
+

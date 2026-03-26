@@ -1,0 +1,7 @@
+manus_raw_publisher_node:
+  ros__parameters:
+    publish_rate: 120.0
+    world_space: true
+    unit_scale: 1.0
+    hand_motion: "auto"
+

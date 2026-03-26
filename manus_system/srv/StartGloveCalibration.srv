@@ -1,0 +1,11 @@
+uint32 glove_id
+string side
+---
+bool success
+string message
+uint32 resolved_glove_id
+uint32 step_count
+string[] step_titles
+string[] step_descriptions
+float32[] step_durations
+

@@ -1,0 +1,9 @@
+uint32 glove_id
+uint32 step_index
+---
+bool success
+string message
+string title
+string description
+float32 time_hint
+

@@ -1,0 +1,5 @@
+uint32 glove_id
+---
+bool success
+string message
+

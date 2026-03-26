@@ -1,0 +1,7 @@
+uint32 glove_id
+string file_path
+---
+bool success
+string message
+string resolved_path
+

@@ -1,0 +1,7 @@
+manus_calibration_node:
+  ros__parameters:
+    calibration_directory: "/home/mmlab/codes/huangshzh/ros2_control_system/manus_system/bringup/calibrations"
+    default_glove_side: "left"
+    world_space: true
+    unit_scale: 1.0
+
