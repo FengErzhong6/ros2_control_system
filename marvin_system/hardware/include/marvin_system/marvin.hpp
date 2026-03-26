@@ -49,6 +49,8 @@ private:
 
     int joint_vel_ratio_{30};
     int joint_acc_ratio_{30};
+    int gripper_velocity_{255};
+    int gripper_acceleration_{255};
     int connect_timeout_ms_{1500};
     int state_timeout_ms_{5000};
     int no_frame_timeout_ms_{800};

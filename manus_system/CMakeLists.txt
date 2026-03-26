@@ -81,10 +81,28 @@ set_target_properties(manus_raw_publisher_node PROPERTIES
   INSTALL_RPATH "$ORIGIN/.."
 )
 
+add_executable(manus_gripper_node
+  hardware/src/manus_gripper_node.cpp
+)
+target_compile_features(manus_gripper_node PUBLIC cxx_std_17)
+target_include_directories(manus_gripper_node PUBLIC
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/hardware/include>
+  $<INSTALL_INTERFACE:include>
+)
+ament_target_dependencies(manus_gripper_node PUBLIC
+  rclcpp
+  std_msgs
+)
+target_link_libraries(manus_gripper_node
+  PUBLIC
+    ${cpp_typesupport_target}
+)
+
 install(
   TARGETS
     manus_calibration_node
     manus_raw_publisher_node
+    manus_gripper_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION lib/${PROJECT_NAME}

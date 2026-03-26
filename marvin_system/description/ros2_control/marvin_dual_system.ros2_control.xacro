@@ -4,6 +4,8 @@
   <xacro:macro name="marvin_dual_ros2_control"
                params="name
                        use_mock_hardware:=false
+                       joint_vel_ratio:=80  joint_acc_ratio:=80
+                       gripper_velocity:=255  gripper_acceleration:=255
                        use_gripper_L:=false  gripper_L_arm:=A  gripper_L_can_id:=1
                        use_gripper_R:=false  gripper_R_arm:=B  gripper_R_can_id:=2">
 
@@ -17,8 +19,10 @@
         <xacro:unless value="${str(use_mock_hardware).lower() == 'true'}">
           <plugin>marvin_system/MarvinHardware</plugin>
           <param name="ip">192.168.1.190</param>
-          <param name="joint_vel_ratio">80</param>
-          <param name="joint_acc_ratio">80</param>
+          <param name="joint_vel_ratio">${joint_vel_ratio}</param>
+          <param name="joint_acc_ratio">${joint_acc_ratio}</param>
+          <param name="gripper_velocity">${gripper_velocity}</param>
+          <param name="gripper_acceleration">${gripper_acceleration}</param>
           <param name="connect_timeout_ms">1500</param>
           <param name="state_timeout_ms">5000</param>
           <param name="no_frame_timeout_ms">800</param>

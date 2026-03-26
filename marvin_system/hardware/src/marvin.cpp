@@ -215,6 +215,8 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
 
     joint_vel_ratio_     = param_int(p, "joint_vel_ratio",     30,   1, 100);
     joint_acc_ratio_     = param_int(p, "joint_acc_ratio",     30,   1, 100);
+    gripper_velocity_    = param_int(p, "gripper_velocity",    255,  0, 255);
+    gripper_acceleration_= param_int(p, "gripper_acceleration",255,  0, 255);
     connect_timeout_ms_  = param_int(p, "connect_timeout_ms",  1500, 100, 30000);
     state_timeout_ms_    = param_int(p, "state_timeout_ms",    5000, 100, 30000);
     no_frame_timeout_ms_ = param_int(p, "no_frame_timeout_ms", 800,  50, 10000);
@@ -311,10 +313,19 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
             }
             return hardware_interface::CallbackReturn::ERROR;
         }
+        slot.device->set_default_velocity(static_cast<uint8_t>(gripper_velocity_));
+        slot.device->set_default_acceleration(static_cast<uint8_t>(gripper_acceleration_));
+        slot.device->set_default_deceleration(static_cast<uint8_t>(gripper_acceleration_));
         RCLCPP_INFO(get_logger(), "Gripper '%s' connected (arm=%s, CAN=%u).",
                      jn.c_str(),
                      slot.arm_side == omnipicker::ArmSide::kA ? "A" : "B",
                      slot.can_node_id);
+        RCLCPP_INFO(get_logger(),
+                    "Gripper '%s' defaults: velocity=%d, acceleration=%d, deceleration=%d.",
+                    jn.c_str(),
+                    gripper_velocity_,
+                    gripper_acceleration_,
+                    gripper_acceleration_);
     }
 
     // Parse home position (radians, space-separated, 7 values per arm)
@@ -351,8 +362,14 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
 
     workspace_guard_.configure(p, get_logger());
 
-    RCLCPP_INFO(get_logger(), "Configured dual-arm system (vel=%d%%, acc=%d%%, grippers=%zu).",
-                joint_vel_ratio_, joint_acc_ratio_, gripper_count_);
+    RCLCPP_INFO(get_logger(),
+                "Configured dual-arm system (joint_vel=%d%%, joint_acc=%d%%, "
+                "gripper_velocity=%d, gripper_acceleration=%d, grippers=%zu).",
+                joint_vel_ratio_,
+                joint_acc_ratio_,
+                gripper_velocity_,
+                gripper_acceleration_,
+                gripper_count_);
     return hardware_interface::CallbackReturn::SUCCESS;
 }
 

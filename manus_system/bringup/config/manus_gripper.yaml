@@ -1,0 +1,7 @@
+manus_gripper_node:
+  ros__parameters:
+    input_topic: "/manus_raw_publisher_node/gloves_raw"
+    left_output_topic: "/gripper_L_controller/commands"
+    right_output_topic: "/gripper_R_controller/commands"
+    lower_threshold_distance: 0.03
+    upper_threshold_distance: 0.10

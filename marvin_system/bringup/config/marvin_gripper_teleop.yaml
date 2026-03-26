@@ -1,0 +1,5 @@
+marvin_gripper_teleop:
+  start_manus: true
+  manus_user_name: hsz
+  gripper_velocity: 255
+  gripper_acceleration: 255

@@ -19,6 +19,10 @@
   <xacro:arg name="use_gripper_L" default="true" />
   <xacro:arg name="use_gripper_R" default="true" />
   <xacro:arg name="use_mock_hardware" default="false" />
+  <xacro:arg name="joint_vel_ratio" default="80" />
+  <xacro:arg name="joint_acc_ratio" default="80" />
+  <xacro:arg name="gripper_velocity" default="255" />
+  <xacro:arg name="gripper_acceleration" default="255" />
 
   <link name="world" />
 
@@ -175,6 +179,10 @@
 
   <xacro:marvin_dual_ros2_control name="marvin_dual"
     use_mock_hardware="$(arg use_mock_hardware)"
+    joint_vel_ratio="$(arg joint_vel_ratio)"
+    joint_acc_ratio="$(arg joint_acc_ratio)"
+    gripper_velocity="$(arg gripper_velocity)"
+    gripper_acceleration="$(arg gripper_acceleration)"
     use_gripper_L="$(arg use_gripper_L)"
     use_gripper_R="$(arg use_gripper_R)" />
 
