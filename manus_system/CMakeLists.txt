@@ -28,77 +28,54 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   DEPENDENCIES geometry_msgs std_msgs
 )
 
-add_library(manus_calibration_node_lib
+add_executable(manus_calibration_node
   hardware/src/manus_calibration_node.cpp
 )
-target_compile_features(manus_calibration_node_lib PUBLIC cxx_std_17)
-target_compile_definitions(manus_calibration_node_lib PRIVATE
+target_compile_features(manus_calibration_node PUBLIC cxx_std_17)
+target_compile_definitions(manus_calibration_node PRIVATE
   MANUS_SYSTEM_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
 )
-target_include_directories(manus_calibration_node_lib PUBLIC
+target_include_directories(manus_calibration_node PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/hardware/include>
   $<BUILD_INTERFACE:${MANUS_SDK_INCLUDE_DIR}>
   $<INSTALL_INTERFACE:include>
 )
-ament_target_dependencies(manus_calibration_node_lib PUBLIC
+ament_target_dependencies(manus_calibration_node PUBLIC
   rclcpp
 )
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
-target_link_libraries(manus_calibration_node_lib
+target_link_libraries(manus_calibration_node
   PUBLIC
     ${MANUS_SDK_LIBRARY}
     ${cpp_typesupport_target}
 )
-set_target_properties(manus_calibration_node_lib PROPERTIES
-  BUILD_RPATH "${PROJECT_SOURCE_DIR}/third_party/lib"
-  INSTALL_RPATH "$ORIGIN/.."
-)
-
-add_executable(manus_calibration_node
-  hardware/src/manus_calibration_main.cpp
-)
-target_compile_features(manus_calibration_node PUBLIC cxx_std_17)
-ament_target_dependencies(manus_calibration_node PUBLIC
-  rclcpp
-)
-target_link_libraries(manus_calibration_node PRIVATE manus_calibration_node_lib)
 set_target_properties(manus_calibration_node PROPERTIES
   BUILD_RPATH "${PROJECT_SOURCE_DIR}/third_party/lib"
   INSTALL_RPATH "$ORIGIN/.."
 )
 
-add_library(manus_raw_publisher_node_lib
+add_executable(manus_raw_publisher_node
   hardware/src/manus_raw_publisher_node.cpp
 )
-target_compile_features(manus_raw_publisher_node_lib PUBLIC cxx_std_17)
-target_include_directories(manus_raw_publisher_node_lib PUBLIC
+target_compile_features(manus_raw_publisher_node PUBLIC cxx_std_17)
+target_compile_definitions(manus_raw_publisher_node PRIVATE
+  MANUS_SYSTEM_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
+)
+target_include_directories(manus_raw_publisher_node PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/hardware/include>
   $<BUILD_INTERFACE:${MANUS_SDK_INCLUDE_DIR}>
   $<INSTALL_INTERFACE:include>
 )
-ament_target_dependencies(manus_raw_publisher_node_lib PUBLIC
+ament_target_dependencies(manus_raw_publisher_node PUBLIC
   geometry_msgs
   rclcpp
   std_msgs
 )
-target_link_libraries(manus_raw_publisher_node_lib
+target_link_libraries(manus_raw_publisher_node
   PUBLIC
     ${MANUS_SDK_LIBRARY}
     ${cpp_typesupport_target}
 )
-set_target_properties(manus_raw_publisher_node_lib PROPERTIES
-  BUILD_RPATH "${PROJECT_SOURCE_DIR}/third_party/lib"
-  INSTALL_RPATH "$ORIGIN/.."
-)
-
-add_executable(manus_raw_publisher_node
-  hardware/src/manus_raw_publisher_main.cpp
-)
-target_compile_features(manus_raw_publisher_node PUBLIC cxx_std_17)
-ament_target_dependencies(manus_raw_publisher_node PUBLIC
-  rclcpp
-)
-target_link_libraries(manus_raw_publisher_node PRIVATE manus_raw_publisher_node_lib)
 set_target_properties(manus_raw_publisher_node PROPERTIES
   BUILD_RPATH "${PROJECT_SOURCE_DIR}/third_party/lib"
   INSTALL_RPATH "$ORIGIN/.."
@@ -106,9 +83,7 @@ set_target_properties(manus_raw_publisher_node PROPERTIES
 
 install(
   TARGETS
-    manus_calibration_node_lib
     manus_calibration_node
-    manus_raw_publisher_node_lib
     manus_raw_publisher_node
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
@@ -123,6 +98,12 @@ install(
 install(
   DIRECTORY bringup/config bringup/launch bringup/calibrations
   DESTINATION share/${PROJECT_NAME}
+)
+
+install(
+  PROGRAMS
+    bringup/scripts/manus_calibration_workflow.py
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 install(

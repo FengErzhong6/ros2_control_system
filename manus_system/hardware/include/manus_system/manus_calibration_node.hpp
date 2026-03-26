@@ -3,6 +3,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "ManusSDK.h"
@@ -45,6 +46,7 @@ private:
 
   static void onConnectedCallback(const ManusHost *host);
   static void onDisconnectedCallback(const ManusHost *host);
+  static void onLogCallback(LogSeverity severity, const char *log, uint32_t length);
   static void onLandscapeCallback(const Landscape *landscape);
 
   void handleListGloves(
@@ -66,11 +68,18 @@ private:
       const std::shared_ptr<LoadGloveCalibration::Request> request,
       std::shared_ptr<LoadGloveCalibration::Response> response);
 
+  void maybeAutoLoadCalibrations();
+  bool loadCalibrationForGlove(
+      uint32_t glove_id,
+      const std::string &file_path,
+      std::string *resolved_path,
+      std::string *error_message) const;
   std::optional<GloveLandscapeData> resolveGlove(uint32_t glove_id, const std::string &side_hint) const;
   std::optional<GloveLandscapeData> getGloveById(uint32_t glove_id) const;
   std::optional<GloveLandscapeData> getFirstGloveBySide(const std::string &side_hint) const;
   std::optional<Landscape> copyLandscape() const;
 
+  std::string configuredCalibrationFileForSide(Side side) const;
   std::string saveCalibration(uint32_t glove_id, const std::string &requested_file_name);
   std::string resolveCalibrationPath(const std::string &file_path) const;
   static std::string sideToString(Side side);
@@ -80,12 +89,20 @@ private:
 
   bool integrated_connected_{false};
   std::string calibration_directory_;
+  std::string user_name_;
   std::string default_glove_side_;
+  bool auto_load_calibrations_{false};
+  std::string auto_load_left_calibration_file_;
+  std::string auto_load_right_calibration_file_;
+  bool suppress_sdk_statistics_logs_{true};
   bool world_space_{true};
   float unit_scale_{1.0F};
 
   mutable std::mutex landscape_mutex_;
   std::unique_ptr<Landscape> landscape_;
+
+  mutable std::mutex auto_load_mutex_;
+  std::unordered_set<std::string> auto_load_attempt_keys_;
 
   mutable std::mutex session_mutex_;
   CalibrationSession calibration_session_;
@@ -101,4 +118,3 @@ private:
 };
 
 }  // namespace manus_system
-

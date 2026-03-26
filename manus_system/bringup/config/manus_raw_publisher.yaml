@@ -1,7 +1,11 @@
 manus_raw_publisher_node:
   ros__parameters:
     publish_rate: 120.0
+    calibration_directory: "/home/mmlab/codes/huangshzh/ros2_control_system/manus_system/bringup/calibrations"
+    auto_load_calibrations: true
+    auto_load_left_calibration_file: "left_glove.mcal"
+    auto_load_right_calibration_file: "right_glove.mcal"
+    suppress_sdk_statistics_logs: true
     world_space: true
     unit_scale: 1.0
     hand_motion: "auto"
-

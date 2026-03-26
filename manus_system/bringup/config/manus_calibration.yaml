@@ -1,7 +1,15 @@
 manus_calibration_node:
   ros__parameters:
     calibration_directory: "/home/mmlab/codes/huangshzh/ros2_control_system/manus_system/bringup/calibrations"
-    default_glove_side: "left"
-    world_space: true
-    unit_scale: 1.0
-
+    suppress_sdk_statistics_logs: true
+manus_calibration_workflow_node:
+  ros__parameters:
+    calibration_node_name: "/manus_calibration_node"
+    target_sides: ["left", "right"]
+    wait_for_services_timeout_sec: 15.0
+    wait_for_glove_timeout_sec: 60.0
+    poll_period_sec: 1.0
+    step_prepare_delay_sec: 5.0
+    save_to_file: true
+    left_output_file: "left_glove.mcal"
+    right_output_file: "right_glove.mcal"

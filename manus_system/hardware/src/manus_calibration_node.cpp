@@ -6,8 +6,10 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -25,6 +27,62 @@ std::string toLowerCopy(std::string value)
       value.begin(),
       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   return value;
+}
+
+std::string trimCopy(const std::string &value)
+{
+  const auto begin = std::find_if_not(
+      value.begin(), value.end(), [](unsigned char c) { return std::isspace(c) != 0; });
+  const auto end = std::find_if_not(
+      value.rbegin(), value.rend(), [](unsigned char c) { return std::isspace(c) != 0; })
+                       .base();
+  if (begin >= end) {
+    return "";
+  }
+  return std::string(begin, end);
+}
+
+bool isValidUserName(const std::string &user_name)
+{
+  if (user_name.empty() || user_name == "." || user_name == "..") {
+    return false;
+  }
+
+  return std::all_of(user_name.begin(), user_name.end(), [](unsigned char c) {
+    return std::isalnum(c) != 0 || c == '_' || c == '-' || c == '.';
+  });
+}
+
+std::string resolveUserCalibrationDirectory(
+    const std::string &base_directory,
+    const std::string &user_name)
+{
+  const std::string normalized_user_name = trimCopy(user_name);
+  if (!isValidUserName(normalized_user_name)) {
+    throw std::runtime_error(
+        "Parameter 'user_name' must be set to a simple directory name "
+        "containing letters, digits, '_', '-' or '.'.");
+  }
+
+  return (std::filesystem::path(base_directory) / normalized_user_name).string();
+}
+
+bool shouldSuppressSdkLogMessage(
+    const std::string &message,
+    bool suppress_statistics_logs)
+{
+  const std::string lower_message = toLowerCopy(message);
+  if (lower_message.find("average frame duration") != std::string::npos ||
+      lower_message.find("average data delay") != std::string::npos) {
+    return true;
+  }
+
+  if (!suppress_statistics_logs) {
+    return false;
+  }
+
+  return lower_message.find("devices datarate") != std::string::npos ||
+         lower_message.find("data is discarded") != std::string::npos;
 }
 
 bool isSuccessSetCalibration(SetGloveCalibrationReturnCode code)
@@ -68,7 +126,8 @@ ManusCalibrationNode::ManusCalibrationNode(const rclcpp::NodeOptions &options)
 
   RCLCPP_INFO(
       get_logger(),
-      "MANUS calibration node ready. Calibration files will be stored in: %s",
+      "MANUS calibration node ready for user '%s'. Calibration files will be stored in: %s",
+      user_name_.c_str(),
       calibration_directory_.c_str());
 }
 
@@ -89,8 +148,18 @@ void ManusCalibrationNode::declareAndLoadParameters()
 
   calibration_directory_ =
       declare_parameter<std::string>("calibration_directory", default_calibration_dir);
+  user_name_ = declare_parameter<std::string>("user_name", "");
+  calibration_directory_ = resolveUserCalibrationDirectory(calibration_directory_, user_name_);
   default_glove_side_ =
       declare_parameter<std::string>("default_glove_side", "left");
+  auto_load_calibrations_ =
+      declare_parameter<bool>("auto_load_calibrations", false);
+  auto_load_left_calibration_file_ =
+      declare_parameter<std::string>("auto_load_left_calibration_file", "");
+  auto_load_right_calibration_file_ =
+      declare_parameter<std::string>("auto_load_right_calibration_file", "");
+  suppress_sdk_statistics_logs_ =
+      declare_parameter<bool>("suppress_sdk_statistics_logs", true);
   world_space_ =
       declare_parameter<bool>("world_space", true);
   unit_scale_ =
@@ -103,6 +172,16 @@ void ManusCalibrationNode::initializeSdk()
   if (initialize_result != SDKReturnCode_Success) {
     throw std::runtime_error(
         "CoreSdk_InitializeIntegrated failed: " + sdkReturnCodeToString(initialize_result));
+  }
+
+  const auto sdk_log_path =
+      (std::filesystem::temp_directory_path() / "manus_calibration_sdk.log").string();
+  const SDKReturnCode log_location_result = CoreSdk_SetLogLocation(sdk_log_path.c_str());
+  if (log_location_result != SDKReturnCode_Success) {
+    RCLCPP_WARN(
+        get_logger(),
+        "CoreSdk_SetLogLocation failed: %s",
+        sdkReturnCodeToString(log_location_result).c_str());
   }
 
   registerCallbacks();
@@ -156,6 +235,12 @@ void ManusCalibrationNode::registerCallbacks()
         "CoreSdk_RegisterCallbackForOnDisconnect failed: " + sdkReturnCodeToString(result));
   }
 
+  result = CoreSdk_RegisterCallbackForOnLog(*onLogCallback);
+  if (result != SDKReturnCode_Success) {
+    throw std::runtime_error(
+        "CoreSdk_RegisterCallbackForOnLog failed: " + sdkReturnCodeToString(result));
+  }
+
   result = CoreSdk_RegisterCallbackForLandscapeStream(*onLandscapeCallback);
   if (result != SDKReturnCode_Success) {
     throw std::runtime_error(
@@ -194,6 +279,43 @@ void ManusCalibrationNode::onDisconnectedCallback(const ManusHost * /*host*/)
   RCLCPP_WARN(instance_->get_logger(), "Disconnected from MANUS SDK.");
 }
 
+void ManusCalibrationNode::onLogCallback(
+    LogSeverity severity,
+    const char *log,
+    uint32_t length)
+{
+  if (instance_ == nullptr || log == nullptr) {
+    return;
+  }
+
+  std::string message;
+  if (length > 0U) {
+    message.assign(log, log + length);
+  } else {
+    message = log;
+  }
+
+  if (shouldSuppressSdkLogMessage(message, instance_->suppress_sdk_statistics_logs_)) {
+    return;
+  }
+
+  switch (severity) {
+    case LogSeverity_Debug:
+      RCLCPP_DEBUG(instance_->get_logger(), "MANUS SDK: %s", message.c_str());
+      break;
+    case LogSeverity_Info:
+      RCLCPP_INFO(instance_->get_logger(), "MANUS SDK: %s", message.c_str());
+      break;
+    case LogSeverity_Warn:
+      RCLCPP_WARN(instance_->get_logger(), "MANUS SDK: %s", message.c_str());
+      break;
+    case LogSeverity_Error:
+    default:
+      RCLCPP_ERROR(instance_->get_logger(), "MANUS SDK: %s", message.c_str());
+      break;
+  }
+}
+
 void ManusCalibrationNode::onLandscapeCallback(const Landscape *landscape)
 {
   if (instance_ == nullptr || landscape == nullptr) {
@@ -205,6 +327,8 @@ void ManusCalibrationNode::onLandscapeCallback(const Landscape *landscape)
     std::lock_guard<std::mutex> lock(instance_->landscape_mutex_);
     instance_->landscape_ = std::move(latest);
   }
+
+  instance_->maybeAutoLoadCalibrations();
 }
 
 std::optional<Landscape> ManusCalibrationNode::copyLandscape() const
@@ -533,48 +657,134 @@ void ManusCalibrationNode::handleLoadCalibration(
     return;
   }
 
-  const std::string resolved_path = resolveCalibrationPath(request->file_path);
-  std::ifstream input(resolved_path, std::ios::binary);
-  if (!input) {
+  std::string resolved_path;
+  std::string error_message;
+  if (!loadCalibrationForGlove(glove->id, request->file_path, &resolved_path, &error_message)) {
     response->success = false;
-    response->message = "Calibration file does not exist: " + resolved_path;
-    return;
-  }
-
-  input.seekg(0, std::ios::end);
-  const std::streamsize file_size = input.tellg();
-  input.seekg(0, std::ios::beg);
-  if (file_size <= 0) {
-    response->success = false;
-    response->message = "Calibration file is empty: " + resolved_path;
-    return;
-  }
-
-  std::vector<unsigned char> bytes(static_cast<size_t>(file_size));
-  input.read(reinterpret_cast<char *>(bytes.data()), file_size);
-  if (!input) {
-    response->success = false;
-    response->message = "Failed to read calibration file: " + resolved_path;
-    return;
-  }
-
-  SetGloveCalibrationReturnCode set_result = SetGloveCalibrationReturnCode_Error;
-  const SDKReturnCode result = CoreSdk_SetGloveCalibration(
-      glove->id,
-      bytes.data(),
-      static_cast<uint32_t>(bytes.size()),
-      &set_result);
-  if (result != SDKReturnCode_Success || !isSuccessSetCalibration(set_result)) {
-    response->success = false;
-    response->message =
-        "Failed to load calibration into glove: sdk=" + sdkReturnCodeToString(result) +
-        ", set_result=" + std::to_string(static_cast<int32_t>(set_result));
+    response->message = error_message;
     return;
   }
 
   response->success = true;
   response->message = "Calibration loaded successfully.";
   response->resolved_path = resolved_path;
+}
+
+void ManusCalibrationNode::maybeAutoLoadCalibrations()
+{
+  if (!auto_load_calibrations_) {
+    return;
+  }
+
+  auto landscape_copy = copyLandscape();
+  if (!landscape_copy.has_value()) {
+    return;
+  }
+
+  for (uint32_t i = 0; i < landscape_copy->gloveDevices.gloveCount; ++i) {
+    const auto &glove = landscape_copy->gloveDevices.gloves[i];
+    if (glove.side != Side_Left && glove.side != Side_Right) {
+      continue;
+    }
+    if (glove.pairedState != DevicePairedState_Paired) {
+      continue;
+    }
+
+    const std::string configured_file = configuredCalibrationFileForSide(glove.side);
+    if (configured_file.empty()) {
+      continue;
+    }
+
+    const std::string attempt_key =
+        sideToString(glove.side) + ":" + std::to_string(glove.id) + ":" + configured_file;
+    {
+      std::lock_guard<std::mutex> lock(auto_load_mutex_);
+      if (auto_load_attempt_keys_.count(attempt_key) != 0U) {
+        continue;
+      }
+      auto_load_attempt_keys_.insert(attempt_key);
+    }
+
+    std::string resolved_path;
+    std::string error_message;
+    if (!loadCalibrationForGlove(glove.id, configured_file, &resolved_path, &error_message)) {
+      RCLCPP_WARN(
+          get_logger(),
+          "Auto-load calibration skipped for glove %u (%s): %s",
+          glove.id,
+          sideToString(glove.side).c_str(),
+          error_message.c_str());
+      continue;
+    }
+
+    RCLCPP_INFO(
+        get_logger(),
+        "Auto-loaded calibration for glove %u (%s) from %s",
+        glove.id,
+        sideToString(glove.side).c_str(),
+        resolved_path.c_str());
+  }
+}
+
+bool ManusCalibrationNode::loadCalibrationForGlove(
+    uint32_t glove_id,
+    const std::string &file_path,
+    std::string *resolved_path,
+    std::string *error_message) const
+{
+  if (resolved_path == nullptr || error_message == nullptr) {
+    return false;
+  }
+
+  *resolved_path = resolveCalibrationPath(file_path);
+
+  std::ifstream input(*resolved_path, std::ios::binary);
+  if (!input) {
+    *error_message = "Calibration file does not exist: " + *resolved_path;
+    return false;
+  }
+
+  input.seekg(0, std::ios::end);
+  const std::streamsize file_size = input.tellg();
+  input.seekg(0, std::ios::beg);
+  if (file_size <= 0) {
+    *error_message = "Calibration file is empty: " + *resolved_path;
+    return false;
+  }
+
+  std::vector<unsigned char> bytes(static_cast<size_t>(file_size));
+  input.read(reinterpret_cast<char *>(bytes.data()), file_size);
+  if (!input) {
+    *error_message = "Failed to read calibration file: " + *resolved_path;
+    return false;
+  }
+
+  SetGloveCalibrationReturnCode set_result = SetGloveCalibrationReturnCode_Error;
+  const SDKReturnCode result = CoreSdk_SetGloveCalibration(
+      glove_id,
+      bytes.data(),
+      static_cast<uint32_t>(bytes.size()),
+      &set_result);
+  if (result != SDKReturnCode_Success || !isSuccessSetCalibration(set_result)) {
+    *error_message =
+        "Failed to load calibration into glove: sdk=" + sdkReturnCodeToString(result) +
+        ", set_result=" + std::to_string(static_cast<int32_t>(set_result));
+    return false;
+  }
+
+  return true;
+}
+
+std::string ManusCalibrationNode::configuredCalibrationFileForSide(Side side) const
+{
+  switch (side) {
+    case Side_Left:
+      return auto_load_left_calibration_file_;
+    case Side_Right:
+      return auto_load_right_calibration_file_;
+    default:
+      return "";
+  }
 }
 
 std::string ManusCalibrationNode::saveCalibration(
@@ -675,3 +885,11 @@ std::string ManusCalibrationNode::timestampString()
 }
 
 }  // namespace manus_system
+
+int main(int argc, char *argv[])
+{
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared<manus_system::ManusCalibrationNode>());
+  rclcpp::shutdown();
+  return 0;
+}
