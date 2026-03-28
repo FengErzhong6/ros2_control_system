@@ -7,3 +7,4 @@ __pycache__/
 *.pyo
 manus_system/bringup/calibrations/*
 manus_system/third_party/lib/libManusSDK.so
+htc_system/trajectory/*
