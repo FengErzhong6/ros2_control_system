@@ -63,10 +63,6 @@ private:
     MarvinKineData kine_data_;
     tracking_ik::Geometry tracking_ik_geometry_{};
     bool tracking_ik_geometry_loaded_{false};
-    std::array<std::array<double, kJointsPerArm>, kArmCount> last_joint_deg_{};
-    std::array<std::array<double, 3>, kArmCount> last_selected_ref_dir_{
-        {{{0.0, 0.0, -1.0}}, {{0.0, 0.0, -1.0}}}};
-    std::array<int64_t, kArmCount> last_selected_branch_{{-1, -1}};
 
     // TF2 for tracker pose lookup
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
@@ -132,28 +128,11 @@ private:
     std::array<tf2::Quaternion, kArmCount> elbow_dir_correction_{
         {tf2::Quaternion::getIdentity(), tf2::Quaternion::getIdentity()}};
 
-    // Smoothing parameters (low-pass + velocity clamping)
+    // Joint command conditioning parameters
     double smoothing_alpha_{0.3};
     double max_joint_velocity_{2.0};  // rad/s
-    std::array<std::array<double, kJointsPerArm>, kArmCount> smoothed_joints_rad_{};
-
-    // IK target: last successful solution (smoothing always converges to this)
-    std::array<std::array<double, kJointsPerArm>, kArmCount> target_joints_rad_{};
-    std::array<bool, kArmCount> has_valid_target_{{false, false}};
-    std::array<std::array<double, kJointsPerArm>, kArmCount> home_joints_rad_{};
     bool has_home_joints_{false};
     double home_tolerance_rad_{0.5 * kDeg2Rad};
-
-    // TF timestamp tracking: recompute IK when either hand or upper-arm input changes
-    std::array<rclcpp::Time, kArmCount> last_hand_tf_stamp_{
-        {rclcpp::Time(0, 0, RCL_ROS_TIME), rclcpp::Time(0, 0, RCL_ROS_TIME)}};
-    std::array<rclcpp::Time, kArmCount> last_arm_tf_stamp_{
-        {rclcpp::Time(0, 0, RCL_ROS_TIME), rclcpp::Time(0, 0, RCL_ROS_TIME)}};
-    std::array<bool, kArmCount> last_hand_tf_valid_{{false, false}};
-    std::array<bool, kArmCount> last_arm_tf_valid_{{false, false}};
-    std::array<bool, kArmCount> last_hand_tf_fresh_{{false, false}};
-    std::array<bool, kArmCount> last_arm_tf_fresh_{{false, false}};
-    std::array<bool, kArmCount> tracker_fresh_{{false, false}};
 
     // IK result tracking
     enum class IKResult : int8_t {
@@ -166,9 +145,6 @@ private:
         kSingularity = -4,
         kSolveFailed = -5,
     };
-    std::array<IKResult, kArmCount> last_ik_result_{
-        {IKResult::kNoTarget, IKResult::kNoTarget}};
-    std::array<bool, kArmCount> marker_visible_{{false, false}};
 
     enum class TeleopState : int8_t {
         kDisarmed = 0,
@@ -221,7 +197,28 @@ private:
         std::atomic<bool> pending{false};
         ArmDiagnostics snapshot;
     };
-    std::array<PendingDiagnosticsSlot, kArmCount> pending_diagnostics_;
+
+    struct ArmRuntimeState {
+        ArmRuntimeState() = default;
+        std::array<double, kJointsPerArm> last_joint_deg{};
+        std::array<double, 3> last_selected_ref_dir{{0.0, 0.0, -1.0}};
+        int64_t last_selected_branch{-1};
+        std::array<double, kJointsPerArm> smoothed_joints_rad{};
+        std::array<double, kJointsPerArm> target_joints_rad{};
+        bool has_valid_target{false};
+        std::array<double, kJointsPerArm> home_joints_rad{};
+        rclcpp::Time last_hand_tf_stamp{0, 0, RCL_ROS_TIME};
+        rclcpp::Time last_arm_tf_stamp{0, 0, RCL_ROS_TIME};
+        bool last_hand_tf_valid{false};
+        bool last_arm_tf_valid{false};
+        bool last_hand_tf_fresh{false};
+        bool last_arm_tf_fresh{false};
+        bool tracker_fresh{false};
+        IKResult last_ik_result{IKResult::kNoTarget};
+        bool marker_visible{false};
+        PendingDiagnosticsSlot pending_diagnostics;
+    };
+    std::array<ArmRuntimeState, kArmCount> arm_state_;
 
     struct TrackerInputState {
         rclcpp::Time hand_stamp{0, 0, RCL_ROS_TIME};

@@ -78,7 +78,7 @@ pluginlib_export_plugin_description_file(
 add_library(
   marvin_system_ik_controller
   SHARED
-  controller/src/ik_controller.cpp
+  controller/src/ik/ik_controller.cpp
 )
 target_compile_features(marvin_system_ik_controller PUBLIC cxx_std_17)
 target_include_directories(marvin_system_ik_controller PUBLIC
@@ -114,7 +114,11 @@ pluginlib_export_plugin_description_file(
 add_library(
   marvin_system_tracker_teleop_controller
   SHARED
-  controller/src/tracker_teleop_controller.cpp
+  controller/src/tracker_teleop/controller.cpp
+  controller/src/tracker_teleop/config.cpp
+  controller/src/tracker_teleop/tracking.cpp
+  controller/src/tracker_teleop/runtime.cpp
+  controller/src/tracker_teleop/diagnostics.cpp
 )
 target_compile_features(marvin_system_tracker_teleop_controller PUBLIC cxx_std_17)
 target_include_directories(marvin_system_tracker_teleop_controller PUBLIC
