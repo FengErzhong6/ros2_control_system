@@ -107,10 +107,12 @@ private:
     std::array<std::string, kArmCount> viz_base_frames_{{"Base_L", "Base_R"}};
     struct TrackingIkConfig {
         double fk_accept_tol{1e-3};
+        double fine_psi_range_deg{2.0};
+        double fine_psi_step_deg{0.1};
         double fast_psi_range_deg{12.0};
-        double fast_psi_step_deg{1.0};
+        double fast_psi_step_deg{0.5};
         double expand_psi_range_deg{36.0};
-        double expand_psi_step_deg{3.0};
+        double expand_psi_step_deg{2.0};
         double desired_dir_weight{0.03};
         double continuity_dir_weight{0.03};
         double magnitude_weight{0.05};

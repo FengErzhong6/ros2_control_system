@@ -97,6 +97,12 @@ bool TrackerTeleopController::loadControllerParameters()
     node->get_parameter("base_x_scale", base_x_scale_);
     node->get_parameter("tracking_ik.fk_accept_tol", tracking_ik_config_.fk_accept_tol);
     node->get_parameter(
+        "tracking_ik.fine_psi_range_deg",
+        tracking_ik_config_.fine_psi_range_deg);
+    node->get_parameter(
+        "tracking_ik.fine_psi_step_deg",
+        tracking_ik_config_.fine_psi_step_deg);
+    node->get_parameter(
         "tracking_ik.fast_psi_range_deg",
         tracking_ik_config_.fast_psi_range_deg);
     node->get_parameter(
@@ -147,6 +153,10 @@ bool TrackerTeleopController::loadControllerParameters()
 
     smoothing_alpha_ = std::clamp(smoothing_alpha_, 0.01, 1.0);
     tracking_ik_config_.fk_accept_tol = std::max(1e-9, tracking_ik_config_.fk_accept_tol);
+    tracking_ik_config_.fine_psi_range_deg = std::max(0.0, tracking_ik_config_.fine_psi_range_deg);
+    tracking_ik_config_.fine_psi_step_deg = std::max(0.1, tracking_ik_config_.fine_psi_step_deg);
+    tracking_ik_config_.fast_psi_range_deg =
+        std::max(tracking_ik_config_.fine_psi_range_deg, tracking_ik_config_.fast_psi_range_deg);
     tracking_ik_config_.fast_psi_range_deg = std::max(0.0, tracking_ik_config_.fast_psi_range_deg);
     tracking_ik_config_.fast_psi_step_deg = std::max(0.1, tracking_ik_config_.fast_psi_step_deg);
     tracking_ik_config_.expand_psi_range_deg =
@@ -284,9 +294,11 @@ void TrackerTeleopController::logConfigurationSummary(double home_tolerance_deg)
     RCLCPP_INFO(logger, "Base X scale: %.3f", base_x_scale_);
     RCLCPP_INFO(
         logger,
-        "Tracking IK: fk_tol=%.3e fast[range=%.1f step=%.1f] "
+        "Tracking IK: fk_tol=%.3e fine[range=%.1f step=%.1f] fast[range=%.1f step=%.1f] "
         "expand[range=%.1f step=%.1f] score[desired=%.3f continuity=%.3f mag=%.3f psi=%.3f branch=%.3f]",
         tracking_ik_config_.fk_accept_tol,
+        tracking_ik_config_.fine_psi_range_deg,
+        tracking_ik_config_.fine_psi_step_deg,
         tracking_ik_config_.fast_psi_range_deg,
         tracking_ik_config_.fast_psi_step_deg,
         tracking_ik_config_.expand_psi_range_deg,

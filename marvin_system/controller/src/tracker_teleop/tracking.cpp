@@ -107,6 +107,8 @@ TrackerTeleopController::IKResult TrackerTeleopController::solveIK(
     }
 
     request.fk_accept_tol = tracking_ik_config_.fk_accept_tol;
+    request.fine_psi_range_deg = tracking_ik_config_.fine_psi_range_deg;
+    request.fine_psi_step_deg = tracking_ik_config_.fine_psi_step_deg;
     request.fast_psi_range_deg = tracking_ik_config_.fast_psi_range_deg;
     request.fast_psi_step_deg = tracking_ik_config_.fast_psi_step_deg;
     request.expand_psi_range_deg = tracking_ik_config_.expand_psi_range_deg;

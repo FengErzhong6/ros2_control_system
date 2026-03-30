@@ -42,6 +42,8 @@ struct Request {
     Vect7 ref_joint_deg;
     FX_INT32L prev_selected_branch;
     FX_DOUBLE fk_accept_tol;
+    FX_DOUBLE fine_psi_range_deg;
+    FX_DOUBLE fine_psi_step_deg;
     FX_DOUBLE fast_psi_range_deg;
     FX_DOUBLE fast_psi_step_deg;
     FX_DOUBLE expand_psi_range_deg;

@@ -34,10 +34,12 @@ controller_interface::CallbackReturn TrackerTeleopController::on_init()
         auto_declare<double>("dh_d1", 0.0);
         auto_declare<std::vector<std::string>>("viz_base_frames", {"Base_L", "Base_R"});
         auto_declare<double>("tracking_ik.fk_accept_tol", 1e-3);
+        auto_declare<double>("tracking_ik.fine_psi_range_deg", 2.0);
+        auto_declare<double>("tracking_ik.fine_psi_step_deg", 0.1);
         auto_declare<double>("tracking_ik.fast_psi_range_deg", 12.0);
-        auto_declare<double>("tracking_ik.fast_psi_step_deg", 1.0);
+        auto_declare<double>("tracking_ik.fast_psi_step_deg", 0.5);
         auto_declare<double>("tracking_ik.expand_psi_range_deg", 36.0);
-        auto_declare<double>("tracking_ik.expand_psi_step_deg", 3.0);
+        auto_declare<double>("tracking_ik.expand_psi_step_deg", 2.0);
         auto_declare<double>("tracking_ik.score.desired_dir_weight", 0.03);
         auto_declare<double>("tracking_ik.score.continuity_dir_weight", 0.03);
         auto_declare<double>("tracking_ik.score.magnitude_weight", 0.05);
@@ -215,6 +217,8 @@ bool TrackerTeleopController::seedTrackingStateFromCurrentJoints(size_t arm)
     }
 
     request.fk_accept_tol = tracking_ik_config_.fk_accept_tol;
+    request.fine_psi_range_deg = tracking_ik_config_.fine_psi_range_deg;
+    request.fine_psi_step_deg = tracking_ik_config_.fine_psi_step_deg;
     request.fast_psi_range_deg = tracking_ik_config_.fast_psi_range_deg;
     request.fast_psi_step_deg = tracking_ik_config_.fast_psi_step_deg;
     request.expand_psi_range_deg = tracking_ik_config_.expand_psi_range_deg;
