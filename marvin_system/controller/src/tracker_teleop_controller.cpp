@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstring>
 #include <functional>
+#include <sstream>
 #include <utility>
 
 #include "rclcpp/logging.hpp"
@@ -35,6 +36,54 @@ LoanedInterfaceT *find_loaned_interface(
     return nullptr;
 }
 
+bool normalizeVector(std::array<double, 3> &vector)
+{
+    const double norm = std::sqrt(
+        vector[0] * vector[0] + vector[1] * vector[1] + vector[2] * vector[2]);
+    if (norm < 1e-12) {
+        return false;
+    }
+    vector[0] /= norm;
+    vector[1] /= norm;
+    vector[2] /= norm;
+    return true;
+}
+
+double clampUnit(double value)
+{
+    return std::clamp(value, -1.0, 1.0);
+}
+
+double angleBetweenVectorsDeg(
+    const std::array<double, 3> &lhs, const std::array<double, 3> &rhs)
+{
+    return std::acos(clampUnit(
+        lhs[0] * rhs[0] + lhs[1] * rhs[1] + lhs[2] * rhs[2])) * kRad2Deg;
+}
+
+bool extractSolvedUpperArmDir(
+    FX_INT32L arm,
+    const std::array<double, kJointsPerArm> &joints_rad,
+    std::array<double, 3> &upper_arm_dir)
+{
+    FX_DOUBLE joints_deg[kJointsPerArm];
+    Matrix4 fk_pose{};
+    Matrix3 nsp_pose{};
+
+    for (size_t j = 0; j < kJointsPerArm; ++j) {
+        joints_deg[j] = joints_rad[j] * kRad2Deg;
+    }
+
+    if (!FX_Robot_Kine_FK_NSP(arm, joints_deg, fk_pose, nsp_pose)) {
+        return false;
+    }
+
+    // Keep the diagnostics in the same definition as the tracker input:
+    // the upper-arm vector rooted at shoulder is the Y axis of the solved NSP frame.
+    upper_arm_dir = {{nsp_pose[0][1], nsp_pose[1][1], nsp_pose[2][1]}};
+    return normalizeVector(upper_arm_dir);
+}
+
 }  // namespace
 
 TrackerTeleopController::TrackerTeleopController()
@@ -59,16 +108,23 @@ controller_interface::CallbackReturn TrackerTeleopController::on_init()
         auto_declare<std::string>("base_frame", "base_link");
         auto_declare<std::vector<double>>("default_elbow_direction",
                                           {0.0, 0.0, -1.0});
-        auto_declare<double>("zsp_angle", 0.0);
         auto_declare<double>("j4_bound", 0.0);
         auto_declare<double>("dh_d1", 0.0);
         auto_declare<std::vector<std::string>>("viz_base_frames", {"Base_L", "Base_R"});
+        auto_declare<double>("tracking_ik.fk_accept_tol", 1e-3);
+        auto_declare<double>("tracking_ik.fast_psi_range_deg", 12.0);
+        auto_declare<double>("tracking_ik.fast_psi_step_deg", 1.0);
+        auto_declare<double>("tracking_ik.expand_psi_range_deg", 36.0);
+        auto_declare<double>("tracking_ik.expand_psi_step_deg", 3.0);
+        auto_declare<double>("tracking_ik.score.desired_dir_weight", 0.03);
+        auto_declare<double>("tracking_ik.score.continuity_dir_weight", 0.03);
+        auto_declare<double>("tracking_ik.score.magnitude_weight", 0.05);
+        auto_declare<double>("tracking_ik.score.psi_delta_weight", 0.02);
+        auto_declare<double>("tracking_ik.score.branch_switch_penalty", 20.0);
 
         auto_declare<double>("smoothing_alpha", 0.3);
         auto_declare<double>("max_joint_velocity", 2.0);
         auto_declare<double>("base_x_scale", 1.0);
-        auto_declare<bool>("ik_fallback_near_ref", true);
-        auto_declare<bool>("ik_clamp_joint_limits", true);
         auto_declare<double>("tracker_timeout_sec", 0.1);
         auto_declare<std::vector<double>>("home_joint_positions.left", {});
         auto_declare<std::vector<double>>("home_joint_positions.right", {});
@@ -131,15 +187,21 @@ void TrackerTeleopController::pollTfCallback()
     const std::string *frame_hand[] = {&frame_left_hand_, &frame_right_hand_};
     const std::string *frame_arm[] = {&frame_left_upper_arm_, &frame_right_upper_arm_};
 
-    std::array<CachedTrackerData, kArmCount> fresh;
-    for (int arm = 0; arm < static_cast<int>(kArmCount); ++arm) {
-        fresh[arm].hand_valid = lookupTf(
-            frame_torso_, *frame_hand[arm], fresh[arm].chest_T_hand);
-        fresh[arm].arm_valid = lookupTf(
-            frame_torso_, *frame_arm[arm], fresh[arm].chest_T_arm);
-    }
-
     std::lock_guard<std::mutex> lk(tf_cache_mutex_);
+    std::array<CachedTrackerData, kArmCount> fresh = tf_cache_;
+    for (int arm = 0; arm < static_cast<int>(kArmCount); ++arm) {
+        geometry_msgs::msg::TransformStamped chest_T_hand;
+        if (lookupTf(frame_torso_, *frame_hand[arm], chest_T_hand)) {
+            fresh[arm].chest_T_hand = std::move(chest_T_hand);
+            fresh[arm].hand_valid = true;
+        }
+
+        geometry_msgs::msg::TransformStamped chest_T_arm;
+        if (lookupTf(frame_torso_, *frame_arm[arm], chest_T_arm)) {
+            fresh[arm].chest_T_arm = std::move(chest_T_arm);
+            fresh[arm].arm_valid = true;
+        }
+    }
     tf_cache_ = fresh;
 }
 
@@ -159,6 +221,19 @@ TrackerTeleopController::IKResult TrackerTeleopController::solveIK(
         diag->has_solution = false;
         diag->solution_j4_deg = 0.0;
         diag->q_joints_rad.fill(0.0);
+        diag->solver_reachable = false;
+        diag->used_expanded_search = false;
+        diag->candidate_count = 0;
+        diag->psi_eval_count = 0;
+        diag->selected_branch = -1;
+        diag->selected_psi_deg = 0.0;
+        diag->best_fk_residual_l1 = 0.0;
+        diag->best_ref_score_l1 = 0.0;
+        diag->best_desired_dir_score_deg = 0.0;
+        diag->best_continuity_dir_score_deg = 0.0;
+        diag->solved_upper_arm_dir_valid = false;
+        diag->solved_upper_arm_dir = {{0.0, 0.0, 0.0}};
+        diag->solved_upper_arm_dir_angle_deg = 0.0;
     }
 
     if (!isQuaternionValid(base_T_ee.pose.orientation)) {
@@ -168,98 +243,89 @@ TrackerTeleopController::IKResult TrackerTeleopController::solveIK(
         return IKResult::kInvalidQuaternion;
     }
 
-    auto &ik = ik_params_[arm];
-    FX_INT32L serial = static_cast<FX_INT32L>(arm);
+    tracking_ik::Request request;
+    tracking_ik::Result result{};
+    tracking_ik::SetDefaultRequest(&request);
 
-    auto setup_common = [&]() {
-        std::memset(&ik, 0, sizeof(FX_InvKineSolvePara));
-        poseToMatrix4(base_T_ee, ik.m_Input_IK_TargetTCP);
-        for (size_t j = 0; j < kJointsPerArm; ++j) {
-            ik.m_Input_IK_RefJoint[j] = last_joint_deg_[arm][j];
-        }
-    };
-
-    auto evaluate_ik = [&]() -> IKResult {
-        if (!FX_Robot_Kine_IK(serial, &ik)) {
-            return IKResult::kOutOfRange;
-        }
-        if (ik.m_Output_IsJntExd) {
-            return IKResult::kJointLimitExceeded;
-        }
-        for (size_t j = 0; j < kJointsPerArm; ++j) {
-            if (ik.m_Output_IsDeg[j]) {
-                return IKResult::kSingularity;
-            }
-        }
-        for (size_t j = 0; j < kJointsPerArm; ++j) {
-            out_q_joints_rad[j] = ik.m_Output_RetJoint[j] * kDeg2Rad;
-        }
-        return IKResult::kSuccess;
-    };
-
-    // --- Attempt 1: NEAR_DIR ---
-    setup_common();
-    ik.m_Input_IK_ZSPType = FX_PILOT_NSP_TYPES_NEAR_DIR;
-    ik.m_Input_IK_ZSPPara[0] = shoulder_v_elbow[0];
-    ik.m_Input_IK_ZSPPara[1] = shoulder_v_elbow[1];
-    ik.m_Input_IK_ZSPPara[2] = shoulder_v_elbow[2];
-    ik.m_Input_ZSP_Angle = zsp_angle_;
-
-    IKResult dir_result = evaluate_ik();
-    if (diag) {
-        diag->dir_result = dir_result;
-    }
-
-    // --- Attempt 2: NEAR_REF (optional fallback) ---
-    IKResult ref_result = IKResult::kNoTarget;
-    if (dir_result != IKResult::kSuccess && ik_fallback_near_ref_) {
-        setup_common();
-        ik.m_Input_IK_ZSPType = FX_PILOT_NSP_TYPES_NEAR_REF;
-        ref_result = evaluate_ik();
-        if (diag) {
-            diag->used_near_ref = true;
-            diag->ref_result = ref_result;
-        }
-    }
-
-    // --- Attempt 3: Clamp (optional) ---
-    bool clamped = false;
-    if (dir_result != IKResult::kSuccess && ref_result != IKResult::kSuccess) {
-        IKResult clamp_src = ik_fallback_near_ref_ ? ref_result : dir_result;
-        if (ik_clamp_joint_limits_ &&
-            clamp_src == IKResult::kJointLimitExceeded) {
-            for (size_t j = 0; j < kJointsPerArm; ++j) {
-                out_q_joints_rad[j] = std::clamp(ik.m_Output_RetJoint[j],
-                                                  ik.m_Output_RunLmtN[j],
-                                                  ik.m_Output_RunLmtP[j]) * kDeg2Rad;
-            }
-            clamped = true;
-        }
-    }
-
-    // --- Determine final result ---
-    IKResult final_result;
-    if (dir_result == IKResult::kSuccess) {
-        final_result = IKResult::kSuccess;
-    } else if (ref_result == IKResult::kSuccess) {
-        final_result = IKResult::kSuccess;
-    } else if (clamped) {
-        final_result = IKResult::kJointLimitClamped;
+    poseToMatrix4(base_T_ee, request.target_tcp);
+    request.desired_upper_arm_dir[0] = shoulder_v_elbow[0];
+    request.desired_upper_arm_dir[1] = shoulder_v_elbow[1];
+    request.desired_upper_arm_dir[2] = shoulder_v_elbow[2];
+    if (last_selected_branch_[arm] < 0) {
+        request.prev_selected_ref_dir[0] = shoulder_v_elbow[0];
+        request.prev_selected_ref_dir[1] = shoulder_v_elbow[1];
+        request.prev_selected_ref_dir[2] = shoulder_v_elbow[2];
     } else {
-        final_result = dir_result;
+        request.prev_selected_ref_dir[0] = last_selected_ref_dir_[arm][0];
+        request.prev_selected_ref_dir[1] = last_selected_ref_dir_[arm][1];
+        request.prev_selected_ref_dir[2] = last_selected_ref_dir_[arm][2];
     }
+    request.prev_selected_branch = static_cast<FX_INT32L>(last_selected_branch_[arm]);
+    for (size_t j = 0; j < kJointsPerArm; ++j) {
+        request.ref_joint_deg[j] = last_joint_deg_[arm][j];
+    }
+
+    request.fk_accept_tol = tracking_ik_config_.fk_accept_tol;
+    request.fast_psi_range_deg = tracking_ik_config_.fast_psi_range_deg;
+    request.fast_psi_step_deg = tracking_ik_config_.fast_psi_step_deg;
+    request.expand_psi_range_deg = tracking_ik_config_.expand_psi_range_deg;
+    request.expand_psi_step_deg = tracking_ik_config_.expand_psi_step_deg;
+    request.score_params.desired_dir_weight =
+        tracking_ik_config_.desired_dir_weight;
+    request.score_params.continuity_dir_weight =
+        tracking_ik_config_.continuity_dir_weight;
+    request.score_params.magnitude_weight =
+        tracking_ik_config_.magnitude_weight;
+    request.score_params.psi_delta_weight =
+        tracking_ik_config_.psi_delta_weight;
+    request.score_params.branch_switch_penalty =
+        tracking_ik_config_.branch_switch_penalty;
+
+    tracking_ik::Solve(&tracking_ik_geometry_, &request, &result);
+
+    IKResult final_result = IKResult::kSolveFailed;
+    if (result.success) {
+        for (size_t j = 0; j < kJointsPerArm; ++j) {
+            out_q_joints_rad[j] = result.best_joints_deg[j] * kDeg2Rad;
+        }
+        last_selected_ref_dir_[arm] = {
+            {result.selected_ref_dir[0], result.selected_ref_dir[1], result.selected_ref_dir[2]}};
+        last_selected_branch_[arm] = result.selected_branch;
+        final_result = IKResult::kSuccess;
+    } else if (!result.reachable) {
+        final_result = IKResult::kOutOfRange;
+    }
+
     if (diag) {
-        diag->clamped = clamped;
+        diag->dir_result = final_result;
         diag->final_result = final_result;
-        diag->has_solution = (final_result == IKResult::kSuccess ||
-                              final_result == IKResult::kJointLimitClamped);
+        diag->has_solution = (final_result == IKResult::kSuccess);
+        diag->solver_reachable = result.reachable;
+        diag->used_expanded_search = result.used_expanded_search;
+        diag->candidate_count = result.candidate_count;
+        diag->psi_eval_count = result.psi_eval_count;
+        diag->selected_branch = result.selected_branch;
+        diag->selected_psi_deg = result.selected_psi_deg;
+        diag->best_fk_residual_l1 = result.best_fk_residual_l1;
+        diag->best_ref_score_l1 = result.best_ref_score_l1;
+        diag->best_desired_dir_score_deg = result.best_desired_dir_score;
+        diag->best_continuity_dir_score_deg = result.best_continuity_dir_score;
         if (diag->has_solution) {
+            std::array<double, 3> input_upper_arm_dir{
+                {shoulder_v_elbow[0], shoulder_v_elbow[1], shoulder_v_elbow[2]}};
             diag->solution_j4_deg = out_q_joints_rad[3] * kRad2Deg;
             for (size_t j = 0; j < kJointsPerArm; ++j) {
                 diag->q_joints_rad[j] = out_q_joints_rad[j];
             }
-        } else if (dir_result == IKResult::kSuccess || ref_result == IKResult::kSuccess) {
-            diag->solution_j4_deg = ik.m_Output_RetJoint[3];
+            if (normalizeVector(input_upper_arm_dir) &&
+                extractSolvedUpperArmDir(
+                    static_cast<FX_INT32L>(arm),
+                    diag->q_joints_rad,
+                    diag->solved_upper_arm_dir)) {
+                diag->solved_upper_arm_dir_valid = true;
+                diag->solved_upper_arm_dir_angle_deg = angleBetweenVectorsDeg(
+                    input_upper_arm_dir, diag->solved_upper_arm_dir);
+            }
         }
     }
 
@@ -276,6 +342,7 @@ const char *TrackerTeleopController::ikResultToString(IKResult result)
         case IKResult::kOutOfRange:          return "Target out of reachable workspace";
         case IKResult::kJointLimitExceeded:  return "IK solution exceeds joint limits";
         case IKResult::kSingularity:         return "IK solution near singularity";
+        case IKResult::kSolveFailed:         return "Tracking IK solver failed";
         default:                             return "Unknown IK error";
     }
 }
@@ -298,13 +365,13 @@ void TrackerTeleopController::queueDiagnostics(size_t arm, const ArmDiagnostics 
     if (arm >= kArmCount) {
         return;
     }
-    // Latest-snapshot semantics: keep the newest diagnostics for each arm and
-    // let the non-RT timer publish/log that coherent snapshot.
-    if (diagnostics_mutex_.try_lock()) {
-        pending_diagnostics_[arm] = diag;
-        pending_diagnostics_[arm].pending = true;
-        diagnostics_mutex_.unlock();
-    }
+
+    auto &slot = pending_diagnostics_[arm];
+    slot.sequence.fetch_add(1, std::memory_order_acq_rel);
+    slot.snapshot = diag;
+    slot.snapshot.pending = false;
+    slot.pending.store(true, std::memory_order_release);
+    slot.sequence.fetch_add(1, std::memory_order_release);
 }
 
 bool TrackerTeleopController::updateTfSnapshot()
@@ -329,22 +396,32 @@ TrackerTeleopController::evaluateTrackerInputState(
         rclcpp::Time(snap.chest_T_arm.header.stamp) :
         rclcpp::Time(0, 0, RCL_ROS_TIME);
 
+    state.hand_fresh =
+        snap.hand_valid &&
+        state.hand_stamp.nanoseconds() > 0 &&
+        (tracker_timeout_.nanoseconds() == 0 ||
+         (now >= state.hand_stamp && (now - state.hand_stamp) <= tracker_timeout_));
+    state.arm_fresh =
+        snap.arm_valid &&
+        state.arm_stamp.nanoseconds() > 0 &&
+        (tracker_timeout_.nanoseconds() == 0 ||
+         (now >= state.arm_stamp && (now - state.arm_stamp) <= tracker_timeout_));
+
     state.hand_changed = (state.hand_stamp != last_hand_tf_stamp_[arm]) ||
-                         (snap.hand_valid != last_hand_tf_valid_[arm]);
+                         (snap.hand_valid != last_hand_tf_valid_[arm]) ||
+                         (state.hand_fresh != last_hand_tf_fresh_[arm]);
     state.arm_changed = (state.arm_stamp != last_arm_tf_stamp_[arm]) ||
-                        (snap.arm_valid != last_arm_tf_valid_[arm]);
+                        (snap.arm_valid != last_arm_tf_valid_[arm]) ||
+                        (state.arm_fresh != last_arm_tf_fresh_[arm]);
     state.tracker_input_changed = state.hand_changed || state.arm_changed;
 
     last_hand_tf_stamp_[arm] = state.hand_stamp;
     last_arm_tf_stamp_[arm] = state.arm_stamp;
     last_hand_tf_valid_[arm] = snap.hand_valid;
     last_arm_tf_valid_[arm] = snap.arm_valid;
+    last_hand_tf_fresh_[arm] = state.hand_fresh;
+    last_arm_tf_fresh_[arm] = state.arm_fresh;
 
-    state.hand_fresh =
-        snap.hand_valid &&
-        state.hand_stamp.nanoseconds() > 0 &&
-        (tracker_timeout_.nanoseconds() == 0 ||
-         (now >= state.hand_stamp && (now - state.hand_stamp) <= tracker_timeout_));
     return state;
 }
 
@@ -592,8 +669,11 @@ void TrackerTeleopController::processArmUpdate(
         return;
     }
 
+    CachedTrackerData effective_snap = snap;
+    effective_snap.arm_valid = input_state.arm_fresh;
+
     if (force_reacquire || input_state.tracker_input_changed) {
-        handleFreshTrackerUpdate(arm, snap);
+        handleFreshTrackerUpdate(arm, effective_snap);
     }
 
     applySmoothedCommand(arm, dt);
@@ -724,25 +804,31 @@ std::string TrackerTeleopController::buildIkLogChain(const ArmDiagnostics &diag)
         return (j4_deg < j4_bound_) ? "A" : "B";
     };
 
-    std::string chain = "NEAR_DIR ";
-    if (diag.dir_result == IKResult::kSuccess) {
-        chain += std::string("OK(") + classify_j4(diag.solution_j4_deg) + ")";
-        return chain;
+    std::ostringstream chain;
+    chain << "TRACKING_IK ";
+    if (diag.final_result == IKResult::kSuccess) {
+        chain << "OK(" << classify_j4(diag.solution_j4_deg) << ")";
+    } else {
+        chain << "FAIL(" << ikResultToString(diag.final_result) << ")";
     }
-
-    chain += std::string("FAIL(") + ikResultToString(diag.dir_result) + ")";
-    if (diag.used_near_ref) {
-        chain += " -> NEAR_REF ";
-        if (diag.ref_result == IKResult::kSuccess) {
-            chain += std::string("OK(") + classify_j4(diag.solution_j4_deg) + ")";
+    chain << " reachable=" << (diag.solver_reachable ? "Y" : "N");
+    chain << " expand=" << (diag.used_expanded_search ? "Y" : "N");
+    chain << " cands=" << diag.candidate_count;
+    chain << " psi_eval=" << diag.psi_eval_count;
+    chain << " branch=" << diag.selected_branch;
+    chain << " psi=" << diag.selected_psi_deg;
+    if (diag.has_solution) {
+        chain << " fk_l1=" << diag.best_fk_residual_l1;
+        chain << " ref_l1=" << diag.best_ref_score_l1;
+        chain << " desired_dir=" << diag.best_desired_dir_score_deg << "deg";
+        chain << " continuity_dir=" << diag.best_continuity_dir_score_deg << "deg";
+        if (diag.solved_upper_arm_dir_valid) {
+            chain << " nsp_dir=" << diag.solved_upper_arm_dir_angle_deg << "deg";
         } else {
-            chain += std::string("FAIL(") + ikResultToString(diag.ref_result) + ")";
+            chain << " nsp_dir=NA";
         }
     }
-    if (diag.clamped) {
-        chain += " -> CLAMPED";
-    }
-    return chain;
+    return chain.str();
 }
 
 void TrackerTeleopController::logArmDiagnostics(size_t arm, const ArmDiagnostics &diag)
@@ -751,6 +837,26 @@ void TrackerTeleopController::logArmDiagnostics(size_t arm, const ArmDiagnostics
     const std::string chain = buildIkLogChain(diag);
 
     if (diag.has_solution) {
+        if (diag.solved_upper_arm_dir_valid) {
+            RCLCPP_INFO(
+                logger,
+                "Arm %zu IK | shoulder_T_ee=[%.4f, %.4f, %.4f] quat=[%.4f, %.4f, %.4f, %.4f] "
+                "| elbow=[%.3f, %.3f, %.3f] | solved_elbow=[%.3f, %.3f, %.3f] | %s "
+                "| q=[%.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f] deg",
+                arm,
+                diag.base_T_ee.pose.position.x, diag.base_T_ee.pose.position.y,
+                diag.base_T_ee.pose.position.z - dh_d1_,
+                diag.base_T_ee.pose.orientation.x, diag.base_T_ee.pose.orientation.y,
+                diag.base_T_ee.pose.orientation.z, diag.base_T_ee.pose.orientation.w,
+                diag.shoulder_v_elbow[0], diag.shoulder_v_elbow[1], diag.shoulder_v_elbow[2],
+                diag.solved_upper_arm_dir[0], diag.solved_upper_arm_dir[1], diag.solved_upper_arm_dir[2],
+                chain.c_str(),
+                diag.q_joints_rad[0] * kRad2Deg, diag.q_joints_rad[1] * kRad2Deg,
+                diag.q_joints_rad[2] * kRad2Deg, diag.q_joints_rad[3] * kRad2Deg,
+                diag.q_joints_rad[4] * kRad2Deg, diag.q_joints_rad[5] * kRad2Deg,
+                diag.q_joints_rad[6] * kRad2Deg);
+            return;
+        }
         RCLCPP_INFO(
             logger,
             "Arm %zu IK | shoulder_T_ee=[%.4f, %.4f, %.4f] quat=[%.4f, %.4f, %.4f, %.4f] "
@@ -817,26 +923,64 @@ void TrackerTeleopController::publishVizMarkers(size_t arm, const ArmDiagnostics
     ee_arrow.color.a = 1.0f;
     viz_markers.markers.push_back(ee_arrow);
 
+    auto append_delete_marker = [&](const char *ns) {
+        visualization_msgs::msg::Marker marker;
+        marker.header = ee_arrow.header;
+        marker.ns = ns;
+        marker.id = static_cast<int>(arm);
+        marker.action = visualization_msgs::msg::Marker::DELETE;
+        viz_markers.markers.push_back(marker);
+    };
+
     constexpr double kElbowVizScale = 0.3;
-    visualization_msgs::msg::Marker elbow_arrow;
-    elbow_arrow.header = ee_arrow.header;
-    elbow_arrow.ns = "elbow_direction";
-    elbow_arrow.id = static_cast<int>(arm);
-    elbow_arrow.type = visualization_msgs::msg::Marker::ARROW;
-    elbow_arrow.action = visualization_msgs::msg::Marker::ADD;
-    geometry_msgs::msg::Point e0, e1;
-    e0.x = ox; e0.y = oy; e0.z = oz;
-    e1.x = ox + diag.shoulder_v_elbow[0] * kElbowVizScale;
-    e1.y = oy + diag.shoulder_v_elbow[1] * kElbowVizScale;
-    e1.z = oz + diag.shoulder_v_elbow[2] * kElbowVizScale;
-    elbow_arrow.points.push_back(e0);
-    elbow_arrow.points.push_back(e1);
-    elbow_arrow.scale = ee_arrow.scale;
-    elbow_arrow.color.r = (arm == 0) ? 1.0f : 0.0f;
-    elbow_arrow.color.g = (arm == 0) ? 0.8f : 0.8f;
-    elbow_arrow.color.b = (arm == 0) ? 0.0f : 1.0f;
-    elbow_arrow.color.a = 1.0f;
-    viz_markers.markers.push_back(elbow_arrow);
+    if (diag.arm_valid) {
+        visualization_msgs::msg::Marker elbow_arrow;
+        elbow_arrow.header = ee_arrow.header;
+        elbow_arrow.ns = "elbow_direction";
+        elbow_arrow.id = static_cast<int>(arm);
+        elbow_arrow.type = visualization_msgs::msg::Marker::ARROW;
+        elbow_arrow.action = visualization_msgs::msg::Marker::ADD;
+        geometry_msgs::msg::Point e0, e1;
+        e0.x = ox; e0.y = oy; e0.z = oz;
+        e1.x = ox + diag.shoulder_v_elbow[0] * kElbowVizScale;
+        e1.y = oy + diag.shoulder_v_elbow[1] * kElbowVizScale;
+        e1.z = oz + diag.shoulder_v_elbow[2] * kElbowVizScale;
+        elbow_arrow.points.push_back(e0);
+        elbow_arrow.points.push_back(e1);
+        elbow_arrow.scale = ee_arrow.scale;
+        elbow_arrow.color.r = (arm == 0) ? 1.0f : 0.0f;
+        elbow_arrow.color.g = (arm == 0) ? 0.8f : 0.8f;
+        elbow_arrow.color.b = (arm == 0) ? 0.0f : 1.0f;
+        elbow_arrow.color.a = 1.0f;
+        viz_markers.markers.push_back(elbow_arrow);
+
+        if (diag.solved_upper_arm_dir_valid) {
+            visualization_msgs::msg::Marker solved_elbow_arrow;
+            solved_elbow_arrow.header = ee_arrow.header;
+            solved_elbow_arrow.ns = "solved_elbow_direction";
+            solved_elbow_arrow.id = static_cast<int>(arm);
+            solved_elbow_arrow.type = visualization_msgs::msg::Marker::ARROW;
+            solved_elbow_arrow.action = visualization_msgs::msg::Marker::ADD;
+            geometry_msgs::msg::Point s0, s1;
+            s0.x = ox; s0.y = oy; s0.z = oz;
+            s1.x = ox + diag.solved_upper_arm_dir[0] * kElbowVizScale;
+            s1.y = oy + diag.solved_upper_arm_dir[1] * kElbowVizScale;
+            s1.z = oz + diag.solved_upper_arm_dir[2] * kElbowVizScale;
+            solved_elbow_arrow.points.push_back(s0);
+            solved_elbow_arrow.points.push_back(s1);
+            solved_elbow_arrow.scale = ee_arrow.scale;
+            solved_elbow_arrow.color.r = 0.1f;
+            solved_elbow_arrow.color.g = 1.0f;
+            solved_elbow_arrow.color.b = 0.2f;
+            solved_elbow_arrow.color.a = 1.0f;
+            viz_markers.markers.push_back(solved_elbow_arrow);
+        } else {
+            append_delete_marker("solved_elbow_direction");
+        }
+    } else {
+        append_delete_marker("elbow_direction");
+        append_delete_marker("solved_elbow_direction");
+    }
 
     pub_viz_markers_->publish(viz_markers);
     marker_visible_[arm] = true;
@@ -849,7 +993,7 @@ void TrackerTeleopController::clearVizMarkers(size_t arm)
     }
 
     visualization_msgs::msg::MarkerArray clear_markers;
-    for (const char *ns : {"ee_position", "elbow_direction"}) {
+    for (const char *ns : {"ee_position", "elbow_direction", "solved_elbow_direction"}) {
         visualization_msgs::msg::Marker marker;
         marker.header.frame_id = viz_base_frames_[arm];
         marker.header.stamp = get_node()->get_clock()->now();
@@ -868,15 +1012,25 @@ void TrackerTeleopController::diagnosticsTimerCallback()
     std::array<ArmDiagnostics, kArmCount> diagnostics;
     std::array<bool, kArmCount> has_pending{{false, false}};
 
-    {
-        std::lock_guard<std::mutex> lk(diagnostics_mutex_);
-        for (size_t arm = 0; arm < kArmCount; ++arm) {
-            if (!pending_diagnostics_[arm].pending) {
+    for (size_t arm = 0; arm < kArmCount; ++arm) {
+        auto &slot = pending_diagnostics_[arm];
+        if (!slot.pending.exchange(false, std::memory_order_acq_rel)) {
+            continue;
+        }
+
+        while (true) {
+            const uint64_t seq_begin = slot.sequence.load(std::memory_order_acquire);
+            if ((seq_begin & 1U) != 0U) {
                 continue;
             }
-            diagnostics[arm] = pending_diagnostics_[arm];
-            pending_diagnostics_[arm].pending = false;
-            has_pending[arm] = true;
+
+            diagnostics[arm] = slot.snapshot;
+
+            const uint64_t seq_end = slot.sequence.load(std::memory_order_acquire);
+            if (seq_begin == seq_end) {
+                has_pending[arm] = true;
+                break;
+            }
         }
     }
 
@@ -992,6 +1146,14 @@ bool TrackerTeleopController::initializeKinematics()
         RCLCPP_ERROR(logger, "Kinematics initialization failed.");
         return false;
     }
+    if (!tracking_ik::LoadGeometryFromMvKDCfg(
+            kine_config_path_.c_str(), &tracking_ik_geometry_)) {
+        RCLCPP_ERROR(
+            logger, "tracking_ik::LoadGeometryFromMvKDCfg failed for '%s'",
+            kine_config_path_.c_str());
+        return false;
+    }
+    tracking_ik_geometry_loaded_ = true;
 
     kine_initialized_ = true;
     return true;
@@ -1004,14 +1166,39 @@ bool TrackerTeleopController::loadControllerParameters()
     node->get_parameter("position_scale", position_scale_);
     node->get_parameter("enable_orientation", enable_orientation_);
     node->get_parameter("base_frame", base_frame_);
-    node->get_parameter("zsp_angle", zsp_angle_);
     node->get_parameter("j4_bound", j4_bound_);
     node->get_parameter("dh_d1", dh_d1_);
     node->get_parameter("smoothing_alpha", smoothing_alpha_);
     node->get_parameter("max_joint_velocity", max_joint_velocity_);
     node->get_parameter("base_x_scale", base_x_scale_);
-    node->get_parameter("ik_fallback_near_ref", ik_fallback_near_ref_);
-    node->get_parameter("ik_clamp_joint_limits", ik_clamp_joint_limits_);
+    node->get_parameter("tracking_ik.fk_accept_tol", tracking_ik_config_.fk_accept_tol);
+    node->get_parameter(
+        "tracking_ik.fast_psi_range_deg",
+        tracking_ik_config_.fast_psi_range_deg);
+    node->get_parameter(
+        "tracking_ik.fast_psi_step_deg",
+        tracking_ik_config_.fast_psi_step_deg);
+    node->get_parameter(
+        "tracking_ik.expand_psi_range_deg",
+        tracking_ik_config_.expand_psi_range_deg);
+    node->get_parameter(
+        "tracking_ik.expand_psi_step_deg",
+        tracking_ik_config_.expand_psi_step_deg);
+    node->get_parameter(
+        "tracking_ik.score.desired_dir_weight",
+        tracking_ik_config_.desired_dir_weight);
+    node->get_parameter(
+        "tracking_ik.score.continuity_dir_weight",
+        tracking_ik_config_.continuity_dir_weight);
+    node->get_parameter(
+        "tracking_ik.score.magnitude_weight",
+        tracking_ik_config_.magnitude_weight);
+    node->get_parameter(
+        "tracking_ik.score.psi_delta_weight",
+        tracking_ik_config_.psi_delta_weight);
+    node->get_parameter(
+        "tracking_ik.score.branch_switch_penalty",
+        tracking_ik_config_.branch_switch_penalty);
 
     std::vector<std::string> viz_frames;
     if (node->get_parameter("viz_base_frames", viz_frames) && viz_frames.size() >= 2) {
@@ -1035,6 +1222,17 @@ bool TrackerTeleopController::loadControllerParameters()
     }
 
     smoothing_alpha_ = std::clamp(smoothing_alpha_, 0.01, 1.0);
+    tracking_ik_config_.fk_accept_tol = std::max(1e-9, tracking_ik_config_.fk_accept_tol);
+    tracking_ik_config_.fast_psi_range_deg = std::max(0.0, tracking_ik_config_.fast_psi_range_deg);
+    tracking_ik_config_.fast_psi_step_deg = std::max(0.1, tracking_ik_config_.fast_psi_step_deg);
+    tracking_ik_config_.expand_psi_range_deg =
+        std::max(tracking_ik_config_.fast_psi_range_deg, tracking_ik_config_.expand_psi_range_deg);
+    tracking_ik_config_.expand_psi_step_deg = std::max(0.1, tracking_ik_config_.expand_psi_step_deg);
+    tracking_ik_config_.desired_dir_weight = std::max(0.0, tracking_ik_config_.desired_dir_weight);
+    tracking_ik_config_.continuity_dir_weight = std::max(0.0, tracking_ik_config_.continuity_dir_weight);
+    tracking_ik_config_.magnitude_weight = std::max(0.0, tracking_ik_config_.magnitude_weight);
+    tracking_ik_config_.psi_delta_weight = std::max(0.0, tracking_ik_config_.psi_delta_weight);
+    tracking_ik_config_.branch_switch_penalty = std::max(0.0, tracking_ik_config_.branch_switch_penalty);
 
     loadTransformParameters();
     loadElbowCorrectionParameters();
@@ -1155,15 +1353,25 @@ void TrackerTeleopController::logConfigurationSummary(double home_tolerance_deg)
     RCLCPP_INFO(
         logger, "Default shoulder_v_elbow: [%.2f, %.2f, %.2f]",
         shoulder_v_elbow_default_[0], shoulder_v_elbow_default_[1], shoulder_v_elbow_default_[2]);
-    RCLCPP_INFO(logger, "ZSP angle: %.2f deg, J4 bound: %.2f deg", zsp_angle_, j4_bound_);
+    RCLCPP_INFO(logger, "J4 bound: %.2f deg", j4_bound_);
     RCLCPP_INFO(
         logger, "Smoothing: alpha=%.3f, max_vel=%.2f rad/s",
         smoothing_alpha_, max_joint_velocity_);
     RCLCPP_INFO(logger, "Base X scale: %.3f", base_x_scale_);
     RCLCPP_INFO(
-        logger, "IK fallback NEAR_REF: %s, clamp joint limits: %s",
-        ik_fallback_near_ref_ ? "ON" : "OFF",
-        ik_clamp_joint_limits_ ? "ON" : "OFF");
+        logger,
+        "Tracking IK: fk_tol=%.3e fast[range=%.1f step=%.1f] "
+        "expand[range=%.1f step=%.1f] score[desired=%.3f continuity=%.3f mag=%.3f psi=%.3f branch=%.3f]",
+        tracking_ik_config_.fk_accept_tol,
+        tracking_ik_config_.fast_psi_range_deg,
+        tracking_ik_config_.fast_psi_step_deg,
+        tracking_ik_config_.expand_psi_range_deg,
+        tracking_ik_config_.expand_psi_step_deg,
+        tracking_ik_config_.desired_dir_weight,
+        tracking_ik_config_.continuity_dir_weight,
+        tracking_ik_config_.magnitude_weight,
+        tracking_ik_config_.psi_delta_weight,
+        tracking_ik_config_.branch_switch_penalty);
     RCLCPP_INFO(logger, "Tracker timeout: %.3f s", tracker_timeout_.seconds());
     if (has_home_joints_) {
         RCLCPP_INFO(logger, "Home tolerance: %.2f deg", home_tolerance_deg);
@@ -1183,6 +1391,8 @@ void TrackerTeleopController::resetTrackerState()
     last_arm_tf_stamp_.fill(rclcpp::Time(0, 0, RCL_ROS_TIME));
     last_hand_tf_valid_.fill(false);
     last_arm_tf_valid_.fill(false);
+    last_hand_tf_fresh_.fill(false);
+    last_arm_tf_fresh_.fill(false);
     tracker_fresh_.fill(false);
     marker_visible_.fill(false);
     tf_cache_.fill(CachedTrackerData());
@@ -1201,12 +1411,20 @@ void TrackerTeleopController::resetTeleopRuntime(TeleopState teleop_state)
 void TrackerTeleopController::resetRuntimeState()
 {
     for (auto &arm : last_joint_deg_) arm.fill(0.0);
+    for (auto &dir : last_selected_ref_dir_) {
+        dir = {{shoulder_v_elbow_default_[0], shoulder_v_elbow_default_[1], shoulder_v_elbow_default_[2]}};
+    }
+    last_selected_branch_.fill(-1);
     for (auto &arm : smoothed_joints_rad_) arm.fill(0.0);
     for (auto &arm : target_joints_rad_) arm.fill(0.0);
     has_valid_target_.fill(false);
     cmd_interfaces_.fill(nullptr);
     state_interfaces_pos_.fill(nullptr);
-    pending_diagnostics_.fill(ArmDiagnostics());
+    for (auto &slot : pending_diagnostics_) {
+        slot.sequence.store(0, std::memory_order_relaxed);
+        slot.pending.store(false, std::memory_order_relaxed);
+        slot.snapshot = ArmDiagnostics();
+    }
     last_ik_result_.fill(IKResult::kNoTarget);
     resetTrackerState();
     resetTeleopRuntime(TeleopState::kDisarmed);
@@ -1313,7 +1531,121 @@ void TrackerTeleopController::initializeJointTargetsFromState()
         (void)cmd_interfaces_[index]->set_value(pos_rad);
     }
 
+    for (size_t arm = 0; arm < kArmCount; ++arm) {
+        last_selected_ref_dir_[arm] = {
+            {shoulder_v_elbow_default_[0], shoulder_v_elbow_default_[1], shoulder_v_elbow_default_[2]}};
+        normalizeVector(last_selected_ref_dir_[arm]);
+        last_selected_branch_[arm] = -1;
+        (void)seedTrackingStateFromCurrentJoints(arm);
+    }
     has_valid_target_.fill(true);
+}
+
+bool TrackerTeleopController::seedTrackingStateFromCurrentJoints(size_t arm)
+{
+    if (arm >= kArmCount) {
+        return false;
+    }
+
+    const auto logger = get_node()->get_logger();
+    std::array<double, 3> seeded_ref_dir = last_selected_ref_dir_[arm];
+    if (!extractSolvedUpperArmDir(
+            static_cast<FX_INT32L>(arm), smoothed_joints_rad_[arm], seeded_ref_dir)) {
+        RCLCPP_WARN(
+            logger,
+            "Failed to extract current upper-arm direction for %s arm; "
+            "keeping default startup ref_dir and branch.",
+            kSideTags[arm]);
+        return false;
+    }
+
+    last_selected_ref_dir_[arm] = seeded_ref_dir;
+
+    FX_DOUBLE joints_deg[kJointsPerArm];
+    Matrix4 tcp_mat{};
+    for (size_t j = 0; j < kJointsPerArm; ++j) {
+        joints_deg[j] = last_joint_deg_[arm][j];
+    }
+
+    if (!FX_Robot_Kine_FK(static_cast<FX_INT32L>(arm), joints_deg, tcp_mat)) {
+        RCLCPP_WARN(
+            logger,
+            "Failed to compute FK for %s arm startup pose; "
+            "seeded ref_dir only, branch remains unknown.",
+            kSideTags[arm]);
+        return false;
+    }
+
+    geometry_msgs::msg::PoseStamped base_T_ee;
+    base_T_ee.header.frame_id = base_frame_;
+    base_T_ee.header.stamp = get_node()->get_clock()->now();
+    matrix4ToPose(tcp_mat, base_T_ee);
+
+    tracking_ik::Request request;
+    tracking_ik::Result result{};
+    tracking_ik::SetDefaultRequest(&request);
+    poseToMatrix4(base_T_ee, request.target_tcp);
+    request.desired_upper_arm_dir[0] = seeded_ref_dir[0];
+    request.desired_upper_arm_dir[1] = seeded_ref_dir[1];
+    request.desired_upper_arm_dir[2] = seeded_ref_dir[2];
+    request.prev_selected_ref_dir[0] = seeded_ref_dir[0];
+    request.prev_selected_ref_dir[1] = seeded_ref_dir[1];
+    request.prev_selected_ref_dir[2] = seeded_ref_dir[2];
+    request.prev_selected_branch = -1;
+    for (size_t j = 0; j < kJointsPerArm; ++j) {
+        request.ref_joint_deg[j] = last_joint_deg_[arm][j];
+    }
+
+    request.fk_accept_tol = tracking_ik_config_.fk_accept_tol;
+    request.fast_psi_range_deg = tracking_ik_config_.fast_psi_range_deg;
+    request.fast_psi_step_deg = tracking_ik_config_.fast_psi_step_deg;
+    request.expand_psi_range_deg = tracking_ik_config_.expand_psi_range_deg;
+    request.expand_psi_step_deg = tracking_ik_config_.expand_psi_step_deg;
+    request.score_params.desired_dir_weight =
+        tracking_ik_config_.desired_dir_weight;
+    request.score_params.continuity_dir_weight =
+        tracking_ik_config_.continuity_dir_weight;
+    request.score_params.magnitude_weight =
+        tracking_ik_config_.magnitude_weight;
+    request.score_params.psi_delta_weight =
+        tracking_ik_config_.psi_delta_weight;
+    request.score_params.branch_switch_penalty =
+        tracking_ik_config_.branch_switch_penalty;
+
+    if (!tracking_ik::Solve(&tracking_ik_geometry_, &request, &result)) {
+        RCLCPP_WARN(
+            logger,
+            "Failed to seed startup branch for %s arm from current pose; "
+            "using current upper-arm dir only.",
+            kSideTags[arm]);
+        return false;
+    }
+
+    if (!result.success) {
+        RCLCPP_WARN(
+            logger,
+            "trackingIK could not classify %s arm startup pose; "
+            "using current upper-arm dir only.",
+            kSideTags[arm]);
+        return false;
+    }
+
+    last_selected_ref_dir_[arm] = {
+        {result.selected_ref_dir[0], result.selected_ref_dir[1], result.selected_ref_dir[2]}};
+    normalizeVector(last_selected_ref_dir_[arm]);
+    last_selected_branch_[arm] = result.selected_branch;
+
+    RCLCPP_INFO(
+        logger,
+        "Seeded %s arm startup tracking state from hardware pose: "
+        "branch=%ld ref_dir=[%.3f, %.3f, %.3f] psi=%.1f deg",
+        kSideTags[arm],
+        static_cast<long>(last_selected_branch_[arm]),
+        last_selected_ref_dir_[arm][0],
+        last_selected_ref_dir_[arm][1],
+        last_selected_ref_dir_[arm][2],
+        result.selected_psi_deg);
+    return true;
 }
 
 controller_interface::CallbackReturn

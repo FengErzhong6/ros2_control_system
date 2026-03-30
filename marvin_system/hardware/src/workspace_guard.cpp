@@ -50,6 +50,7 @@ bool WorkspaceGuard::configure(
     const rclcpp::Logger &logger)
 {
     has_tool_ = false;
+    armed_ = false;
     tool_tf_ = {};
     for (auto &s : has_safe_) s = false;
     for (auto &v : violation_streak_) v = 0;
@@ -120,6 +121,22 @@ bool WorkspaceGuard::configure(
 }
 
 // ---------------------------------------------------------------------------
+// arm / disarm
+// ---------------------------------------------------------------------------
+void WorkspaceGuard::arm()
+{
+    if (!enabled_) return;
+    armed_ = true;
+    for (auto &v : violation_streak_) v = 0;
+}
+
+void WorkspaceGuard::disarm()
+{
+    armed_ = false;
+    for (auto &v : violation_streak_) v = 0;
+}
+
+// ---------------------------------------------------------------------------
 // seed
 // ---------------------------------------------------------------------------
 void WorkspaceGuard::seed(size_t arm, const double feedback_deg[kJointsPerArm])
@@ -136,6 +153,10 @@ void WorkspaceGuard::seed(size_t arm, const double feedback_deg[kJointsPerArm])
 bool WorkspaceGuard::filter(size_t arm, double cmd_deg[kJointsPerArm],
                             const rclcpp::Logger &logger)
 {
+    if (!enabled_ || !armed_) {
+        return true;
+    }
+
     if (!checkArmSafe(arm, cmd_deg)) {
         // Always replace with last_safe so we never send a violating command.
         // If not seeded yet, last_safe_deg_ is zero-initialized (fallback).

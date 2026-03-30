@@ -3,6 +3,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -23,6 +24,7 @@
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
 
+#include "TrackingIk.h"
 #include "marvin_system/marvin_kine_utils.hpp"
 
 namespace marvin_system {
@@ -59,8 +61,12 @@ private:
     bool kine_initialized_{false};
     std::string kine_config_path_;
     MarvinKineData kine_data_;
-    std::array<FX_InvKineSolvePara, kArmCount> ik_params_{};
+    tracking_ik::Geometry tracking_ik_geometry_{};
+    bool tracking_ik_geometry_loaded_{false};
     std::array<std::array<double, kJointsPerArm>, kArmCount> last_joint_deg_{};
+    std::array<std::array<double, 3>, kArmCount> last_selected_ref_dir_{
+        {{{0.0, 0.0, -1.0}}, {{0.0, 0.0, -1.0}}}};
+    std::array<int64_t, kArmCount> last_selected_branch_{{-1, -1}};
 
     // TF2 for tracker pose lookup
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
@@ -97,15 +103,24 @@ private:
     double position_scale_{1.0};
     double base_x_scale_{1.0};
     bool enable_orientation_{true};
-    bool ik_fallback_near_ref_{true};
-    bool ik_clamp_joint_limits_{true};
     std::string base_frame_{"base_link"};
     std::array<double, 3> shoulder_v_elbow_default_{{0.0, 0.0, -1.0}};
-    double zsp_angle_{0.0};
     double j4_bound_{0.0};
     double dh_d1_{0.0};
     rclcpp::Duration tracker_timeout_{0, 100000000};
     std::array<std::string, kArmCount> viz_base_frames_{{"Base_L", "Base_R"}};
+    struct TrackingIkConfig {
+        double fk_accept_tol{1e-3};
+        double fast_psi_range_deg{12.0};
+        double fast_psi_step_deg{1.0};
+        double expand_psi_range_deg{36.0};
+        double expand_psi_step_deg{3.0};
+        double desired_dir_weight{0.03};
+        double continuity_dir_weight{0.03};
+        double magnitude_weight{0.05};
+        double psi_delta_weight{0.02};
+        double branch_switch_penalty{20.0};
+    } tracking_ik_config_{};
 
     /** chest → shoulder (标定人机胸系到肩关节系). */
     std::array<tf2::Transform, kArmCount> shoulder_T_chest_;
@@ -136,6 +151,8 @@ private:
         {rclcpp::Time(0, 0, RCL_ROS_TIME), rclcpp::Time(0, 0, RCL_ROS_TIME)}};
     std::array<bool, kArmCount> last_hand_tf_valid_{{false, false}};
     std::array<bool, kArmCount> last_arm_tf_valid_{{false, false}};
+    std::array<bool, kArmCount> last_hand_tf_fresh_{{false, false}};
+    std::array<bool, kArmCount> last_arm_tf_fresh_{{false, false}};
     std::array<bool, kArmCount> tracker_fresh_{{false, false}};
 
     // IK result tracking
@@ -147,6 +164,7 @@ private:
         kOutOfRange = -2,
         kJointLimitExceeded = -3,
         kSingularity = -4,
+        kSolveFailed = -5,
     };
     std::array<IKResult, kArmCount> last_ik_result_{
         {IKResult::kNoTarget, IKResult::kNoTarget}};
@@ -184,8 +202,26 @@ private:
         bool has_solution{false};
         std::array<double, kJointsPerArm> q_joints_rad{};
         double solution_j4_deg{0.0};
+        bool solver_reachable{false};
+        bool used_expanded_search{false};
+        int64_t candidate_count{0};
+        int64_t psi_eval_count{0};
+        int64_t selected_branch{-1};
+        double selected_psi_deg{0.0};
+        double best_fk_residual_l1{0.0};
+        double best_ref_score_l1{0.0};
+        double best_desired_dir_score_deg{0.0};
+        double best_continuity_dir_score_deg{0.0};
+        bool solved_upper_arm_dir_valid{false};
+        std::array<double, 3> solved_upper_arm_dir{{0.0, 0.0, 0.0}};
+        double solved_upper_arm_dir_angle_deg{0.0};
     };
-    std::array<ArmDiagnostics, kArmCount> pending_diagnostics_;
+    struct PendingDiagnosticsSlot {
+        std::atomic<uint64_t> sequence{0};
+        std::atomic<bool> pending{false};
+        ArmDiagnostics snapshot;
+    };
+    std::array<PendingDiagnosticsSlot, kArmCount> pending_diagnostics_;
 
     struct TrackerInputState {
         rclcpp::Time hand_stamp{0, 0, RCL_ROS_TIME};
@@ -194,6 +230,7 @@ private:
         bool arm_changed{false};
         bool tracker_input_changed{false};
         bool hand_fresh{false};
+        bool arm_fresh{false};
     };
 
     // Configuration helpers
@@ -213,6 +250,7 @@ private:
     // Activation/runtime helpers
     bool bindJointInterfaces();
     void initializeJointTargetsFromState();
+    bool seedTrackingStateFromCurrentJoints(size_t arm);
     void resetTrackerState();
     void resetTeleopRuntime(TeleopState teleop_state);
     void holdAllArms(double dt);

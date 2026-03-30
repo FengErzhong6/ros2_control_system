@@ -181,6 +181,7 @@ set_target_properties(ik_solution_explorer PROPERTIES
 )
 
 if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights
   # comment the line when a copyright and license is added to all source files
@@ -189,6 +190,18 @@ if(BUILD_TESTING)
   # comment the line when this package is in a git repo and when
   # a copyright and license is added to all source files
   set(ament_cmake_cpplint_FOUND TRUE)
+
+  ament_add_gtest(workspace_guard_test
+    test/workspace_guard_test.cpp
+    hardware/src/workspace_guard.cpp
+  )
+  target_include_directories(workspace_guard_test PRIVATE
+    ${PROJECT_SOURCE_DIR}/hardware/include
+  )
+  ament_target_dependencies(workspace_guard_test
+    rclcpp
+  )
+
   ament_lint_auto_find_test_dependencies()
 endif()
 
