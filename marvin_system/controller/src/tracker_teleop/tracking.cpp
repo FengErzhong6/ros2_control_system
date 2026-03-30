@@ -70,8 +70,8 @@ TrackerTeleopController::IKResult TrackerTeleopController::solveIK(
         diag->selected_psi_deg = 0.0;
         diag->best_fk_residual_l1 = 0.0;
         diag->best_ref_score_l1 = 0.0;
-        diag->best_desired_dir_score_deg = 0.0;
-        diag->best_continuity_dir_score_deg = 0.0;
+        diag->best_desired_dir_score = 0.0;
+        diag->best_continuity_dir_score = 0.0;
         diag->solved_upper_arm_dir_valid = false;
         diag->solved_upper_arm_dir = {{0.0, 0.0, 0.0}};
         diag->solved_upper_arm_dir_angle_deg = 0.0;
@@ -151,8 +151,8 @@ TrackerTeleopController::IKResult TrackerTeleopController::solveIK(
         diag->selected_psi_deg = result.selected_psi_deg;
         diag->best_fk_residual_l1 = result.best_fk_residual_l1;
         diag->best_ref_score_l1 = result.best_ref_score_l1;
-        diag->best_desired_dir_score_deg = result.best_desired_dir_score;
-        diag->best_continuity_dir_score_deg = result.best_continuity_dir_score;
+        diag->best_desired_dir_score = result.best_desired_dir_score;
+        diag->best_continuity_dir_score = result.best_continuity_dir_score;
         if (diag->has_solution) {
             std::array<double, 3> input_upper_arm_dir{
                 {shoulder_v_elbow[0], shoulder_v_elbow[1], shoulder_v_elbow[2]}};
@@ -326,6 +326,159 @@ void TrackerTeleopController::fillArmTargetFromTracker(
     shoulder_v_elbow = {{corrected.x(), corrected.y(), corrected.z()}};
 }
 
+void TrackerTeleopController::filterShoulderElbowDirection(
+    size_t arm, bool arm_valid, std::array<double, 3> &shoulder_v_elbow)
+{
+    auto &runtime = arm_state_[arm];
+
+    std::array<double, 3> fallback_dir = shoulder_v_elbow_default_;
+    if (!normalizeVector(fallback_dir)) {
+        fallback_dir = {{0.0, 0.0, -1.0}};
+    }
+
+    std::array<double, 3> measured_dir = shoulder_v_elbow;
+    const bool measured_valid = arm_valid && normalizeVector(measured_dir);
+
+    if (!runtime.filtered_elbow_dir_valid) {
+        runtime.filtered_elbow_dir = measured_valid ? measured_dir : fallback_dir;
+        runtime.filtered_elbow_dir_valid = true;
+        shoulder_v_elbow = runtime.filtered_elbow_dir;
+        return;
+    }
+
+    if (!measured_valid) {
+        if (!elbow_dir_filter_config_.hold_last_on_invalid) {
+            runtime.filtered_elbow_dir = fallback_dir;
+        }
+        shoulder_v_elbow = runtime.filtered_elbow_dir;
+        return;
+    }
+
+    if (angleBetweenVectorsDeg(runtime.filtered_elbow_dir, measured_dir) <=
+        elbow_dir_filter_config_.deadband_deg) {
+        shoulder_v_elbow = runtime.filtered_elbow_dir;
+        return;
+    }
+
+    const double alpha = elbow_dir_filter_config_.alpha;
+    std::array<double, 3> filtered_dir{{
+        alpha * measured_dir[0] + (1.0 - alpha) * runtime.filtered_elbow_dir[0],
+        alpha * measured_dir[1] + (1.0 - alpha) * runtime.filtered_elbow_dir[1],
+        alpha * measured_dir[2] + (1.0 - alpha) * runtime.filtered_elbow_dir[2],
+    }};
+    if (!normalizeVector(filtered_dir)) {
+        filtered_dir = measured_dir;
+    }
+
+    runtime.filtered_elbow_dir = filtered_dir;
+    shoulder_v_elbow = filtered_dir;
+}
+
+bool TrackerTeleopController::applyTrackerTargetHysteresis(
+    size_t arm, bool arm_target_valid,
+    geometry_msgs::msg::PoseStamped &base_T_ee,
+    std::array<double, 3> &shoulder_v_elbow)
+{
+    auto &runtime = arm_state_[arm];
+
+    std::array<double, 3> normalized_elbow = shoulder_v_elbow;
+    if (!normalizeVector(normalized_elbow)) {
+        normalized_elbow = runtime.filtered_elbow_dir_valid ?
+            runtime.filtered_elbow_dir :
+            shoulder_v_elbow_default_;
+        if (!normalizeVector(normalized_elbow)) {
+            normalized_elbow = {{0.0, 0.0, -1.0}};
+        }
+    }
+    shoulder_v_elbow = normalized_elbow;
+
+    auto accept_current_target = [&]() {
+        runtime.accepted_base_T_ee = base_T_ee;
+        runtime.accepted_shoulder_v_elbow = shoulder_v_elbow;
+        runtime.accepted_tracker_target_valid = true;
+        runtime.tracker_deadband_active = false;
+    };
+
+    if (!runtime.accepted_tracker_target_valid) {
+        accept_current_target();
+        return false;
+    }
+
+    const double position_delta_m = pointDistanceMeters(
+        base_T_ee.pose.position, runtime.accepted_base_T_ee.pose.position);
+    const double orientation_delta_deg = quaternionAngularDistanceDeg(
+        base_T_ee.pose.orientation, runtime.accepted_base_T_ee.pose.orientation);
+    const double elbow_delta_deg = angleBetweenVectorsDeg(
+        shoulder_v_elbow, runtime.accepted_shoulder_v_elbow);
+
+    if (runtime.startup_sync_pending) {
+        const bool startup_aligned =
+            position_delta_m <= startup_sync_config_.position_tolerance_m &&
+            orientation_delta_deg <= startup_sync_config_.orientation_tolerance_deg &&
+            (!arm_target_valid ||
+             elbow_delta_deg <= startup_sync_config_.elbow_tolerance_deg);
+        if (!startup_aligned) {
+            runtime.tracker_deadband_active = true;
+            base_T_ee = runtime.accepted_base_T_ee;
+            shoulder_v_elbow = runtime.accepted_shoulder_v_elbow;
+            return true;
+        }
+
+        runtime.startup_sync_pending = false;
+        accept_current_target();
+        return false;
+    }
+
+    if (!tracker_deadband_config_.enabled) {
+        accept_current_target();
+        return false;
+    }
+
+    auto within_enter = [](double delta, double enter, double exit) {
+        return exit <= 0.0 || delta <= enter;
+    };
+    auto beyond_exit = [](double delta, double exit) {
+        return exit > 0.0 && delta >= exit;
+    };
+
+    const bool should_hold =
+        within_enter(
+            position_delta_m,
+            tracker_deadband_config_.position_enter_m,
+            tracker_deadband_config_.position_exit_m) &&
+        within_enter(
+            orientation_delta_deg,
+            tracker_deadband_config_.orientation_enter_deg,
+            tracker_deadband_config_.orientation_exit_deg) &&
+        within_enter(
+            elbow_delta_deg,
+            tracker_deadband_config_.elbow_enter_deg,
+            tracker_deadband_config_.elbow_exit_deg);
+    const bool should_release =
+        beyond_exit(position_delta_m, tracker_deadband_config_.position_exit_m) ||
+        beyond_exit(orientation_delta_deg, tracker_deadband_config_.orientation_exit_deg) ||
+        beyond_exit(elbow_delta_deg, tracker_deadband_config_.elbow_exit_deg);
+
+    if (runtime.tracker_deadband_active) {
+        if (!should_release) {
+            base_T_ee = runtime.accepted_base_T_ee;
+            shoulder_v_elbow = runtime.accepted_shoulder_v_elbow;
+            return true;
+        }
+        runtime.tracker_deadband_active = false;
+    }
+
+    if (should_hold) {
+        runtime.tracker_deadband_active = true;
+        base_T_ee = runtime.accepted_base_T_ee;
+        shoulder_v_elbow = runtime.accepted_shoulder_v_elbow;
+        return true;
+    }
+
+    accept_current_target();
+    return false;
+}
+
 void TrackerTeleopController::handleStaleTracker(
     size_t arm, const CachedTrackerData &snap, bool tracker_input_changed)
 {
@@ -350,6 +503,11 @@ void TrackerTeleopController::handleFreshTrackerUpdate(size_t arm, const CachedT
     geometry_msgs::msg::PoseStamped base_T_ee;
     std::array<double, 3> shoulder_v_elbow{};
     fillArmTargetFromTracker(arm, snap, base_T_ee, shoulder_v_elbow);
+    filterShoulderElbowDirection(arm, snap.arm_valid, shoulder_v_elbow);
+    if (applyTrackerTargetHysteresis(arm, snap.arm_valid, base_T_ee, shoulder_v_elbow) &&
+        runtime.last_tracker_ik_succeeded) {
+        return;
+    }
 
     ArmDiagnostics diag;
     diag.tracker_fresh = true;
@@ -372,9 +530,11 @@ void TrackerTeleopController::handleFreshTrackerUpdate(size_t arm, const CachedT
             runtime.target_joints_rad[j] = out_q_joints_rad[j];
         }
         runtime.has_valid_target = true;
+        runtime.last_tracker_ik_succeeded = true;
         return;
     }
 
+    runtime.last_tracker_ik_succeeded = false;
     holdCurrentPosition(arm);
 }
 
@@ -393,6 +553,20 @@ void TrackerTeleopController::processArmUpdate(
     effective_snap.arm_valid = input_state.arm_fresh;
 
     if (force_reacquire || input_state.tracker_input_changed) {
+        if (force_reacquire) {
+            auto &runtime = arm_state_[arm];
+            runtime.accepted_tracker_target_valid = false;
+            runtime.tracker_deadband_active = false;
+            runtime.startup_sync_pending = false;
+            runtime.last_tracker_ik_succeeded = false;
+            if (startup_sync_config_.enabled &&
+                captureCurrentArmTargetFromState(
+                    arm, runtime.accepted_base_T_ee, runtime.accepted_shoulder_v_elbow)) {
+                runtime.accepted_tracker_target_valid = true;
+                runtime.tracker_deadband_active = true;
+                runtime.startup_sync_pending = true;
+            }
+        }
         handleFreshTrackerUpdate(arm, effective_snap);
     }
 

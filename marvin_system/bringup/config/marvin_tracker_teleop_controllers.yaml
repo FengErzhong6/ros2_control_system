@@ -28,7 +28,7 @@ tracker_teleop_controller:
       - Joint7_R
     kine_config_path: ""  # set by launch file via FindPackageShare
 
-    # ── Tracker 输入 ──────────────────────────────────────────────────────
+    # ── Tracker 输入源 ────────────────────────────────────────────────────
     # TF frame names published by tracker_publisher.
     # Must match the frame_ids in trackers.yaml.
     tracker_frames:
@@ -39,14 +39,35 @@ tracker_teleop_controller:
       right_upper_arm: "tracker_right_upper_arm"
     tracker_timeout_sec: 0.1  # tracker 输入超时后进入 hold，停止追踪旧目标
 
-    # ── 目标映射 / 参考坐标 ───────────────────────────────────────────────
+    # ── Tracker 输入抗抖 ──────────────────────────────────────────────────
+    tracker_deadband:
+      enabled: true
+      position_enter_m: 0.002  # 进入静止区阈值；更小的末端平移不触发重算
+      position_exit_m: 0.004   # 退出静止区阈值；超过后恢复跟踪
+      orientation_enter_deg: 1.0
+      orientation_exit_deg: 2.0
+      elbow_enter_deg: 3.0
+      elbow_exit_deg: 5.0
+
+    startup_sync:
+      enabled: true
+      position_tolerance_m: 0.03  # 启用后先保持当前姿态，直到 tracker 靠近这个范围再接管
+      orientation_tolerance_deg: 12.0
+      elbow_tolerance_deg: 20.0
+
+    elbow_dir_filter:
+      alpha: 0.25  # shoulder_v_elbow EMA 系数，越大响应越快
+      deadband_deg: 2.0  # 小角度抖动直接保持上一帧
+      hold_last_on_invalid: true  # upper_arm TF 短时失效时沿用上一帧稳定肘向
+    default_elbow_direction: [0.0, 0.0, -1.0]  # 无上臂 TF 时的默认 shoulder_v_elbow
+
+    # ── 目标映射 / 末端跟踪 ───────────────────────────────────────────────
     base_frame: "base_link"
     enable_orientation: true   # 是否跟踪手腕姿态
     position_scale: 1.0        # chest_T_wrist 平移缩放因子
     base_x_scale: 1.0          # 基座 x 方向缩放因子
 
     # ── IK 求解参数 ──────────────────────────────────────────────────────
-    default_elbow_direction: [0.0, 0.0, -1.0]  # 无上臂 TF 时的默认 shoulder_v_elbow
     j4_bound: -3.59  # 机械臂肘部 A/B 构型分界线，仅用于日志输出
     dh_d1: 0.1745    # link1 长度 (m)，shoulder→base 偏置 [0, 0, +d1]
     tracking_ik:

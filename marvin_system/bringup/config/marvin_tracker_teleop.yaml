@@ -1,0 +1,6 @@
+marvin_tracker_teleop:
+  enable_joint_recording: true
+  trajectory_root: default
+  trajectory_bag_prefix: marvin_joint_trajectory
+  trajectory_bag_topics:
+    - /joint_states

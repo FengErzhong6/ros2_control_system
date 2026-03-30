@@ -73,8 +73,8 @@ std::string TrackerTeleopController::buildIkLogChain(const ArmDiagnostics &diag)
     if (diag.has_solution) {
         chain << " fk_l1=" << diag.best_fk_residual_l1;
         chain << " ref_l1=" << diag.best_ref_score_l1;
-        chain << " desired_dir=" << diag.best_desired_dir_score_deg << "deg";
-        chain << " continuity_dir=" << diag.best_continuity_dir_score_deg << "deg";
+        chain << " desired_score=" << diag.best_desired_dir_score;
+        chain << " continuity_score=" << diag.best_continuity_dir_score;
         if (diag.solved_upper_arm_dir_valid) {
             chain << " nsp_dir=" << diag.solved_upper_arm_dir_angle_deg << "deg";
         } else {

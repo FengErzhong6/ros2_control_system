@@ -53,6 +53,33 @@ inline double angleBetweenVectorsDeg(
         lhs[0] * rhs[0] + lhs[1] * rhs[1] + lhs[2] * rhs[2])) * kRad2Deg;
 }
 
+inline double pointDistanceMeters(
+    const geometry_msgs::msg::Point &lhs,
+    const geometry_msgs::msg::Point &rhs)
+{
+    const double dx = lhs.x - rhs.x;
+    const double dy = lhs.y - rhs.y;
+    const double dz = lhs.z - rhs.z;
+    return std::sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+inline double quaternionAngularDistanceDeg(
+    const geometry_msgs::msg::Quaternion &lhs,
+    const geometry_msgs::msg::Quaternion &rhs)
+{
+    tf2::Quaternion q_l(lhs.x, lhs.y, lhs.z, lhs.w);
+    tf2::Quaternion q_r(rhs.x, rhs.y, rhs.z, rhs.w);
+    q_l.normalize();
+    q_r.normalize();
+
+    const double dot = std::abs(
+        q_l.x() * q_r.x() +
+        q_l.y() * q_r.y() +
+        q_l.z() * q_r.z() +
+        q_l.w() * q_r.w());
+    return 2.0 * std::acos(clampUnit(dot)) * kRad2Deg;
+}
+
 inline bool extractSolvedUpperArmDir(
     FX_INT32L arm,
     const std::array<double, kJointsPerArm> &joints_rad,

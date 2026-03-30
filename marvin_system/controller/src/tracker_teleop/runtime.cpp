@@ -132,7 +132,9 @@ void TrackerTeleopController::handleSetEnabled(
         active_home_joint_index_.store(-1, std::memory_order_relaxed);
         setTeleopState(TeleopState::kEnabled, "service enable");
         response->success = true;
-        response->message = "Tracker teleop enabled.";
+        response->message = startup_sync_config_.enabled ?
+            "Tracker teleop enabled; holding current pose until tracker aligns." :
+            "Tracker teleop enabled.";
         return;
     }
 
