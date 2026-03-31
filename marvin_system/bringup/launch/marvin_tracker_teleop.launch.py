@@ -21,9 +21,10 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction, RegisterEventHandler
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, RegisterEventHandler
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 
 from launch_ros.actions import Node
@@ -43,9 +44,28 @@ DEFAULT_TRAJECTORY_TOPICS = ["/joint_states"]
 
 
 def load_launch_config(config_path):
-    with open(config_path, "r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle) or {}
+    data = load_yaml_file(config_path)
     return data.get("marvin_tracker_teleop", {})
+
+
+def load_yaml_file(path):
+    with open(path, "r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Expected mapping at YAML root: {path}")
+    return data
+
+
+def resolve_camera_namespace(cameras_cfg: dict, camera_name: str) -> str:
+    cameras = cameras_cfg.get("cameras", {})
+    camera_cfg = cameras.get(camera_name)
+    if not isinstance(camera_cfg, dict):
+        raise RuntimeError(f"Camera '{camera_name}' not found in cameras config")
+
+    namespace = camera_cfg.get("namespace", camera_name)
+    if not isinstance(namespace, str) or not namespace.strip():
+        raise RuntimeError(f"Camera '{camera_name}' has an invalid namespace")
+    return namespace
 
 
 def _parse_bool(value, fallback: bool) -> bool:
@@ -607,6 +627,25 @@ def generate_launch_description():
             description="Enable terminal Space key start/stop gate for tracker teleop.",
         ),
         DeclareLaunchArgument(
+            "start_cameras", default_value="true",
+            description="Launch the three cameras when using real hardware.",
+        ),
+        DeclareLaunchArgument(
+            "show_camera_views", default_value="true",
+            description="Open a single camera dashboard window when cameras are launched.",
+        ),
+        DeclareLaunchArgument(
+            "high_camera_name", default_value="cam_high",
+            description="Camera key in cameras.yaml for the RealSense top camera.",
+        ),
+        DeclareLaunchArgument(
+            "cameras_config",
+            default_value=PathJoinSubstitution(
+                [FindPackageShare("camera_system"), "bringup", "config", "cameras.yaml"]
+            ),
+            description="Path to the shared camera inventory YAML file.",
+        ),
+        DeclareLaunchArgument(
             "config_file",
             default_value=PathJoinSubstitution(
                 [FindPackageShare("marvin_system"), "bringup", "config", "marvin_tracker_teleop.yaml"]
@@ -668,6 +707,11 @@ def generate_launch_description():
 def launch_setup(context):
     gui = LaunchConfiguration("gui")
     use_mock_hardware = LaunchConfiguration("use_mock_hardware")
+    use_mock_hardware_value = use_mock_hardware.perform(context).lower() == "true"
+    start_cameras_value = LaunchConfiguration("start_cameras").perform(context).lower() == "true"
+    show_camera_views_value = LaunchConfiguration("show_camera_views").perform(context).lower() == "true"
+    high_camera_name_value = LaunchConfiguration("high_camera_name").perform(context)
+    cameras_config_path = LaunchConfiguration("cameras_config").perform(context)
 
     pkg = LaunchConfiguration("description_package").perform(context)
     desc_file = LaunchConfiguration("description_file").perform(context)
@@ -775,6 +819,58 @@ def launch_setup(context):
         parameters=[trackers_config],
     )
 
+    camera_actions = []
+    if start_cameras_value and not use_mock_hardware_value:
+        cameras_cfg = load_yaml_file(cameras_config_path)
+        left_namespace = resolve_camera_namespace(cameras_cfg, "cam_left_wrist")
+        right_namespace = resolve_camera_namespace(cameras_cfg, "cam_right_wrist")
+        high_namespace = resolve_camera_namespace(cameras_cfg, high_camera_name_value)
+
+        camera_actions.extend([
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    PathJoinSubstitution(
+                        [FindPackageShare("camera_system"), "bringup", "launch", "dual_wrist_orbbec.launch.py"]
+                    )
+                ),
+                launch_arguments={
+                    "cameras_config": cameras_config_path,
+                    "use_showimage": "false",
+                }.items(),
+            ),
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(
+                    PathJoinSubstitution(
+                        [FindPackageShare("camera_system"), "bringup", "launch", "single_realsense.launch.py"]
+                    )
+                ),
+                launch_arguments={
+                    "camera_name": high_camera_name_value,
+                    "cameras_config": cameras_config_path,
+                    "use_showimage": "false",
+                }.items(),
+            ),
+        ])
+
+        if show_camera_views_value:
+            camera_actions.append(
+                Node(
+                    package="marvin_system",
+                    executable="tracker_camera_dashboard.py",
+                    name="tracker_camera_dashboard",
+                    output="screen",
+                    parameters=[{
+                        "window_title": "Marvin Tracker Camera Dashboard",
+                        "left_camera_title": "Left Wrist",
+                        "right_camera_title": "Right Wrist",
+                        "high_camera_title": "High Camera",
+                        "left_image_topic": f"/{left_namespace}/image_raw",
+                        "right_image_topic": f"/{right_namespace}/image_raw",
+                        "high_image_topic": f"/{high_namespace}/{high_namespace}/color/image_raw",
+                    }],
+                )
+            )
+
     # ── Visualisation ─────────────────────────────────────────────────────
     rviz_config_file = PathJoinSubstitution(
         [FindPackageShare("marvin_system"), "description", "rviz", "marvin_dual.rviz"]
@@ -864,6 +960,7 @@ def launch_setup(context):
         ros2_control_node,
         robot_state_publisher_node,
         tracker_publisher_node,
+        *camera_actions,
         rviz_node,
         joint_state_broadcaster_spawner,
         start_teleop_controllers_after_feedback_ready,

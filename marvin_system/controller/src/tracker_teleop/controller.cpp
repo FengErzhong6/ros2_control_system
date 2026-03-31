@@ -37,10 +37,6 @@ controller_interface::CallbackReturn TrackerTeleopController::on_init()
         auto_declare<double>("tracker_deadband.orientation_exit_deg", 2.0);
         auto_declare<double>("tracker_deadband.elbow_enter_deg", 3.0);
         auto_declare<double>("tracker_deadband.elbow_exit_deg", 5.0);
-        auto_declare<bool>("startup_sync.enabled", true);
-        auto_declare<double>("startup_sync.position_tolerance_m", 0.03);
-        auto_declare<double>("startup_sync.orientation_tolerance_deg", 12.0);
-        auto_declare<double>("startup_sync.elbow_tolerance_deg", 20.0);
         auto_declare<double>("elbow_dir_filter.alpha", 0.25);
         auto_declare<double>("elbow_dir_filter.deadband_deg", 2.0);
         auto_declare<bool>("elbow_dir_filter.hold_last_on_invalid", true);
@@ -52,7 +48,7 @@ controller_interface::CallbackReturn TrackerTeleopController::on_init()
         auto_declare<double>("tracking_ik.fine_psi_step_deg", 0.1);
         auto_declare<double>("tracking_ik.fast_psi_range_deg", 12.0);
         auto_declare<double>("tracking_ik.fast_psi_step_deg", 0.5);
-        auto_declare<double>("tracking_ik.expand_psi_range_deg", 36.0);
+        auto_declare<double>("tracking_ik.expand_psi_range_deg", 63.0);
         auto_declare<double>("tracking_ik.expand_psi_step_deg", 2.0);
         auto_declare<double>("tracking_ik.score.desired_dir_weight", 0.03);
         auto_declare<double>("tracking_ik.score.continuity_dir_weight", 0.03);
@@ -172,11 +168,8 @@ void TrackerTeleopController::initializeJointTargetsFromState()
         runtime.accepted_shoulder_v_elbow = runtime.last_selected_ref_dir;
         runtime.accepted_tracker_target_valid = false;
         runtime.tracker_deadband_active = false;
-        runtime.startup_sync_pending = false;
         runtime.last_tracker_ik_succeeded = false;
         (void)seedTrackingStateFromCurrentJoints(arm);
-        (void)captureCurrentArmTargetFromState(
-            arm, runtime.accepted_base_T_ee, runtime.accepted_shoulder_v_elbow);
         runtime.filtered_elbow_dir = runtime.last_selected_ref_dir;
         runtime.filtered_elbow_dir_valid = normalizeVector(runtime.filtered_elbow_dir);
         runtime.has_valid_target = true;
@@ -290,45 +283,6 @@ bool TrackerTeleopController::seedTrackingStateFromCurrentJoints(size_t arm)
         runtime.last_selected_ref_dir[1],
         runtime.last_selected_ref_dir[2],
         result.selected_psi_deg);
-    return true;
-}
-
-bool TrackerTeleopController::captureCurrentArmTargetFromState(
-    size_t arm,
-    geometry_msgs::msg::PoseStamped &base_T_ee,
-    std::array<double, 3> &shoulder_v_elbow)
-{
-    if (arm >= kArmCount) {
-        return false;
-    }
-
-    auto &runtime = arm_state_[arm];
-    FX_DOUBLE joints_deg[kJointsPerArm];
-    Matrix4 tcp_mat{};
-    for (size_t j = 0; j < kJointsPerArm; ++j) {
-        joints_deg[j] = runtime.last_joint_deg[j];
-    }
-
-    if (!FX_Robot_Kine_FK(static_cast<FX_INT32L>(arm), joints_deg, tcp_mat)) {
-        return false;
-    }
-
-    base_T_ee.header.frame_id = base_frame_;
-    base_T_ee.header.stamp = get_node()->get_clock()->now();
-    matrix4ToPose(tcp_mat, base_T_ee);
-
-    shoulder_v_elbow = runtime.last_selected_ref_dir;
-    if (!extractSolvedUpperArmDir(
-            static_cast<FX_INT32L>(arm), runtime.smoothed_joints_rad, shoulder_v_elbow)) {
-        shoulder_v_elbow = runtime.last_selected_ref_dir;
-    }
-    if (!normalizeVector(shoulder_v_elbow)) {
-        shoulder_v_elbow = shoulder_v_elbow_default_;
-        if (!normalizeVector(shoulder_v_elbow)) {
-            shoulder_v_elbow = {{0.0, 0.0, -1.0}};
-        }
-    }
-
     return true;
 }
 

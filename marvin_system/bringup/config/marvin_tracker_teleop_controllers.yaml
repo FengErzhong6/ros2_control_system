@@ -49,16 +49,10 @@ tracker_teleop_controller:
       elbow_enter_deg: 3.0
       elbow_exit_deg: 5.0
 
-    startup_sync:
-      enabled: true
-      position_tolerance_m: 0.03  # 启用后先保持当前姿态，直到 tracker 靠近这个范围再接管
-      orientation_tolerance_deg: 12.0
-      elbow_tolerance_deg: 20.0
-
     elbow_dir_filter:
-      alpha: 0.25  # shoulder_v_elbow EMA 系数，越大响应越快
-      deadband_deg: 2.0  # 小角度抖动直接保持上一帧
-      hold_last_on_invalid: true  # upper_arm TF 短时失效时沿用上一帧稳定肘向
+      alpha: 0.0  # shoulder_v_elbow EMA 系数，越大响应越快
+      deadband_deg: 0.0  # 小角度抖动直接保持上一帧
+      hold_last_on_invalid: false  # upper_arm TF 短时失效时沿用上一帧稳定肘向
     default_elbow_direction: [0.0, 0.0, -1.0]  # 无上臂 TF 时的默认 shoulder_v_elbow
 
     # ── 目标映射 / 末端跟踪 ───────────────────────────────────────────────
@@ -77,7 +71,7 @@ tracker_teleop_controller:
       fine_psi_step_deg: 0.1
       fast_psi_range_deg: 12.0
       fast_psi_step_deg: 0.5
-      expand_psi_range_deg: 36.0
+      expand_psi_range_deg: 63.0
       expand_psi_step_deg: 2.0
 
       # 候选解评分权重

@@ -111,7 +111,7 @@ private:
         double fine_psi_step_deg{0.1};
         double fast_psi_range_deg{12.0};
         double fast_psi_step_deg{0.5};
-        double expand_psi_range_deg{36.0};
+        double expand_psi_range_deg{63.0};
         double expand_psi_step_deg{2.0};
         double desired_dir_weight{0.03};
         double continuity_dir_weight{0.03};
@@ -138,12 +138,6 @@ private:
         double elbow_enter_deg{3.0};
         double elbow_exit_deg{5.0};
     } tracker_deadband_config_{};
-    struct StartupSyncConfig {
-        bool enabled{true};
-        double position_tolerance_m{0.03};
-        double orientation_tolerance_deg{12.0};
-        double elbow_tolerance_deg{20.0};
-    } startup_sync_config_{};
     struct ElbowDirFilterConfig {
         double alpha{0.25};
         double deadband_deg{2.0};
@@ -229,7 +223,6 @@ private:
         std::array<double, 3> accepted_shoulder_v_elbow{{0.0, 0.0, -1.0}};
         bool accepted_tracker_target_valid{false};
         bool tracker_deadband_active{false};
-        bool startup_sync_pending{false};
         std::array<double, 3> filtered_elbow_dir{{0.0, 0.0, -1.0}};
         bool filtered_elbow_dir_valid{false};
         std::array<double, kJointsPerArm> smoothed_joints_rad{};
@@ -278,10 +271,6 @@ private:
     bool bindJointInterfaces();
     void initializeJointTargetsFromState();
     bool seedTrackingStateFromCurrentJoints(size_t arm);
-    bool captureCurrentArmTargetFromState(
-        size_t arm,
-        geometry_msgs::msg::PoseStamped &base_T_ee,
-        std::array<double, 3> &shoulder_v_elbow);
     void resetTrackerState();
     void resetTeleopRuntime(TeleopState teleop_state);
     void holdAllArms(double dt);
@@ -313,7 +302,7 @@ private:
     void filterShoulderElbowDirection(
         size_t arm, bool arm_valid, std::array<double, 3> &shoulder_v_elbow);
     bool applyTrackerTargetHysteresis(
-        size_t arm, bool arm_target_valid,
+        size_t arm,
         geometry_msgs::msg::PoseStamped &base_T_ee,
         std::array<double, 3> &shoulder_v_elbow);
     void handleStaleTracker(size_t arm, const CachedTrackerData &snap, bool tracker_input_changed);

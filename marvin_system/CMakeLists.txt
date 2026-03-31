@@ -217,6 +217,7 @@ install(
 
 install(
   PROGRAMS
+    bringup/scripts/tracker_camera_dashboard.py
     bringup/scripts/tracker_teleop_keyboard.py
     description/scripts/joint_gui_publisher.py
     description/scripts/vector_marker_publisher.py

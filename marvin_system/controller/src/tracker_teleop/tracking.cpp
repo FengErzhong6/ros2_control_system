@@ -375,7 +375,7 @@ void TrackerTeleopController::filterShoulderElbowDirection(
 }
 
 bool TrackerTeleopController::applyTrackerTargetHysteresis(
-    size_t arm, bool arm_target_valid,
+    size_t arm,
     geometry_msgs::msg::PoseStamped &base_T_ee,
     std::array<double, 3> &shoulder_v_elbow)
 {
@@ -410,24 +410,6 @@ bool TrackerTeleopController::applyTrackerTargetHysteresis(
         base_T_ee.pose.orientation, runtime.accepted_base_T_ee.pose.orientation);
     const double elbow_delta_deg = angleBetweenVectorsDeg(
         shoulder_v_elbow, runtime.accepted_shoulder_v_elbow);
-
-    if (runtime.startup_sync_pending) {
-        const bool startup_aligned =
-            position_delta_m <= startup_sync_config_.position_tolerance_m &&
-            orientation_delta_deg <= startup_sync_config_.orientation_tolerance_deg &&
-            (!arm_target_valid ||
-             elbow_delta_deg <= startup_sync_config_.elbow_tolerance_deg);
-        if (!startup_aligned) {
-            runtime.tracker_deadband_active = true;
-            base_T_ee = runtime.accepted_base_T_ee;
-            shoulder_v_elbow = runtime.accepted_shoulder_v_elbow;
-            return true;
-        }
-
-        runtime.startup_sync_pending = false;
-        accept_current_target();
-        return false;
-    }
 
     if (!tracker_deadband_config_.enabled) {
         accept_current_target();
@@ -504,7 +486,7 @@ void TrackerTeleopController::handleFreshTrackerUpdate(size_t arm, const CachedT
     std::array<double, 3> shoulder_v_elbow{};
     fillArmTargetFromTracker(arm, snap, base_T_ee, shoulder_v_elbow);
     filterShoulderElbowDirection(arm, snap.arm_valid, shoulder_v_elbow);
-    if (applyTrackerTargetHysteresis(arm, snap.arm_valid, base_T_ee, shoulder_v_elbow) &&
+    if (applyTrackerTargetHysteresis(arm, base_T_ee, shoulder_v_elbow) &&
         runtime.last_tracker_ik_succeeded) {
         return;
     }
@@ -557,15 +539,7 @@ void TrackerTeleopController::processArmUpdate(
             auto &runtime = arm_state_[arm];
             runtime.accepted_tracker_target_valid = false;
             runtime.tracker_deadband_active = false;
-            runtime.startup_sync_pending = false;
             runtime.last_tracker_ik_succeeded = false;
-            if (startup_sync_config_.enabled &&
-                captureCurrentArmTargetFromState(
-                    arm, runtime.accepted_base_T_ee, runtime.accepted_shoulder_v_elbow)) {
-                runtime.accepted_tracker_target_valid = true;
-                runtime.tracker_deadband_active = true;
-                runtime.startup_sync_pending = true;
-            }
         }
         handleFreshTrackerUpdate(arm, effective_snap);
     }

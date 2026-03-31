@@ -114,16 +114,6 @@ bool TrackerTeleopController::loadControllerParameters()
     node->get_parameter(
         "tracker_deadband.elbow_exit_deg",
         tracker_deadband_config_.elbow_exit_deg);
-    node->get_parameter("startup_sync.enabled", startup_sync_config_.enabled);
-    node->get_parameter(
-        "startup_sync.position_tolerance_m",
-        startup_sync_config_.position_tolerance_m);
-    node->get_parameter(
-        "startup_sync.orientation_tolerance_deg",
-        startup_sync_config_.orientation_tolerance_deg);
-    node->get_parameter(
-        "startup_sync.elbow_tolerance_deg",
-        startup_sync_config_.elbow_tolerance_deg);
     node->get_parameter("elbow_dir_filter.alpha", elbow_dir_filter_config_.alpha);
     node->get_parameter(
         "elbow_dir_filter.deadband_deg",
@@ -200,11 +190,6 @@ bool TrackerTeleopController::loadControllerParameters()
     tracker_deadband_config_.elbow_enter_deg = std::max(0.0, tracker_deadband_config_.elbow_enter_deg);
     tracker_deadband_config_.elbow_exit_deg =
         std::max(tracker_deadband_config_.elbow_enter_deg, tracker_deadband_config_.elbow_exit_deg);
-    startup_sync_config_.position_tolerance_m = std::max(0.0, startup_sync_config_.position_tolerance_m);
-    startup_sync_config_.orientation_tolerance_deg =
-        std::max(0.0, startup_sync_config_.orientation_tolerance_deg);
-    startup_sync_config_.elbow_tolerance_deg =
-        std::max(0.0, startup_sync_config_.elbow_tolerance_deg);
     elbow_dir_filter_config_.alpha = std::clamp(elbow_dir_filter_config_.alpha, 0.01, 1.0);
     elbow_dir_filter_config_.deadband_deg = std::max(0.0, elbow_dir_filter_config_.deadband_deg);
     tracking_ik_config_.fk_accept_tol = std::max(1e-9, tracking_ik_config_.fk_accept_tol);
@@ -354,13 +339,6 @@ void TrackerTeleopController::logConfigurationSummary(double home_tolerance_deg)
         tracker_deadband_config_.elbow_exit_deg);
     RCLCPP_INFO(
         logger,
-        "Startup sync: %s pos<=%.1f mm rot<=%.1f deg elbow<=%.1f deg",
-        startup_sync_config_.enabled ? "ON" : "OFF",
-        startup_sync_config_.position_tolerance_m * 1000.0,
-        startup_sync_config_.orientation_tolerance_deg,
-        startup_sync_config_.elbow_tolerance_deg);
-    RCLCPP_INFO(
-        logger,
         "Elbow dir filter: alpha=%.3f, deadband=%.1f deg, hold_last_on_invalid=%s",
         elbow_dir_filter_config_.alpha,
         elbow_dir_filter_config_.deadband_deg,
@@ -411,7 +389,6 @@ void TrackerTeleopController::resetTrackerState()
         runtime.tracker_fresh = false;
         runtime.accepted_tracker_target_valid = false;
         runtime.tracker_deadband_active = false;
-        runtime.startup_sync_pending = false;
         runtime.last_tracker_ik_succeeded = false;
         runtime.marker_visible = false;
     }
@@ -440,7 +417,6 @@ void TrackerTeleopController::resetRuntimeState()
             {{shoulder_v_elbow_default_[0], shoulder_v_elbow_default_[1], shoulder_v_elbow_default_[2]}};
         runtime.accepted_tracker_target_valid = false;
         runtime.tracker_deadband_active = false;
-        runtime.startup_sync_pending = false;
         runtime.filtered_elbow_dir =
             {{shoulder_v_elbow_default_[0], shoulder_v_elbow_default_[1], shoulder_v_elbow_default_[2]}};
         runtime.filtered_elbow_dir_valid = false;
