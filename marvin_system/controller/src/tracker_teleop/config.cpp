@@ -190,7 +190,7 @@ bool TrackerTeleopController::loadControllerParameters()
     tracker_deadband_config_.elbow_enter_deg = std::max(0.0, tracker_deadband_config_.elbow_enter_deg);
     tracker_deadband_config_.elbow_exit_deg =
         std::max(tracker_deadband_config_.elbow_enter_deg, tracker_deadband_config_.elbow_exit_deg);
-    elbow_dir_filter_config_.alpha = std::clamp(elbow_dir_filter_config_.alpha, 0.01, 1.0);
+    elbow_dir_filter_config_.alpha = std::clamp(elbow_dir_filter_config_.alpha, 0.0, 1.0);
     elbow_dir_filter_config_.deadband_deg = std::max(0.0, elbow_dir_filter_config_.deadband_deg);
     tracking_ik_config_.fk_accept_tol = std::max(1e-9, tracking_ik_config_.fk_accept_tol);
     tracking_ik_config_.fine_psi_range_deg = std::max(0.0, tracking_ik_config_.fine_psi_range_deg);
@@ -210,6 +210,13 @@ bool TrackerTeleopController::loadControllerParameters()
 
     loadTransformParameters();
     loadElbowCorrectionParameters();
+    for (size_t arm = 0; arm < kArmCount; ++arm) {
+        double startup_ref_dir_sign = startup_ref_dir_sign_[arm];
+        node->get_parameter(
+            std::string("startup_ref_dir_sign.") + kSideLabels[arm],
+            startup_ref_dir_sign);
+        startup_ref_dir_sign_[arm] = startup_ref_dir_sign >= 0.0 ? 1.0 : -1.0;
+    }
 
     const auto home_left = node->get_parameter("home_joint_positions.left").as_double_array();
     const auto home_right = node->get_parameter("home_joint_positions.right").as_double_array();
@@ -372,6 +379,9 @@ void TrackerTeleopController::logConfigurationSummary(double home_tolerance_deg)
         logger, "TF frames: torso=%s, L_hand=%s, R_hand=%s, L_arm=%s, R_arm=%s",
         frame_torso_.c_str(), frame_left_hand_.c_str(), frame_right_hand_.c_str(),
         frame_left_upper_arm_.c_str(), frame_right_upper_arm_.c_str());
+    RCLCPP_INFO(
+        logger, "Startup ref-dir sign: LEFT=%+.0f RIGHT=%+.0f",
+        startup_ref_dir_sign_[kLeft], startup_ref_dir_sign_[kRight]);
     RCLCPP_INFO(
         logger, "Teleop gate: startup=%s, control=service + keyboard helper",
         teleopStateToString(getTeleopState()));

@@ -72,6 +72,9 @@ TrackerTeleopController::IKResult TrackerTeleopController::solveIK(
         diag->best_ref_score_l1 = 0.0;
         diag->best_desired_dir_score = 0.0;
         diag->best_continuity_dir_score = 0.0;
+        diag->request_prev_selected_ref_dir = {{0.0, 0.0, -1.0}};
+        diag->request_prev_selected_branch = -1;
+        diag->selected_ref_dir = {{0.0, 0.0, -1.0}};
         diag->solved_upper_arm_dir_valid = false;
         diag->solved_upper_arm_dir = {{0.0, 0.0, 0.0}};
         diag->solved_upper_arm_dir_angle_deg = 0.0;
@@ -104,6 +107,14 @@ TrackerTeleopController::IKResult TrackerTeleopController::solveIK(
     request.prev_selected_branch = static_cast<FX_INT32L>(runtime.last_selected_branch);
     for (size_t j = 0; j < kJointsPerArm; ++j) {
         request.ref_joint_deg[j] = runtime.last_joint_deg[j];
+    }
+
+    if (diag) {
+        diag->request_prev_selected_ref_dir = {{
+            request.prev_selected_ref_dir[0],
+            request.prev_selected_ref_dir[1],
+            request.prev_selected_ref_dir[2]}};
+        diag->request_prev_selected_branch = request.prev_selected_branch;
     }
 
     request.fk_accept_tol = tracking_ik_config_.fk_accept_tol;
@@ -153,6 +164,10 @@ TrackerTeleopController::IKResult TrackerTeleopController::solveIK(
         diag->best_ref_score_l1 = result.best_ref_score_l1;
         diag->best_desired_dir_score = result.best_desired_dir_score;
         diag->best_continuity_dir_score = result.best_continuity_dir_score;
+        diag->selected_ref_dir = {{
+            result.selected_ref_dir[0],
+            result.selected_ref_dir[1],
+            result.selected_ref_dir[2]}};
         if (diag->has_solution) {
             std::array<double, 3> input_upper_arm_dir{
                 {shoulder_v_elbow[0], shoulder_v_elbow[1], shoulder_v_elbow[2]}};

@@ -41,7 +41,7 @@ tracker_teleop_controller:
 
     # ── Tracker 输入抗抖 ──────────────────────────────────────────────────
     tracker_deadband:
-      enabled: true
+      enabled: false
       position_enter_m: 0.002  # 进入静止区阈值；更小的末端平移不触发重算
       position_exit_m: 0.004   # 退出静止区阈值；超过后恢复跟踪
       orientation_enter_deg: 1.0
@@ -50,7 +50,7 @@ tracker_teleop_controller:
       elbow_exit_deg: 5.0
 
     elbow_dir_filter:
-      alpha: 0.0  # shoulder_v_elbow EMA 系数，越大响应越快
+      alpha: 1.0  # shoulder_v_elbow EMA 系数；1=完全使用当前测量，越大响应越快
       deadband_deg: 0.0  # 小角度抖动直接保持上一帧
       hold_last_on_invalid: false  # upper_arm TF 短时失效时沿用上一帧稳定肘向
     default_elbow_direction: [0.0, 0.0, -1.0]  # 无上臂 TF 时的默认 shoulder_v_elbow
@@ -79,7 +79,7 @@ tracker_teleop_controller:
         desired_dir_weight: 1.0
         continuity_dir_weight: 0.05
         magnitude_weight: 0.05
-        psi_delta_weight: 1.0
+        psi_delta_weight: 0.0
         branch_switch_penalty: 20.0
 
     # ── 输出平滑 / 限速 ──────────────────────────────────────────────────
@@ -100,6 +100,10 @@ tracker_teleop_controller:
     elbow_direction_correction:
       left:  [0.0, 0.0, 0.0]
       right: [3.8, -0.8, -7.3]
+
+    startup_ref_dir_sign:
+      left: 1.0
+      right: -1.0
 
     # ── 刚体变换 (position [x,y,z] + orientation [qx,qy,qz,qw])，均为 ROS 系 ──
     #

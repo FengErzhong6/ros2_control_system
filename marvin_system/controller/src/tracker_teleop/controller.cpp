@@ -72,6 +72,8 @@ controller_interface::CallbackReturn TrackerTeleopController::on_init()
             }
             auto_declare<std::vector<double>>(
                 std::string("elbow_direction_correction.") + side, {0.0, 0.0, 0.0});
+            auto_declare<double>(
+                std::string("startup_ref_dir_sign.") + side, side == std::string("right") ? -1.0 : 1.0);
         }
     } catch (const std::exception &e) {
         RCLCPP_ERROR(get_node()->get_logger(), "Failed to declare parameters: %s", e.what());
@@ -270,19 +272,25 @@ bool TrackerTeleopController::seedTrackingStateFromCurrentJoints(size_t arm)
 
     runtime.last_selected_ref_dir = {
         {result.selected_ref_dir[0], result.selected_ref_dir[1], result.selected_ref_dir[2]}};
+    if (startup_ref_dir_sign_[arm] < 0.0) {
+        for (double &component : runtime.last_selected_ref_dir) {
+            component = -component;
+        }
+    }
     normalizeVector(runtime.last_selected_ref_dir);
     runtime.last_selected_branch = result.selected_branch;
 
     RCLCPP_INFO(
         logger,
         "Seeded %s arm startup tracking state from hardware pose: "
-        "branch=%ld ref_dir=[%.3f, %.3f, %.3f] psi=%.1f deg",
+        "branch=%ld ref_dir=[%.3f, %.3f, %.3f] psi=%.1f deg sign=%+.0f",
         kSideTags[arm],
         static_cast<long>(runtime.last_selected_branch),
         runtime.last_selected_ref_dir[0],
         runtime.last_selected_ref_dir[1],
         runtime.last_selected_ref_dir[2],
-        result.selected_psi_deg);
+        result.selected_psi_deg,
+        startup_ref_dir_sign_[arm]);
     return true;
 }
 

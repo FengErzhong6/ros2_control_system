@@ -129,6 +129,8 @@ private:
     /** 肘向量方向修正旋转 (RPY→quaternion)，左右手分别配置. */
     std::array<tf2::Quaternion, kArmCount> elbow_dir_correction_{
         {tf2::Quaternion::getIdentity(), tf2::Quaternion::getIdentity()}};
+    /** startup seed 的 ref_dir 符号规范化，左右手分别配置. */
+    std::array<double, kArmCount> startup_ref_dir_sign_{{1.0, -1.0}};
     struct TrackerDeadbandConfig {
         bool enabled{true};
         double position_enter_m{0.002};
@@ -206,6 +208,9 @@ private:
         double best_ref_score_l1{0.0};
         double best_desired_dir_score{0.0};
         double best_continuity_dir_score{0.0};
+        std::array<double, 3> request_prev_selected_ref_dir{{0.0, 0.0, -1.0}};
+        int64_t request_prev_selected_branch{-1};
+        std::array<double, 3> selected_ref_dir{{0.0, 0.0, -1.0}};
         bool solved_upper_arm_dir_valid{false};
         std::array<double, 3> solved_upper_arm_dir{{0.0, 0.0, 0.0}};
         double solved_upper_arm_dir_angle_deg{0.0};

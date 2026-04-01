@@ -146,6 +146,14 @@ void TrackerTeleopController::logArmDiagnostics(size_t arm, const ArmDiagnostics
             << diag.tracker_y_axis[2] << "]";
         return oss.str();
     }();
+    const auto format_vec3 = [](const std::array<double, 3> &vec) {
+        std::ostringstream oss;
+        oss << "[" << std::fixed << std::setprecision(3)
+            << vec[0] << ", " << vec[1] << ", " << vec[2] << "]";
+        return oss.str();
+    };
+    const std::string prev_ref_str = format_vec3(diag.request_prev_selected_ref_dir);
+    const std::string selected_ref_str = format_vec3(diag.selected_ref_dir);
 
     if (diag.has_solution) {
         if (diag.solved_upper_arm_dir_valid) {
@@ -154,6 +162,7 @@ void TrackerTeleopController::logArmDiagnostics(size_t arm, const ArmDiagnostics
                     logger,
                     "Arm %zu IK | shoulder_T_ee=[%.4f, %.4f, %.4f] quat=[%.4f, %.4f, %.4f, %.4f] "
                     "| tracker_y=%s | desired_upper_arm_dir=[%.3f, %.3f, %.3f] "
+                    "| prev_ref_dir=%s prev_branch=%ld | selected_ref_dir=%s "
                     "| actual_nsp_y=[%.3f, %.3f, %.3f] "
                     "| solved_nsp_y=[%.3f, %.3f, %.3f] | actual_nsp_dir=%.4fdeg | %s "
                     "| q=[%.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f] deg",
@@ -164,6 +173,9 @@ void TrackerTeleopController::logArmDiagnostics(size_t arm, const ArmDiagnostics
                     diag.base_T_ee.pose.orientation.z, diag.base_T_ee.pose.orientation.w,
                     tracker_y_str.c_str(),
                     diag.shoulder_v_elbow[0], diag.shoulder_v_elbow[1], diag.shoulder_v_elbow[2],
+                    prev_ref_str.c_str(),
+                    static_cast<long>(diag.request_prev_selected_branch),
+                    selected_ref_str.c_str(),
                     current_upper_arm_dir[0], current_upper_arm_dir[1], current_upper_arm_dir[2],
                     diag.solved_upper_arm_dir[0], diag.solved_upper_arm_dir[1], diag.solved_upper_arm_dir[2],
                     current_upper_arm_dir_angle_deg,
@@ -178,6 +190,7 @@ void TrackerTeleopController::logArmDiagnostics(size_t arm, const ArmDiagnostics
                 logger,
                 "Arm %zu IK | shoulder_T_ee=[%.4f, %.4f, %.4f] quat=[%.4f, %.4f, %.4f, %.4f] "
                 "| tracker_y=%s | desired_upper_arm_dir=[%.3f, %.3f, %.3f] "
+                "| prev_ref_dir=%s prev_branch=%ld | selected_ref_dir=%s "
                 "| actual_nsp_y=NA | solved_nsp_y=[%.3f, %.3f, %.3f] | %s "
                 "| q=[%.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f] deg",
                 arm,
@@ -187,6 +200,9 @@ void TrackerTeleopController::logArmDiagnostics(size_t arm, const ArmDiagnostics
                 diag.base_T_ee.pose.orientation.z, diag.base_T_ee.pose.orientation.w,
                 tracker_y_str.c_str(),
                 diag.shoulder_v_elbow[0], diag.shoulder_v_elbow[1], diag.shoulder_v_elbow[2],
+                prev_ref_str.c_str(),
+                static_cast<long>(diag.request_prev_selected_branch),
+                selected_ref_str.c_str(),
                 diag.solved_upper_arm_dir[0], diag.solved_upper_arm_dir[1], diag.solved_upper_arm_dir[2],
                 chain.c_str(),
                 diag.q_joints_rad[0] * kRad2Deg, diag.q_joints_rad[1] * kRad2Deg,
@@ -199,7 +215,9 @@ void TrackerTeleopController::logArmDiagnostics(size_t arm, const ArmDiagnostics
             RCLCPP_INFO(
                 logger,
                 "Arm %zu IK | shoulder_T_ee=[%.4f, %.4f, %.4f] quat=[%.4f, %.4f, %.4f, %.4f] "
-                "| tracker_y=%s | desired_upper_arm_dir=[%.3f, %.3f, %.3f] | actual_nsp_y=[%.3f, %.3f, %.3f] "
+                "| tracker_y=%s | desired_upper_arm_dir=[%.3f, %.3f, %.3f] "
+                "| prev_ref_dir=%s prev_branch=%ld | selected_ref_dir=%s "
+                "| actual_nsp_y=[%.3f, %.3f, %.3f] "
                 "| actual_nsp_dir=%.4fdeg | %s "
                 "| q=[%.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f] deg",
                 arm,
@@ -209,6 +227,9 @@ void TrackerTeleopController::logArmDiagnostics(size_t arm, const ArmDiagnostics
                 diag.base_T_ee.pose.orientation.z, diag.base_T_ee.pose.orientation.w,
                 tracker_y_str.c_str(),
                 diag.shoulder_v_elbow[0], diag.shoulder_v_elbow[1], diag.shoulder_v_elbow[2],
+                prev_ref_str.c_str(),
+                static_cast<long>(diag.request_prev_selected_branch),
+                selected_ref_str.c_str(),
                 current_upper_arm_dir[0], current_upper_arm_dir[1], current_upper_arm_dir[2],
                 current_upper_arm_dir_angle_deg,
                 chain.c_str(),
@@ -221,7 +242,9 @@ void TrackerTeleopController::logArmDiagnostics(size_t arm, const ArmDiagnostics
         RCLCPP_INFO(
             logger,
             "Arm %zu IK | shoulder_T_ee=[%.4f, %.4f, %.4f] quat=[%.4f, %.4f, %.4f, %.4f] "
-            "| tracker_y=%s | desired_upper_arm_dir=[%.3f, %.3f, %.3f] | actual_nsp_y=NA | %s "
+            "| tracker_y=%s | desired_upper_arm_dir=[%.3f, %.3f, %.3f] "
+            "| prev_ref_dir=%s prev_branch=%ld | selected_ref_dir=%s "
+            "| actual_nsp_y=NA | %s "
             "| q=[%.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f] deg",
             arm,
             diag.base_T_ee.pose.position.x, diag.base_T_ee.pose.position.y,
@@ -230,6 +253,9 @@ void TrackerTeleopController::logArmDiagnostics(size_t arm, const ArmDiagnostics
             diag.base_T_ee.pose.orientation.z, diag.base_T_ee.pose.orientation.w,
             tracker_y_str.c_str(),
             diag.shoulder_v_elbow[0], diag.shoulder_v_elbow[1], diag.shoulder_v_elbow[2],
+            prev_ref_str.c_str(),
+            static_cast<long>(diag.request_prev_selected_branch),
+            selected_ref_str.c_str(),
             chain.c_str(),
             diag.q_joints_rad[0] * kRad2Deg, diag.q_joints_rad[1] * kRad2Deg,
             diag.q_joints_rad[2] * kRad2Deg, diag.q_joints_rad[3] * kRad2Deg,
@@ -242,7 +268,9 @@ void TrackerTeleopController::logArmDiagnostics(size_t arm, const ArmDiagnostics
         RCLCPP_WARN(
             logger,
             "Arm %zu IK | shoulder_T_ee=[%.4f, %.4f, %.4f] quat=[%.4f, %.4f, %.4f, %.4f] "
-            "| tracker_y=%s | desired_upper_arm_dir=[%.3f, %.3f, %.3f] | actual_nsp_y=[%.3f, %.3f, %.3f] "
+            "| tracker_y=%s | desired_upper_arm_dir=[%.3f, %.3f, %.3f] "
+            "| prev_ref_dir=%s prev_branch=%ld | selected_ref_dir=%s "
+            "| actual_nsp_y=[%.3f, %.3f, %.3f] "
             "| actual_nsp_dir=%.4fdeg | %s",
             arm,
             diag.base_T_ee.pose.position.x, diag.base_T_ee.pose.position.y,
@@ -251,6 +279,9 @@ void TrackerTeleopController::logArmDiagnostics(size_t arm, const ArmDiagnostics
             diag.base_T_ee.pose.orientation.z, diag.base_T_ee.pose.orientation.w,
             tracker_y_str.c_str(),
             diag.shoulder_v_elbow[0], diag.shoulder_v_elbow[1], diag.shoulder_v_elbow[2],
+            prev_ref_str.c_str(),
+            static_cast<long>(diag.request_prev_selected_branch),
+            selected_ref_str.c_str(),
             current_upper_arm_dir[0], current_upper_arm_dir[1], current_upper_arm_dir[2],
             current_upper_arm_dir_angle_deg,
             chain.c_str());
@@ -259,7 +290,9 @@ void TrackerTeleopController::logArmDiagnostics(size_t arm, const ArmDiagnostics
     RCLCPP_WARN(
         logger,
         "Arm %zu IK | shoulder_T_ee=[%.4f, %.4f, %.4f] quat=[%.4f, %.4f, %.4f, %.4f] "
-        "| tracker_y=%s | desired_upper_arm_dir=[%.3f, %.3f, %.3f] | actual_nsp_y=NA | %s",
+        "| tracker_y=%s | desired_upper_arm_dir=[%.3f, %.3f, %.3f] "
+        "| prev_ref_dir=%s prev_branch=%ld | selected_ref_dir=%s "
+        "| actual_nsp_y=NA | %s",
         arm,
         diag.base_T_ee.pose.position.x, diag.base_T_ee.pose.position.y,
         diag.base_T_ee.pose.position.z - dh_d1_,
@@ -267,6 +300,9 @@ void TrackerTeleopController::logArmDiagnostics(size_t arm, const ArmDiagnostics
         diag.base_T_ee.pose.orientation.z, diag.base_T_ee.pose.orientation.w,
         tracker_y_str.c_str(),
         diag.shoulder_v_elbow[0], diag.shoulder_v_elbow[1], diag.shoulder_v_elbow[2],
+        prev_ref_str.c_str(),
+        static_cast<long>(diag.request_prev_selected_branch),
+        selected_ref_str.c_str(),
         chain.c_str());
 }
 
