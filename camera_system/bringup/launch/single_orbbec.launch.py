@@ -2,7 +2,7 @@ from pathlib import Path
 
 import yaml
 
-from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
@@ -50,52 +50,35 @@ def _build_camera_params(target_camera_name: str, cameras_cfg: dict, defaults_cf
     if camera_cfg is None:
         raise RuntimeError(f"Camera '{target_camera_name}' not found in cameras.yaml")
 
-    if camera_cfg.get("driver") != "realsense":
-        raise RuntimeError(f"Camera '{target_camera_name}' is not configured as a RealSense device")
+    if camera_cfg.get("driver") != "orbbec":
+        raise RuntimeError(f"Camera '{target_camera_name}' is not configured as an Orbbec device")
 
     profile_name = camera_cfg.get("profile")
     profile_cfg = defaults_cfg.get("profiles", {}).get(profile_name)
     if profile_cfg is None:
         raise RuntimeError(
-            f"Profile '{profile_name}' for camera '{target_camera_name}' not found in realsense_defaults.yaml"
+            f"Profile '{profile_name}' for camera '{target_camera_name}' not found in orbbec_defaults.yaml"
         )
 
-    namespace = camera_cfg["namespace"]
-    color_profile = (
-        f"{profile_cfg['color_width']}x{profile_cfg['color_height']}x{profile_cfg['color_fps']}"
-    )
-    depth_profile = (
-        f"{profile_cfg['depth_width']}x{profile_cfg['depth_height']}x{profile_cfg['depth_fps']}"
-    )
-    infra_profile = (
-        f"{profile_cfg['infrared_width']}x{profile_cfg['infrared_height']}x{profile_cfg['infrared_fps']}"
-    )
+    if not profile_cfg.get("color_enabled", True):
+        raise RuntimeError(f"Camera '{target_camera_name}' has color_enabled=false, cannot launch image view")
 
-    params = {
-        "camera_name": namespace,
-        "serial_no": camera_cfg["serial_number"],
-        "enable_color": profile_cfg.get("color_enabled", True),
-        "rgb_camera.color_profile": color_profile,
-        "rgb_camera.color_format": profile_cfg.get("color_format", "RGB8"),
-        "enable_depth": profile_cfg.get("depth_enabled", False),
-        "depth_module.depth_profile": depth_profile,
-        "depth_module.depth_format": profile_cfg.get("depth_format", "Z16"),
-        "enable_infra": profile_cfg.get("infrared_enabled", False),
-        "enable_infra1": profile_cfg.get("infrared_enabled", False),
-        "enable_infra2": False,
-        "depth_module.infra_profile": infra_profile,
-        "pointcloud.enable": profile_cfg.get("point_cloud_enabled", False),
-        "align_depth.enable": profile_cfg.get("align_depth_enabled", False),
-        "publish_tf": profile_cfg.get("publish_tf", True),
-        "tf_publish_rate": profile_cfg.get("tf_publish_rate", 0.0),
-        "base_frame_id": profile_cfg.get("base_frame_id", "link"),
+    namespace = camera_cfg["namespace"]
+    return namespace, {
+        "camera_name": target_camera_name,
+        "serial_number": camera_cfg["serial_number"],
+        "frame_id": camera_cfg["frame_id"],
+        "image_topic": "image_raw",
+        "color_width": profile_cfg["color_width"],
+        "color_height": profile_cfg["color_height"],
+        "color_fps": profile_cfg["color_fps"],
+        "color_encoding": profile_cfg["color_encoding"],
     }
-    return namespace, params
 
 
 def _launch_setup(context, *args, **kwargs):
     cameras_config_path = LaunchConfiguration("cameras_config").perform(context)
-    defaults_config_path = LaunchConfiguration("realsense_defaults_config").perform(context)
+    defaults_config_path = LaunchConfiguration("orbbec_defaults_config").perform(context)
     target_camera_name = LaunchConfiguration("camera_name").perform(context)
     respawn = _parse_bool(LaunchConfiguration("respawn").perform(context))
     respawn_delay = _parse_nonnegative_float(
@@ -107,13 +90,12 @@ def _launch_setup(context, *args, **kwargs):
     defaults_cfg = _load_yaml(defaults_config_path)
 
     namespace, camera_params = _build_camera_params(target_camera_name, cameras_cfg, defaults_cfg)
-    camera_topic_prefix = f"/{namespace}/{namespace}"
 
     return [
         Node(
-            package="realsense2_camera",
-            executable="realsense2_camera_node",
-            name=namespace,
+            package="camera_system",
+            executable="orbbec_camera_node",
+            name="orbbec_camera_node",
             namespace=namespace,
             output="screen",
             parameters=[camera_params],
@@ -126,7 +108,7 @@ def _launch_setup(context, *args, **kwargs):
             name=f"{namespace}_image_view",
             namespace="",
             output="screen",
-            remappings=[("image", f"{camera_topic_prefix}/color/image_raw")],
+            remappings=[("image", f"/{namespace}/image_raw")],
             parameters=[
                 {
                     "reliability": "best_effort",
@@ -141,20 +123,16 @@ def _launch_setup(context, *args, **kwargs):
 
 
 def generate_launch_description():
-    try:
-        pkg_share = Path(get_package_share_directory("camera_system"))
-        default_cameras_config = str(pkg_share / "bringup" / "config" / "cameras.yaml")
-        default_realsense_defaults = str(pkg_share / "bringup" / "config" / "realsense_defaults.yaml")
-    except PackageNotFoundError:
-        bringup_dir = Path(__file__).resolve().parents[1]
-        default_cameras_config = str(bringup_dir / "config" / "cameras.yaml")
-        default_realsense_defaults = str(bringup_dir / "config" / "realsense_defaults.yaml")
+    pkg_share = Path(get_package_share_directory("camera_system"))
+
+    default_cameras_config = str(pkg_share / "bringup" / "config" / "cameras.yaml")
+    default_orbbec_defaults = str(pkg_share / "bringup" / "config" / "orbbec_defaults.yaml")
 
     return LaunchDescription([
         DeclareLaunchArgument(
             "camera_name",
-            default_value="cam_high",
-            description="Camera key in cameras.yaml for the RealSense device to launch.",
+            default_value="cam_left_wrist",
+            description="Camera key in cameras.yaml for the Orbbec device to launch.",
         ),
         DeclareLaunchArgument(
             "cameras_config",
@@ -162,24 +140,24 @@ def generate_launch_description():
             description="Path to the camera inventory YAML file.",
         ),
         DeclareLaunchArgument(
-            "realsense_defaults_config",
-            default_value=default_realsense_defaults,
-            description="Path to the RealSense profile defaults YAML file.",
+            "orbbec_defaults_config",
+            default_value=default_orbbec_defaults,
+            description="Path to the Orbbec profile defaults YAML file.",
         ),
         DeclareLaunchArgument(
             "use_showimage",
-            default_value="true",
-            description="Whether to start image_tools/showimage for the RealSense color image.",
+            default_value="false",
+            description="Whether to start image_tools/showimage for the Orbbec color image.",
         ),
         DeclareLaunchArgument(
             "respawn",
             default_value="true",
-            description="Respawn the RealSense driver node after unexpected exits.",
+            description="Respawn the Orbbec driver node after unexpected exits.",
         ),
         DeclareLaunchArgument(
             "respawn_delay",
             default_value="2.0",
-            description="Delay in seconds before the RealSense driver node is restarted.",
+            description="Delay in seconds before the Orbbec driver node is restarted.",
         ),
         OpaqueFunction(function=_launch_setup),
     ])
