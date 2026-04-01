@@ -21,7 +21,7 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, RegisterEventHandler
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, RegisterEventHandler, TimerAction
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -113,6 +113,22 @@ def resolve_topics_arg(arg_value: str, config: dict, key: str, fallback) -> list
         return topics or list(fallback)
 
     return list(fallback)
+
+
+def parse_nonnegative_float_arg(arg_value: str, *, name: str) -> float:
+    try:
+        value = float(arg_value)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"Launch argument '{name}' must be a non-negative float, got {arg_value!r}."
+        ) from exc
+
+    if value < 0.0:
+        raise RuntimeError(
+            f"Launch argument '{name}' must be a non-negative float, got {arg_value!r}."
+        )
+
+    return value
 
 
 class TrackerTeleopRosbagRecorder:
@@ -639,6 +655,18 @@ def generate_launch_description():
             description="Camera key in cameras.yaml for the RealSense top camera.",
         ),
         DeclareLaunchArgument(
+            "camera_start_interval", default_value="4.0",
+            description="Seconds between successive camera startup stages on real hardware.",
+        ),
+        DeclareLaunchArgument(
+            "camera_respawn", default_value="true",
+            description="Respawn camera driver nodes after unexpected exits.",
+        ),
+        DeclareLaunchArgument(
+            "camera_respawn_delay", default_value="2.0",
+            description="Delay in seconds before a failed camera driver node is restarted.",
+        ),
+        DeclareLaunchArgument(
             "cameras_config",
             default_value=PathJoinSubstitution(
                 [FindPackageShare("camera_system"), "bringup", "config", "cameras.yaml"]
@@ -715,6 +743,18 @@ def launch_setup(context):
     start_cameras_value = LaunchConfiguration("start_cameras").perform(context).lower() == "true"
     show_camera_views_value = LaunchConfiguration("show_camera_views").perform(context).lower() == "true"
     high_camera_name_value = LaunchConfiguration("high_camera_name").perform(context)
+    camera_start_interval_value = parse_nonnegative_float_arg(
+        LaunchConfiguration("camera_start_interval").perform(context),
+        name="camera_start_interval",
+    )
+    camera_respawn_value = _parse_bool(
+        LaunchConfiguration("camera_respawn").perform(context),
+        True,
+    )
+    camera_respawn_delay_value = parse_nonnegative_float_arg(
+        LaunchConfiguration("camera_respawn_delay").perform(context),
+        name="camera_respawn_delay",
+    )
     cameras_config_path = LaunchConfiguration("cameras_config").perform(context)
 
     pkg = LaunchConfiguration("description_package").perform(context)
@@ -836,49 +876,91 @@ def launch_setup(context):
         left_namespace = resolve_camera_namespace(cameras_cfg, "cam_left_wrist")
         right_namespace = resolve_camera_namespace(cameras_cfg, "cam_right_wrist")
         high_namespace = resolve_camera_namespace(cameras_cfg, high_camera_name_value)
+        camera_respawn_arg = str(camera_respawn_value).lower()
+        camera_respawn_delay_arg = f"{camera_respawn_delay_value:g}"
 
+        # Start cameras one by one to reduce startup contention on the shared USB hub.
         camera_actions.extend([
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    PathJoinSubstitution(
-                        [FindPackageShare("camera_system"), "bringup", "launch", "dual_wrist_orbbec.launch.py"]
-                    )
-                ),
-                launch_arguments={
-                    "cameras_config": cameras_config_path,
-                    "use_showimage": "false",
-                }.items(),
+            TimerAction(
+                period=0.0,
+                actions=[
+                    IncludeLaunchDescription(
+                        PythonLaunchDescriptionSource(
+                            PathJoinSubstitution(
+                                [FindPackageShare("camera_system"), "bringup", "launch", "single_realsense.launch.py"]
+                            )
+                        ),
+                        launch_arguments={
+                            "camera_name": high_camera_name_value,
+                            "cameras_config": cameras_config_path,
+                            "use_showimage": "false",
+                            "respawn": camera_respawn_arg,
+                            "respawn_delay": camera_respawn_delay_arg,
+                        }.items(),
+                    ),
+                ],
             ),
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(
-                    PathJoinSubstitution(
-                        [FindPackageShare("camera_system"), "bringup", "launch", "single_realsense.launch.py"]
-                    )
-                ),
-                launch_arguments={
-                    "camera_name": high_camera_name_value,
-                    "cameras_config": cameras_config_path,
-                    "use_showimage": "false",
-                }.items(),
+            TimerAction(
+                period=camera_start_interval_value,
+                actions=[
+                    IncludeLaunchDescription(
+                        PythonLaunchDescriptionSource(
+                            PathJoinSubstitution(
+                                [FindPackageShare("camera_system"), "bringup", "launch", "single_orbbec.launch.py"]
+                            )
+                        ),
+                        launch_arguments={
+                            "camera_name": "cam_left_wrist",
+                            "cameras_config": cameras_config_path,
+                            "use_showimage": "false",
+                            "respawn": camera_respawn_arg,
+                            "respawn_delay": camera_respawn_delay_arg,
+                        }.items(),
+                    ),
+                ],
+            ),
+            TimerAction(
+                period=2.0 * camera_start_interval_value,
+                actions=[
+                    IncludeLaunchDescription(
+                        PythonLaunchDescriptionSource(
+                            PathJoinSubstitution(
+                                [FindPackageShare("camera_system"), "bringup", "launch", "single_orbbec.launch.py"]
+                            )
+                        ),
+                        launch_arguments={
+                            "camera_name": "cam_right_wrist",
+                            "cameras_config": cameras_config_path,
+                            "use_showimage": "false",
+                            "respawn": camera_respawn_arg,
+                            "respawn_delay": camera_respawn_delay_arg,
+                        }.items(),
+                    ),
+                ],
             ),
         ])
 
         if show_camera_views_value:
             camera_actions.append(
-                Node(
-                    package="marvin_system",
-                    executable="tracker_camera_dashboard.py",
-                    name="tracker_camera_dashboard",
-                    output="screen",
-                    parameters=[{
-                        "window_title": "Marvin Tracker Camera Dashboard",
-                        "left_camera_title": "Left Wrist",
-                        "right_camera_title": "Right Wrist",
-                        "high_camera_title": "High Camera",
-                        "left_image_topic": f"/{left_namespace}/image_raw",
-                        "right_image_topic": f"/{right_namespace}/image_raw",
-                        "high_image_topic": f"/{high_namespace}/{high_namespace}/color/image_raw",
-                    }],
+                TimerAction(
+                    period=3.0 * camera_start_interval_value,
+                    actions=[
+                        Node(
+                            package="marvin_system",
+                            executable="tracker_camera_dashboard.py",
+                            name="tracker_camera_dashboard",
+                            output="screen",
+                            parameters=[{
+                                "window_title": "Marvin Tracker Camera Dashboard",
+                                "left_camera_title": "Left Wrist",
+                                "right_camera_title": "Right Wrist",
+                                "high_camera_title": "High Camera",
+                                "left_image_topic": f"/{left_namespace}/image_raw",
+                                "right_image_topic": f"/{right_namespace}/image_raw",
+                                "high_image_topic": f"/{high_namespace}/{high_namespace}/color/image_raw",
+                            }],
+                        ),
+                    ],
                 )
             )
 

@@ -300,10 +300,6 @@ void TrackerTeleopController::fillArmTargetFromTracker(
                     tf_wrist.translation.y * position_scale_,
                     tf_wrist.translation.z * position_scale_));
 
-    if (!enable_orientation_) {
-        chest_T_wrist.setRotation(tf2::Quaternion::getIdentity());
-    }
-
     tf2::Transform shoulder_T_wrist = shoulder_T_chest * chest_T_wrist;
     tf2::Transform shoulder_T_ee_tf = shoulder_T_wrist * wrist_T_ee_[arm];
 
@@ -312,7 +308,6 @@ void TrackerTeleopController::fillArmTargetFromTracker(
     ee_pos.setX(shoulder_T_chest.getOrigin().x() + offset_x * base_x_scale_);
     shoulder_T_ee_tf.setOrigin(ee_pos);
 
-    base_T_ee.header.frame_id = base_frame_;
     base_T_ee.header.stamp = snap.chest_T_hand.header.stamp;
     base_T_ee.pose.position.x = shoulder_T_ee_tf.getOrigin().x();
     base_T_ee.pose.position.y = shoulder_T_ee_tf.getOrigin().y();

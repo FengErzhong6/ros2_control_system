@@ -497,7 +497,6 @@ void TrackerTeleopController::computeAndPublishFK()
         }
 
         geometry_msgs::msg::PoseStamped base_T_tcp;
-        base_T_tcp.header.frame_id = base_frame_;
         base_T_tcp.header.stamp = get_node()->get_clock()->now();
         matrix4ToPose(tcp_mat, base_T_tcp);
         pub_current_pose_[arm]->publish(base_T_tcp);

@@ -26,9 +26,7 @@ controller_interface::CallbackReturn TrackerTeleopController::on_init()
         auto_declare<std::string>("tracker_frames.right_upper_arm", "tracker_right_upper_arm");
 
         auto_declare<double>("position_scale", 1.0);
-        auto_declare<bool>("enable_orientation", true);
         auto_declare<bool>("enable_ik_reference_logs", false);
-        auto_declare<std::string>("base_frame", "base_link");
         auto_declare<double>("j4_bound", 0.0);
         auto_declare<double>("dh_d1", 0.0);
         auto_declare<std::vector<std::string>>("viz_base_frames", {"Base_L", "Base_R"});
@@ -104,8 +102,7 @@ TrackerTeleopController::on_configure(const rclcpp_lifecycle::State &)
     createRosInterfaces();
 
     const auto logger = get_node()->get_logger();
-    RCLCPP_INFO(logger, "TrackerTeleopController configured (scale=%.2f, orientation=%s)",
-                position_scale_, enable_orientation_ ? "ON" : "OFF");
+    RCLCPP_INFO(logger, "TrackerTeleopController configured (scale=%.2f)", position_scale_);
     publishTeleopState("configured: teleop locked until armed");
     return CallbackReturn::SUCCESS;
 }
@@ -198,7 +195,6 @@ bool TrackerTeleopController::seedTrackingStateFromCurrentJoints(size_t arm)
     }
 
     geometry_msgs::msg::PoseStamped base_T_ee;
-    base_T_ee.header.frame_id = base_frame_;
     base_T_ee.header.stamp = get_node()->get_clock()->now();
     matrix4ToPose(tcp_mat, base_T_ee);
 

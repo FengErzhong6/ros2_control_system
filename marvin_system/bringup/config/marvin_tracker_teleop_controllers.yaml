@@ -40,8 +40,6 @@ tracker_teleop_controller:
     tracker_timeout_sec: 0.1  # tracker 输入超时后进入 hold，停止追踪旧目标
 
     # ── 目标映射 / 末端跟踪 ───────────────────────────────────────────────
-    base_frame: "base_link"
-    enable_orientation: true   # 是否跟踪手腕姿态
     enable_ik_reference_logs: false  # 是否打印详细 IK 参考/候选链日志
     position_scale: 1.0        # chest_T_wrist 平移缩放因子
     base_x_scale: 1.0          # 基座 x 方向缩放因子

@@ -98,9 +98,7 @@ private:
     // Parameters
     double position_scale_{1.0};
     double base_x_scale_{1.0};
-    bool enable_orientation_{true};
     bool enable_ik_reference_logs_{false};
-    std::string base_frame_{"base_link"};
     inline static constexpr std::array<double, 3> kDefaultShoulderVElbow{
         {0.0, 0.0, -1.0}};
     double j4_bound_{0.0};

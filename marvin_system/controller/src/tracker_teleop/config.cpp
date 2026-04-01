@@ -88,9 +88,7 @@ bool TrackerTeleopController::loadControllerParameters()
     auto node = get_node();
 
     node->get_parameter("position_scale", position_scale_);
-    node->get_parameter("enable_orientation", enable_orientation_);
     node->get_parameter("enable_ik_reference_logs", enable_ik_reference_logs_);
-    node->get_parameter("base_frame", base_frame_);
     node->get_parameter("j4_bound", j4_bound_);
     node->get_parameter("dh_d1", dh_d1_);
     node->get_parameter("smoothing_alpha", smoothing_alpha_);
