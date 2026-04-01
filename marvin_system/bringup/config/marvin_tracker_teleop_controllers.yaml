@@ -76,10 +76,10 @@ tracker_teleop_controller:
 
       # 候选解评分权重
       score:
-        desired_dir_weight: 0.06
+        desired_dir_weight: 1.0
         continuity_dir_weight: 0.05
         magnitude_weight: 0.05
-        psi_delta_weight: 0.00
+        psi_delta_weight: 1.0
         branch_switch_penalty: 20.0
 
     # ── 输出平滑 / 限速 ──────────────────────────────────────────────────
@@ -99,7 +99,7 @@ tracker_teleop_controller:
     # 肘向量方向修正 [roll, pitch, yaw] (deg)，在 shoulder 系下对 elbow 方向施加旋转
     elbow_direction_correction:
       left:  [0.0, 0.0, 0.0]
-      right: [0.0, 0.0, 0.0]
+      right: [3.8, -0.8, -7.3]
 
     # ── 刚体变换 (position [x,y,z] + orientation [qx,qy,qz,qw])，均为 ROS 系 ──
     #

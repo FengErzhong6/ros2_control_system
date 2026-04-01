@@ -185,6 +185,8 @@ private:
         bool arm_valid{false};
         bool has_base_T_ee{false};
         geometry_msgs::msg::PoseStamped base_T_ee;
+        bool tracker_y_axis_valid{false};
+        std::array<double, 3> tracker_y_axis{{0.0, 0.0, -1.0}};
         std::array<double, 3> shoulder_v_elbow{{0.0, 0.0, -1.0}};
         IKResult dir_result{IKResult::kNoTarget};
         IKResult ref_result{IKResult::kNoTarget};
@@ -298,7 +300,8 @@ private:
     void fillArmTargetFromTracker(
         size_t arm, const CachedTrackerData &snap,
         geometry_msgs::msg::PoseStamped &base_T_ee,
-        std::array<double, 3> &shoulder_v_elbow) const;
+        std::array<double, 3> &shoulder_v_elbow,
+        std::array<double, 3> *tracker_y_axis = nullptr) const;
     void filterShoulderElbowDirection(
         size_t arm, bool arm_valid, std::array<double, 3> &shoulder_v_elbow);
     bool applyTrackerTargetHysteresis(
@@ -311,6 +314,10 @@ private:
                           const rclcpp::Time &now, double dt, bool force_reacquire);
     std::string buildIkLogChain(const ArmDiagnostics &diag) const;
     void logArmDiagnostics(size_t arm, const ArmDiagnostics &diag);
+    bool readCurrentJointPositions(
+        size_t arm, std::array<double, kJointsPerArm> &joints_rad) const;
+    bool computeCurrentUpperArmDir(
+        size_t arm, std::array<double, 3> &upper_arm_dir) const;
     void handleSetArmed(
         const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
         std::shared_ptr<std_srvs::srv::SetBool::Response> response);

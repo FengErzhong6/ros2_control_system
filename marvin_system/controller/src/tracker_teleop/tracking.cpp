@@ -272,7 +272,8 @@ void TrackerTeleopController::applySmoothedCommand(size_t arm, double dt)
 void TrackerTeleopController::fillArmTargetFromTracker(
     size_t arm, const CachedTrackerData &snap,
     geometry_msgs::msg::PoseStamped &base_T_ee,
-    std::array<double, 3> &shoulder_v_elbow) const
+    std::array<double, 3> &shoulder_v_elbow,
+    std::array<double, 3> *tracker_y_axis) const
 {
     const tf2::Transform &shoulder_T_chest = shoulder_T_chest_[arm];
     const auto &tf_wrist = snap.chest_T_hand.transform;
@@ -308,6 +309,9 @@ void TrackerTeleopController::fillArmTargetFromTracker(
     base_T_ee.pose.orientation.w = ee_q.w();
 
     shoulder_v_elbow = shoulder_v_elbow_default_;
+    if (tracker_y_axis) {
+        *tracker_y_axis = shoulder_v_elbow_default_;
+    }
     if (!snap.arm_valid) {
         return;
     }
@@ -321,8 +325,12 @@ void TrackerTeleopController::fillArmTargetFromTracker(
         arm_human_T_arm_robot_[arm].getRotation();
 
     tf2::Matrix3x3 shoulder_M_arm_robot(shoulder_R_arm_robot);
+    const tf2::Vector3 raw_tracker_y = shoulder_M_arm_robot.getColumn(1);
+    if (tracker_y_axis) {
+        *tracker_y_axis = {{raw_tracker_y.x(), raw_tracker_y.y(), raw_tracker_y.z()}};
+    }
     tf2::Vector3 corrected = tf2::quatRotate(
-        elbow_dir_correction_[arm], shoulder_M_arm_robot.getColumn(1));
+        elbow_dir_correction_[arm], raw_tracker_y);
     shoulder_v_elbow = {{corrected.x(), corrected.y(), corrected.z()}};
 }
 
@@ -484,7 +492,8 @@ void TrackerTeleopController::handleFreshTrackerUpdate(size_t arm, const CachedT
 
     geometry_msgs::msg::PoseStamped base_T_ee;
     std::array<double, 3> shoulder_v_elbow{};
-    fillArmTargetFromTracker(arm, snap, base_T_ee, shoulder_v_elbow);
+    std::array<double, 3> tracker_y_axis{};
+    fillArmTargetFromTracker(arm, snap, base_T_ee, shoulder_v_elbow, &tracker_y_axis);
     filterShoulderElbowDirection(arm, snap.arm_valid, shoulder_v_elbow);
     if (applyTrackerTargetHysteresis(arm, base_T_ee, shoulder_v_elbow) &&
         runtime.last_tracker_ik_succeeded) {
@@ -497,6 +506,8 @@ void TrackerTeleopController::handleFreshTrackerUpdate(size_t arm, const CachedT
     diag.arm_valid = snap.arm_valid;
     diag.has_base_T_ee = true;
     diag.base_T_ee = base_T_ee;
+    diag.tracker_y_axis_valid = snap.arm_valid;
+    diag.tracker_y_axis = tracker_y_axis;
     diag.shoulder_v_elbow = shoulder_v_elbow;
 
     const double shoulder_v_elbow_arr[3] = {

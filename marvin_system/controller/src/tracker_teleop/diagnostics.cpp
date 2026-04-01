@@ -1,5 +1,6 @@
 #include "internal.hpp"
 
+#include <iomanip>
 #include <sstream>
 #include <string>
 
@@ -84,25 +85,132 @@ std::string TrackerTeleopController::buildIkLogChain(const ArmDiagnostics &diag)
     return chain.str();
 }
 
+bool TrackerTeleopController::readCurrentJointPositions(
+    size_t arm, std::array<double, kJointsPerArm> &joints_rad) const
+{
+    if (arm >= kArmCount) {
+        return false;
+    }
+
+    const size_t offset = arm * kJointsPerArm;
+    bool has_state = true;
+    for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+        const size_t idx = offset + joint;
+        if (!state_interfaces_pos_[idx]) {
+            has_state = false;
+            break;
+        }
+
+        const auto pos_opt = state_interfaces_pos_[idx]->get_optional<double>();
+        if (!pos_opt.has_value()) {
+            has_state = false;
+            break;
+        }
+        joints_rad[joint] = pos_opt.value();
+    }
+
+    return has_state;
+}
+
+bool TrackerTeleopController::computeCurrentUpperArmDir(
+    size_t arm, std::array<double, 3> &upper_arm_dir) const
+{
+    std::array<double, kJointsPerArm> joints_rad{};
+    if (!readCurrentJointPositions(arm, joints_rad)) {
+        return false;
+    }
+
+    return extractSolvedUpperArmDir(
+        static_cast<FX_INT32L>(arm), joints_rad, upper_arm_dir);
+}
+
 void TrackerTeleopController::logArmDiagnostics(size_t arm, const ArmDiagnostics &diag)
 {
     const auto logger = get_node()->get_logger();
     const std::string chain = buildIkLogChain(diag);
+    std::array<double, 3> current_upper_arm_dir{};
+    const bool current_upper_arm_dir_valid =
+        computeCurrentUpperArmDir(arm, current_upper_arm_dir);
+    const double current_upper_arm_dir_angle_deg =
+        current_upper_arm_dir_valid ?
+            angleBetweenVectorsDeg(diag.shoulder_v_elbow, current_upper_arm_dir) :
+            0.0;
+    const std::string tracker_y_str = [&diag]() {
+        if (!diag.tracker_y_axis_valid) {
+            return std::string("NA");
+        }
+        std::ostringstream oss;
+        oss << "[" << std::fixed << std::setprecision(3)
+            << diag.tracker_y_axis[0] << ", "
+            << diag.tracker_y_axis[1] << ", "
+            << diag.tracker_y_axis[2] << "]";
+        return oss.str();
+    }();
 
     if (diag.has_solution) {
         if (diag.solved_upper_arm_dir_valid) {
+            if (current_upper_arm_dir_valid) {
+                RCLCPP_INFO(
+                    logger,
+                    "Arm %zu IK | shoulder_T_ee=[%.4f, %.4f, %.4f] quat=[%.4f, %.4f, %.4f, %.4f] "
+                    "| tracker_y=%s | desired_upper_arm_dir=[%.3f, %.3f, %.3f] "
+                    "| actual_nsp_y=[%.3f, %.3f, %.3f] "
+                    "| solved_nsp_y=[%.3f, %.3f, %.3f] | actual_nsp_dir=%.4fdeg | %s "
+                    "| q=[%.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f] deg",
+                    arm,
+                    diag.base_T_ee.pose.position.x, diag.base_T_ee.pose.position.y,
+                    diag.base_T_ee.pose.position.z - dh_d1_,
+                    diag.base_T_ee.pose.orientation.x, diag.base_T_ee.pose.orientation.y,
+                    diag.base_T_ee.pose.orientation.z, diag.base_T_ee.pose.orientation.w,
+                    tracker_y_str.c_str(),
+                    diag.shoulder_v_elbow[0], diag.shoulder_v_elbow[1], diag.shoulder_v_elbow[2],
+                    current_upper_arm_dir[0], current_upper_arm_dir[1], current_upper_arm_dir[2],
+                    diag.solved_upper_arm_dir[0], diag.solved_upper_arm_dir[1], diag.solved_upper_arm_dir[2],
+                    current_upper_arm_dir_angle_deg,
+                    chain.c_str(),
+                    diag.q_joints_rad[0] * kRad2Deg, diag.q_joints_rad[1] * kRad2Deg,
+                    diag.q_joints_rad[2] * kRad2Deg, diag.q_joints_rad[3] * kRad2Deg,
+                    diag.q_joints_rad[4] * kRad2Deg, diag.q_joints_rad[5] * kRad2Deg,
+                    diag.q_joints_rad[6] * kRad2Deg);
+                return;
+            }
             RCLCPP_INFO(
                 logger,
                 "Arm %zu IK | shoulder_T_ee=[%.4f, %.4f, %.4f] quat=[%.4f, %.4f, %.4f, %.4f] "
-                "| elbow=[%.3f, %.3f, %.3f] | solved_elbow=[%.3f, %.3f, %.3f] | %s "
+                "| tracker_y=%s | desired_upper_arm_dir=[%.3f, %.3f, %.3f] "
+                "| actual_nsp_y=NA | solved_nsp_y=[%.3f, %.3f, %.3f] | %s "
                 "| q=[%.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f] deg",
                 arm,
                 diag.base_T_ee.pose.position.x, diag.base_T_ee.pose.position.y,
                 diag.base_T_ee.pose.position.z - dh_d1_,
                 diag.base_T_ee.pose.orientation.x, diag.base_T_ee.pose.orientation.y,
                 diag.base_T_ee.pose.orientation.z, diag.base_T_ee.pose.orientation.w,
+                tracker_y_str.c_str(),
                 diag.shoulder_v_elbow[0], diag.shoulder_v_elbow[1], diag.shoulder_v_elbow[2],
                 diag.solved_upper_arm_dir[0], diag.solved_upper_arm_dir[1], diag.solved_upper_arm_dir[2],
+                chain.c_str(),
+                diag.q_joints_rad[0] * kRad2Deg, diag.q_joints_rad[1] * kRad2Deg,
+                diag.q_joints_rad[2] * kRad2Deg, diag.q_joints_rad[3] * kRad2Deg,
+                diag.q_joints_rad[4] * kRad2Deg, diag.q_joints_rad[5] * kRad2Deg,
+                diag.q_joints_rad[6] * kRad2Deg);
+            return;
+        }
+        if (current_upper_arm_dir_valid) {
+            RCLCPP_INFO(
+                logger,
+                "Arm %zu IK | shoulder_T_ee=[%.4f, %.4f, %.4f] quat=[%.4f, %.4f, %.4f, %.4f] "
+                "| tracker_y=%s | desired_upper_arm_dir=[%.3f, %.3f, %.3f] | actual_nsp_y=[%.3f, %.3f, %.3f] "
+                "| actual_nsp_dir=%.4fdeg | %s "
+                "| q=[%.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f] deg",
+                arm,
+                diag.base_T_ee.pose.position.x, diag.base_T_ee.pose.position.y,
+                diag.base_T_ee.pose.position.z - dh_d1_,
+                diag.base_T_ee.pose.orientation.x, diag.base_T_ee.pose.orientation.y,
+                diag.base_T_ee.pose.orientation.z, diag.base_T_ee.pose.orientation.w,
+                tracker_y_str.c_str(),
+                diag.shoulder_v_elbow[0], diag.shoulder_v_elbow[1], diag.shoulder_v_elbow[2],
+                current_upper_arm_dir[0], current_upper_arm_dir[1], current_upper_arm_dir[2],
+                current_upper_arm_dir_angle_deg,
                 chain.c_str(),
                 diag.q_joints_rad[0] * kRad2Deg, diag.q_joints_rad[1] * kRad2Deg,
                 diag.q_joints_rad[2] * kRad2Deg, diag.q_joints_rad[3] * kRad2Deg,
@@ -113,13 +221,14 @@ void TrackerTeleopController::logArmDiagnostics(size_t arm, const ArmDiagnostics
         RCLCPP_INFO(
             logger,
             "Arm %zu IK | shoulder_T_ee=[%.4f, %.4f, %.4f] quat=[%.4f, %.4f, %.4f, %.4f] "
-            "| elbow=[%.3f, %.3f, %.3f] | %s "
+            "| tracker_y=%s | desired_upper_arm_dir=[%.3f, %.3f, %.3f] | actual_nsp_y=NA | %s "
             "| q=[%.1f, %.1f, %.1f, %.1f, %.1f, %.1f, %.1f] deg",
             arm,
             diag.base_T_ee.pose.position.x, diag.base_T_ee.pose.position.y,
             diag.base_T_ee.pose.position.z - dh_d1_,
             diag.base_T_ee.pose.orientation.x, diag.base_T_ee.pose.orientation.y,
             diag.base_T_ee.pose.orientation.z, diag.base_T_ee.pose.orientation.w,
+            tracker_y_str.c_str(),
             diag.shoulder_v_elbow[0], diag.shoulder_v_elbow[1], diag.shoulder_v_elbow[2],
             chain.c_str(),
             diag.q_joints_rad[0] * kRad2Deg, diag.q_joints_rad[1] * kRad2Deg,
@@ -129,15 +238,34 @@ void TrackerTeleopController::logArmDiagnostics(size_t arm, const ArmDiagnostics
         return;
     }
 
+    if (current_upper_arm_dir_valid) {
+        RCLCPP_WARN(
+            logger,
+            "Arm %zu IK | shoulder_T_ee=[%.4f, %.4f, %.4f] quat=[%.4f, %.4f, %.4f, %.4f] "
+            "| tracker_y=%s | desired_upper_arm_dir=[%.3f, %.3f, %.3f] | actual_nsp_y=[%.3f, %.3f, %.3f] "
+            "| actual_nsp_dir=%.4fdeg | %s",
+            arm,
+            diag.base_T_ee.pose.position.x, diag.base_T_ee.pose.position.y,
+            diag.base_T_ee.pose.position.z - dh_d1_,
+            diag.base_T_ee.pose.orientation.x, diag.base_T_ee.pose.orientation.y,
+            diag.base_T_ee.pose.orientation.z, diag.base_T_ee.pose.orientation.w,
+            tracker_y_str.c_str(),
+            diag.shoulder_v_elbow[0], diag.shoulder_v_elbow[1], diag.shoulder_v_elbow[2],
+            current_upper_arm_dir[0], current_upper_arm_dir[1], current_upper_arm_dir[2],
+            current_upper_arm_dir_angle_deg,
+            chain.c_str());
+        return;
+    }
     RCLCPP_WARN(
         logger,
         "Arm %zu IK | shoulder_T_ee=[%.4f, %.4f, %.4f] quat=[%.4f, %.4f, %.4f, %.4f] "
-        "| elbow=[%.3f, %.3f, %.3f] | %s",
+        "| tracker_y=%s | desired_upper_arm_dir=[%.3f, %.3f, %.3f] | actual_nsp_y=NA | %s",
         arm,
         diag.base_T_ee.pose.position.x, diag.base_T_ee.pose.position.y,
         diag.base_T_ee.pose.position.z - dh_d1_,
         diag.base_T_ee.pose.orientation.x, diag.base_T_ee.pose.orientation.y,
         diag.base_T_ee.pose.orientation.z, diag.base_T_ee.pose.orientation.w,
+        tracker_y_str.c_str(),
         diag.shoulder_v_elbow[0], diag.shoulder_v_elbow[1], diag.shoulder_v_elbow[2],
         chain.c_str());
 }
