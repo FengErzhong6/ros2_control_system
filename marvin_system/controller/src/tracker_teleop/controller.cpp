@@ -27,19 +27,8 @@ controller_interface::CallbackReturn TrackerTeleopController::on_init()
 
         auto_declare<double>("position_scale", 1.0);
         auto_declare<bool>("enable_orientation", true);
+        auto_declare<bool>("enable_ik_reference_logs", false);
         auto_declare<std::string>("base_frame", "base_link");
-        auto_declare<std::vector<double>>("default_elbow_direction",
-                                          {0.0, 0.0, -1.0});
-        auto_declare<bool>("tracker_deadband.enabled", true);
-        auto_declare<double>("tracker_deadband.position_enter_m", 0.002);
-        auto_declare<double>("tracker_deadband.position_exit_m", 0.004);
-        auto_declare<double>("tracker_deadband.orientation_enter_deg", 1.0);
-        auto_declare<double>("tracker_deadband.orientation_exit_deg", 2.0);
-        auto_declare<double>("tracker_deadband.elbow_enter_deg", 3.0);
-        auto_declare<double>("tracker_deadband.elbow_exit_deg", 5.0);
-        auto_declare<double>("elbow_dir_filter.alpha", 0.25);
-        auto_declare<double>("elbow_dir_filter.deadband_deg", 2.0);
-        auto_declare<bool>("elbow_dir_filter.hold_last_on_invalid", true);
         auto_declare<double>("j4_bound", 0.0);
         auto_declare<double>("dh_d1", 0.0);
         auto_declare<std::vector<std::string>>("viz_base_frames", {"Base_L", "Base_R"});
@@ -164,16 +153,10 @@ void TrackerTeleopController::initializeJointTargetsFromState()
     for (size_t arm = 0; arm < kArmCount; ++arm) {
         auto &runtime = arm_state_[arm];
         runtime.last_selected_ref_dir = {
-            {shoulder_v_elbow_default_[0], shoulder_v_elbow_default_[1], shoulder_v_elbow_default_[2]}};
+            {kDefaultShoulderVElbow[0], kDefaultShoulderVElbow[1], kDefaultShoulderVElbow[2]}};
         normalizeVector(runtime.last_selected_ref_dir);
         runtime.last_selected_branch = -1;
-        runtime.accepted_shoulder_v_elbow = runtime.last_selected_ref_dir;
-        runtime.accepted_tracker_target_valid = false;
-        runtime.tracker_deadband_active = false;
-        runtime.last_tracker_ik_succeeded = false;
         (void)seedTrackingStateFromCurrentJoints(arm);
-        runtime.filtered_elbow_dir = runtime.last_selected_ref_dir;
-        runtime.filtered_elbow_dir_valid = normalizeVector(runtime.filtered_elbow_dir);
         runtime.has_valid_target = true;
     }
 }

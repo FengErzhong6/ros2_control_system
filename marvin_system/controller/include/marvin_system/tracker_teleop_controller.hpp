@@ -99,8 +99,10 @@ private:
     double position_scale_{1.0};
     double base_x_scale_{1.0};
     bool enable_orientation_{true};
+    bool enable_ik_reference_logs_{false};
     std::string base_frame_{"base_link"};
-    std::array<double, 3> shoulder_v_elbow_default_{{0.0, 0.0, -1.0}};
+    inline static constexpr std::array<double, 3> kDefaultShoulderVElbow{
+        {0.0, 0.0, -1.0}};
     double j4_bound_{0.0};
     double dh_d1_{0.0};
     rclcpp::Duration tracker_timeout_{0, 100000000};
@@ -131,20 +133,6 @@ private:
         {tf2::Quaternion::getIdentity(), tf2::Quaternion::getIdentity()}};
     /** startup seed 的 ref_dir 符号规范化，左右手分别配置. */
     std::array<double, kArmCount> startup_ref_dir_sign_{{1.0, -1.0}};
-    struct TrackerDeadbandConfig {
-        bool enabled{true};
-        double position_enter_m{0.002};
-        double position_exit_m{0.004};
-        double orientation_enter_deg{1.0};
-        double orientation_exit_deg{2.0};
-        double elbow_enter_deg{3.0};
-        double elbow_exit_deg{5.0};
-    } tracker_deadband_config_{};
-    struct ElbowDirFilterConfig {
-        double alpha{0.25};
-        double deadband_deg{2.0};
-        bool hold_last_on_invalid{true};
-    } elbow_dir_filter_config_{};
 
     // Joint command conditioning parameters
     double smoothing_alpha_{0.3};
@@ -226,16 +214,9 @@ private:
         std::array<double, kJointsPerArm> last_joint_deg{};
         std::array<double, 3> last_selected_ref_dir{{0.0, 0.0, -1.0}};
         int64_t last_selected_branch{-1};
-        geometry_msgs::msg::PoseStamped accepted_base_T_ee;
-        std::array<double, 3> accepted_shoulder_v_elbow{{0.0, 0.0, -1.0}};
-        bool accepted_tracker_target_valid{false};
-        bool tracker_deadband_active{false};
-        std::array<double, 3> filtered_elbow_dir{{0.0, 0.0, -1.0}};
-        bool filtered_elbow_dir_valid{false};
         std::array<double, kJointsPerArm> smoothed_joints_rad{};
         std::array<double, kJointsPerArm> target_joints_rad{};
         bool has_valid_target{false};
-        bool last_tracker_ik_succeeded{false};
         std::array<double, kJointsPerArm> home_joints_rad{};
         rclcpp::Time last_hand_tf_stamp{0, 0, RCL_ROS_TIME};
         rclcpp::Time last_arm_tf_stamp{0, 0, RCL_ROS_TIME};
@@ -307,12 +288,6 @@ private:
         geometry_msgs::msg::PoseStamped &base_T_ee,
         std::array<double, 3> &shoulder_v_elbow,
         std::array<double, 3> *tracker_y_axis = nullptr) const;
-    void filterShoulderElbowDirection(
-        size_t arm, bool arm_valid, std::array<double, 3> &shoulder_v_elbow);
-    bool applyTrackerTargetHysteresis(
-        size_t arm,
-        geometry_msgs::msg::PoseStamped &base_T_ee,
-        std::array<double, 3> &shoulder_v_elbow);
     void handleStaleTracker(size_t arm, const CachedTrackerData &snap, bool tracker_input_changed);
     void handleFreshTrackerUpdate(size_t arm, const CachedTrackerData &snap);
     void processArmUpdate(size_t arm, const CachedTrackerData &snap,

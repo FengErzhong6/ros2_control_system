@@ -89,38 +89,13 @@ bool TrackerTeleopController::loadControllerParameters()
 
     node->get_parameter("position_scale", position_scale_);
     node->get_parameter("enable_orientation", enable_orientation_);
+    node->get_parameter("enable_ik_reference_logs", enable_ik_reference_logs_);
     node->get_parameter("base_frame", base_frame_);
     node->get_parameter("j4_bound", j4_bound_);
     node->get_parameter("dh_d1", dh_d1_);
     node->get_parameter("smoothing_alpha", smoothing_alpha_);
     node->get_parameter("max_joint_velocity", max_joint_velocity_);
     node->get_parameter("base_x_scale", base_x_scale_);
-    node->get_parameter("tracker_deadband.enabled", tracker_deadband_config_.enabled);
-    node->get_parameter(
-        "tracker_deadband.position_enter_m",
-        tracker_deadband_config_.position_enter_m);
-    node->get_parameter(
-        "tracker_deadband.position_exit_m",
-        tracker_deadband_config_.position_exit_m);
-    node->get_parameter(
-        "tracker_deadband.orientation_enter_deg",
-        tracker_deadband_config_.orientation_enter_deg);
-    node->get_parameter(
-        "tracker_deadband.orientation_exit_deg",
-        tracker_deadband_config_.orientation_exit_deg);
-    node->get_parameter(
-        "tracker_deadband.elbow_enter_deg",
-        tracker_deadband_config_.elbow_enter_deg);
-    node->get_parameter(
-        "tracker_deadband.elbow_exit_deg",
-        tracker_deadband_config_.elbow_exit_deg);
-    node->get_parameter("elbow_dir_filter.alpha", elbow_dir_filter_config_.alpha);
-    node->get_parameter(
-        "elbow_dir_filter.deadband_deg",
-        elbow_dir_filter_config_.deadband_deg);
-    node->get_parameter(
-        "elbow_dir_filter.hold_last_on_invalid",
-        elbow_dir_filter_config_.hold_last_on_invalid);
     node->get_parameter("tracking_ik.fk_accept_tol", tracking_ik_config_.fk_accept_tol);
     node->get_parameter(
         "tracking_ik.fine_psi_range_deg",
@@ -170,28 +145,7 @@ bool TrackerTeleopController::loadControllerParameters()
     node->get_parameter("home_tolerance_deg", home_tolerance_deg);
     home_tolerance_rad_ = std::max(0.0, home_tolerance_deg) * kDeg2Rad;
 
-    std::vector<double> default_elbow_direction;
-    if (node->get_parameter("default_elbow_direction", default_elbow_direction) &&
-        default_elbow_direction.size() >= 3) {
-        shoulder_v_elbow_default_ = {
-            {default_elbow_direction[0], default_elbow_direction[1], default_elbow_direction[2]}};
-    }
-
     smoothing_alpha_ = std::clamp(smoothing_alpha_, 0.01, 1.0);
-    tracker_deadband_config_.position_enter_m = std::max(0.0, tracker_deadband_config_.position_enter_m);
-    tracker_deadband_config_.position_exit_m =
-        std::max(tracker_deadband_config_.position_enter_m, tracker_deadband_config_.position_exit_m);
-    tracker_deadband_config_.orientation_enter_deg =
-        std::max(0.0, tracker_deadband_config_.orientation_enter_deg);
-    tracker_deadband_config_.orientation_exit_deg =
-        std::max(
-            tracker_deadband_config_.orientation_enter_deg,
-            tracker_deadband_config_.orientation_exit_deg);
-    tracker_deadband_config_.elbow_enter_deg = std::max(0.0, tracker_deadband_config_.elbow_enter_deg);
-    tracker_deadband_config_.elbow_exit_deg =
-        std::max(tracker_deadband_config_.elbow_enter_deg, tracker_deadband_config_.elbow_exit_deg);
-    elbow_dir_filter_config_.alpha = std::clamp(elbow_dir_filter_config_.alpha, 0.0, 1.0);
-    elbow_dir_filter_config_.deadband_deg = std::max(0.0, elbow_dir_filter_config_.deadband_deg);
     tracking_ik_config_.fk_accept_tol = std::max(1e-9, tracking_ik_config_.fk_accept_tol);
     tracking_ik_config_.fine_psi_range_deg = std::max(0.0, tracking_ik_config_.fine_psi_range_deg);
     tracking_ik_config_.fine_psi_step_deg = std::max(0.1, tracking_ik_config_.fine_psi_step_deg);
@@ -331,30 +285,14 @@ void TrackerTeleopController::logConfigurationSummary(double home_tolerance_deg)
 {
     const auto logger = get_node()->get_logger();
 
-    RCLCPP_INFO(
-        logger, "Default shoulder_v_elbow: [%.2f, %.2f, %.2f]",
-        shoulder_v_elbow_default_[0], shoulder_v_elbow_default_[1], shoulder_v_elbow_default_[2]);
-    RCLCPP_INFO(
-        logger,
-        "Tracker deadband: %s pos[%.1f/%.1f mm] rot[%.1f/%.1f deg] elbow[%.1f/%.1f deg]",
-        tracker_deadband_config_.enabled ? "ON" : "OFF",
-        tracker_deadband_config_.position_enter_m * 1000.0,
-        tracker_deadband_config_.position_exit_m * 1000.0,
-        tracker_deadband_config_.orientation_enter_deg,
-        tracker_deadband_config_.orientation_exit_deg,
-        tracker_deadband_config_.elbow_enter_deg,
-        tracker_deadband_config_.elbow_exit_deg);
-    RCLCPP_INFO(
-        logger,
-        "Elbow dir filter: alpha=%.3f, deadband=%.1f deg, hold_last_on_invalid=%s",
-        elbow_dir_filter_config_.alpha,
-        elbow_dir_filter_config_.deadband_deg,
-        elbow_dir_filter_config_.hold_last_on_invalid ? "ON" : "OFF");
     RCLCPP_INFO(logger, "J4 bound: %.2f deg", j4_bound_);
     RCLCPP_INFO(
         logger, "Smoothing: alpha=%.3f, max_vel=%.2f rad/s",
         smoothing_alpha_, max_joint_velocity_);
     RCLCPP_INFO(logger, "Base X scale: %.3f", base_x_scale_);
+    RCLCPP_INFO(
+        logger, "IK reference logs: %s",
+        enable_ik_reference_logs_ ? "ON" : "OFF");
     RCLCPP_INFO(
         logger,
         "Tracking IK: fk_tol=%.3e fine[range=%.1f step=%.1f] fast[range=%.1f step=%.1f] "
@@ -397,9 +335,6 @@ void TrackerTeleopController::resetTrackerState()
         runtime.last_hand_tf_fresh = false;
         runtime.last_arm_tf_fresh = false;
         runtime.tracker_fresh = false;
-        runtime.accepted_tracker_target_valid = false;
-        runtime.tracker_deadband_active = false;
-        runtime.last_tracker_ik_succeeded = false;
         runtime.marker_visible = false;
     }
     tf_cache_.fill(CachedTrackerData());
@@ -420,20 +355,11 @@ void TrackerTeleopController::resetRuntimeState()
     for (auto &runtime : arm_state_) {
         runtime.last_joint_deg.fill(0.0);
         runtime.last_selected_ref_dir =
-            {{shoulder_v_elbow_default_[0], shoulder_v_elbow_default_[1], shoulder_v_elbow_default_[2]}};
+            {{kDefaultShoulderVElbow[0], kDefaultShoulderVElbow[1], kDefaultShoulderVElbow[2]}};
         runtime.last_selected_branch = -1;
-        runtime.accepted_base_T_ee = geometry_msgs::msg::PoseStamped();
-        runtime.accepted_shoulder_v_elbow =
-            {{shoulder_v_elbow_default_[0], shoulder_v_elbow_default_[1], shoulder_v_elbow_default_[2]}};
-        runtime.accepted_tracker_target_valid = false;
-        runtime.tracker_deadband_active = false;
-        runtime.filtered_elbow_dir =
-            {{shoulder_v_elbow_default_[0], shoulder_v_elbow_default_[1], shoulder_v_elbow_default_[2]}};
-        runtime.filtered_elbow_dir_valid = false;
         runtime.smoothed_joints_rad.fill(0.0);
         runtime.target_joints_rad.fill(0.0);
         runtime.has_valid_target = false;
-        runtime.last_tracker_ik_succeeded = false;
         runtime.last_ik_result = IKResult::kNoTarget;
         runtime.pending_diagnostics.sequence.store(0, std::memory_order_relaxed);
         runtime.pending_diagnostics.pending.store(false, std::memory_order_relaxed);

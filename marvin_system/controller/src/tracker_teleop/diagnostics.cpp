@@ -472,7 +472,9 @@ void TrackerTeleopController::diagnosticsTimerCallback()
             publishVizMarkers(arm, diag);
         }
 
-        logArmDiagnostics(arm, diag);
+        if (enable_ik_reference_logs_) {
+            logArmDiagnostics(arm, diag);
+        }
     }
 }
 

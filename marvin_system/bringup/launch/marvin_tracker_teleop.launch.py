@@ -669,6 +669,10 @@ def generate_launch_description():
             description="Override bag topics with a space-delimited list; use default to keep YAML setting.",
         ),
         DeclareLaunchArgument(
+            "enable_ik_reference_logs", default_value="false",
+            description="Enable verbose IK reference diagnostics logs from tracker_teleop_controller.",
+        ),
+        DeclareLaunchArgument(
             "description_package", default_value="marvin_system",
             description="Package with the composite URDF/XACRO file.",
         ),
@@ -747,6 +751,12 @@ def launch_setup(context):
         [FindPackageShare("marvin_system"), "bringup", "config",
          "marvin_tracker_teleop_controllers.yaml"]
     )
+    enable_ik_reference_logs = resolve_bool_arg(
+        LaunchConfiguration("enable_ik_reference_logs").perform(context),
+        {},
+        "enable_ik_reference_logs",
+        False,
+    )
 
     # ── Kinematics config path for TrackerTeleopController ─────────────────
     pkg_share = get_package_share_directory("marvin_system")
@@ -756,6 +766,7 @@ def launch_setup(context):
         f'tracker_teleop_controller:\n'
         f'  ros__parameters:\n'
         f'    kine_config_path: "{kine_config_path}"\n'
+        f'    enable_ik_reference_logs: {"true" if enable_ik_reference_logs else "false"}\n'
     )
     tracker_teleop_params_file = os.path.join(tempfile.mkdtemp(), "tracker_teleop_kine_params.yaml")
     with open(tracker_teleop_params_file, "w") as f:
