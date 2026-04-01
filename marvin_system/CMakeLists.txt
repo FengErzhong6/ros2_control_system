@@ -217,6 +217,8 @@ install(
 
 install(
   PROGRAMS
+    bringup/scripts/joint_trajectory_bag_replay.py
+    bringup/scripts/tracker_camera_startup_manager.py
     bringup/scripts/tracker_camera_dashboard.py
     bringup/scripts/tracker_teleop_keyboard.py
     description/scripts/joint_gui_publisher.py
