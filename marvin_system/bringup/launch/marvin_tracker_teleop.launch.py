@@ -21,10 +21,10 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, RegisterEventHandler, TimerAction
+from launch.actions import DeclareLaunchArgument, EmitEvent, OpaqueFunction, RegisterEventHandler
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
-from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.events import Shutdown
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 
 from launch_ros.actions import Node
@@ -113,22 +113,6 @@ def resolve_topics_arg(arg_value: str, config: dict, key: str, fallback) -> list
         return topics or list(fallback)
 
     return list(fallback)
-
-
-def parse_nonnegative_float_arg(arg_value: str, *, name: str) -> float:
-    try:
-        value = float(arg_value)
-    except (TypeError, ValueError) as exc:
-        raise RuntimeError(
-            f"Launch argument '{name}' must be a non-negative float, got {arg_value!r}."
-        ) from exc
-
-    if value < 0.0:
-        raise RuntimeError(
-            f"Launch argument '{name}' must be a non-negative float, got {arg_value!r}."
-        )
-
-    return value
 
 
 class TrackerTeleopRosbagRecorder:
@@ -655,16 +639,16 @@ def generate_launch_description():
             description="Camera key in cameras.yaml for the RealSense top camera.",
         ),
         DeclareLaunchArgument(
-            "camera_start_interval", default_value="4.0",
-            description="Seconds between successive camera startup stages on real hardware.",
+            "camera_ready_timeout_sec", default_value="15.0",
+            description="Timeout in seconds for one camera to publish its first image.",
         ),
         DeclareLaunchArgument(
-            "camera_respawn", default_value="true",
-            description="Respawn camera driver nodes after unexpected exits.",
+            "camera_max_start_attempts", default_value="3",
+            description="Maximum startup attempts per camera before failing the launch.",
         ),
         DeclareLaunchArgument(
-            "camera_respawn_delay", default_value="2.0",
-            description="Delay in seconds before a failed camera driver node is restarted.",
+            "camera_retry_delay_sec", default_value="1.0",
+            description="Delay in seconds before retrying a camera that failed to reach READY.",
         ),
         DeclareLaunchArgument(
             "cameras_config",
@@ -740,22 +724,46 @@ def launch_setup(context):
     gui = LaunchConfiguration("gui")
     use_mock_hardware = LaunchConfiguration("use_mock_hardware")
     use_mock_hardware_value = use_mock_hardware.perform(context).lower() == "true"
+    use_keyboard_gate_value = LaunchConfiguration("use_keyboard_gate").perform(context).lower() == "true"
     start_cameras_value = LaunchConfiguration("start_cameras").perform(context).lower() == "true"
     show_camera_views_value = LaunchConfiguration("show_camera_views").perform(context).lower() == "true"
     high_camera_name_value = LaunchConfiguration("high_camera_name").perform(context)
-    camera_start_interval_value = parse_nonnegative_float_arg(
-        LaunchConfiguration("camera_start_interval").perform(context),
-        name="camera_start_interval",
-    )
-    camera_respawn_value = _parse_bool(
-        LaunchConfiguration("camera_respawn").perform(context),
+    cameras_config_path = LaunchConfiguration("cameras_config").perform(context)
+    config_file = LaunchConfiguration("config_file").perform(context)
+    config = load_launch_config(config_file)
+    enable_joint_recording_requested = resolve_bool_arg(
+        LaunchConfiguration("enable_joint_recording").perform(context),
+        config,
+        "enable_joint_recording",
         True,
     )
-    camera_respawn_delay_value = parse_nonnegative_float_arg(
-        LaunchConfiguration("camera_respawn_delay").perform(context),
-        name="camera_respawn_delay",
+    trajectory_root = os.path.expanduser(resolve_string_arg(
+        LaunchConfiguration("trajectory_root").perform(context),
+        config,
+        "trajectory_root",
+        DEFAULT_TRAJECTORY_ROOT,
+    ))
+    trajectory_bag_prefix = resolve_string_arg(
+        LaunchConfiguration("trajectory_bag_prefix").perform(context),
+        config,
+        "trajectory_bag_prefix",
+        DEFAULT_TRAJECTORY_BAG_PREFIX,
     )
-    cameras_config_path = LaunchConfiguration("cameras_config").perform(context)
+    trajectory_bag_topics = resolve_topics_arg(
+        LaunchConfiguration("trajectory_bag_topics").perform(context),
+        config,
+        "trajectory_bag_topics",
+        DEFAULT_TRAJECTORY_TOPICS,
+    )
+    enable_joint_recording_value = (
+        enable_joint_recording_requested and not use_mock_hardware_value
+    )
+    if enable_joint_recording_requested and use_mock_hardware_value:
+        print(
+            "[marvin_tracker_teleop.launch] Joint trajectory recording is disabled "
+            "because use_mock_hardware=true.",
+            flush=True,
+        )
 
     pkg = LaunchConfiguration("description_package").perform(context)
     desc_file = LaunchConfiguration("description_file").perform(context)
@@ -876,91 +884,62 @@ def launch_setup(context):
         left_namespace = resolve_camera_namespace(cameras_cfg, "cam_left_wrist")
         right_namespace = resolve_camera_namespace(cameras_cfg, "cam_right_wrist")
         high_namespace = resolve_camera_namespace(cameras_cfg, high_camera_name_value)
-        camera_respawn_arg = str(camera_respawn_value).lower()
-        camera_respawn_delay_arg = f"{camera_respawn_delay_value:g}"
+        camera_startup_manager = Node(
+            package="marvin_system",
+            executable="tracker_camera_startup_manager.py",
+            name="tracker_camera_startup_manager",
+            output="screen",
+            parameters=[{
+                "cameras_config": cameras_config_path,
+                "high_camera_name": high_camera_name_value,
+                "ready_timeout_sec": ParameterValue(
+                    LaunchConfiguration("camera_ready_timeout_sec"),
+                    value_type=float,
+                ),
+                "max_attempts": ParameterValue(
+                    LaunchConfiguration("camera_max_start_attempts"),
+                    value_type=int,
+                ),
+                "retry_delay_sec": ParameterValue(
+                    LaunchConfiguration("camera_retry_delay_sec"),
+                    value_type=float,
+                ),
+                "monitor_runtime_failures": True,
+            }],
+        )
 
-        # Start cameras one by one to reduce startup contention on the shared USB hub.
-        camera_actions.extend([
-            TimerAction(
-                period=0.0,
-                actions=[
-                    IncludeLaunchDescription(
-                        PythonLaunchDescriptionSource(
-                            PathJoinSubstitution(
-                                [FindPackageShare("camera_system"), "bringup", "launch", "single_realsense.launch.py"]
+        camera_actions.append(camera_startup_manager)
+        camera_actions.append(
+            RegisterEventHandler(
+                OnProcessExit(
+                    target_action=camera_startup_manager,
+                    on_exit=[
+                        EmitEvent(
+                            event=Shutdown(
+                                reason="tracker_camera_startup_manager exited",
                             )
-                        ),
-                        launch_arguments={
-                            "camera_name": high_camera_name_value,
-                            "cameras_config": cameras_config_path,
-                            "use_showimage": "false",
-                            "respawn": camera_respawn_arg,
-                            "respawn_delay": camera_respawn_delay_arg,
-                        }.items(),
-                    ),
-                ],
-            ),
-            TimerAction(
-                period=camera_start_interval_value,
-                actions=[
-                    IncludeLaunchDescription(
-                        PythonLaunchDescriptionSource(
-                            PathJoinSubstitution(
-                                [FindPackageShare("camera_system"), "bringup", "launch", "single_orbbec.launch.py"]
-                            )
-                        ),
-                        launch_arguments={
-                            "camera_name": "cam_left_wrist",
-                            "cameras_config": cameras_config_path,
-                            "use_showimage": "false",
-                            "respawn": camera_respawn_arg,
-                            "respawn_delay": camera_respawn_delay_arg,
-                        }.items(),
-                    ),
-                ],
-            ),
-            TimerAction(
-                period=2.0 * camera_start_interval_value,
-                actions=[
-                    IncludeLaunchDescription(
-                        PythonLaunchDescriptionSource(
-                            PathJoinSubstitution(
-                                [FindPackageShare("camera_system"), "bringup", "launch", "single_orbbec.launch.py"]
-                            )
-                        ),
-                        launch_arguments={
-                            "camera_name": "cam_right_wrist",
-                            "cameras_config": cameras_config_path,
-                            "use_showimage": "false",
-                            "respawn": camera_respawn_arg,
-                            "respawn_delay": camera_respawn_delay_arg,
-                        }.items(),
-                    ),
-                ],
-            ),
-        ])
+                        )
+                    ],
+                )
+            )
+        )
 
         if show_camera_views_value:
             camera_actions.append(
-                TimerAction(
-                    period=3.0 * camera_start_interval_value,
-                    actions=[
-                        Node(
-                            package="marvin_system",
-                            executable="tracker_camera_dashboard.py",
-                            name="tracker_camera_dashboard",
-                            output="screen",
-                            parameters=[{
-                                "window_title": "Marvin Tracker Camera Dashboard",
-                                "left_camera_title": "Left Wrist",
-                                "right_camera_title": "Right Wrist",
-                                "high_camera_title": "High Camera",
-                                "left_image_topic": f"/{left_namespace}/image_raw",
-                                "right_image_topic": f"/{right_namespace}/image_raw",
-                                "high_image_topic": f"/{high_namespace}/{high_namespace}/color/image_raw",
-                            }],
-                        ),
-                    ],
+                Node(
+                    package="marvin_system",
+                    executable="tracker_camera_dashboard.py",
+                    name="tracker_camera_dashboard",
+                    output="screen",
+                    parameters=[{
+                        "window_title": "Marvin Tracker Camera Dashboard",
+                        "left_camera_title": "Left Wrist",
+                        "right_camera_title": "Right Wrist",
+                        "high_camera_title": "High Camera",
+                        "left_image_topic": f"/{left_namespace}/image_raw",
+                        "right_image_topic": f"/{right_namespace}/image_raw",
+                        "high_image_topic": f"/{high_namespace}/{high_namespace}/color/image_raw",
+                    }],
                 )
             )
 
@@ -1040,14 +1019,28 @@ def launch_setup(context):
         ),
     )
 
-    start_keyboard_gate_after_teleop_controller_ready = RegisterEventHandler(
-        OnProcessExit(
-            target_action=tracker_teleop_controller_spawner,
-            on_exit=[
-                OpaqueFunction(function=maybe_start_terminal_gate),
-            ],
-        ),
-    )
+    keyboard_gate_actions = []
+    if use_keyboard_gate_value:
+        keyboard_gate_node = Node(
+            package="marvin_system",
+            executable="tracker_teleop_keyboard.py",
+            name="tracker_teleop_keyboard",
+            output="screen",
+            parameters=[{
+                "enable_joint_recording": enable_joint_recording_value,
+                "trajectory_root": trajectory_root,
+                "trajectory_bag_prefix": trajectory_bag_prefix,
+                "trajectory_bag_topics": trajectory_bag_topics,
+            }],
+        )
+        keyboard_gate_actions.append(
+            RegisterEventHandler(
+                OnProcessExit(
+                    target_action=tracker_teleop_controller_spawner,
+                    on_exit=[keyboard_gate_node],
+                ),
+            )
+        )
 
     return [
         ros2_control_node,
@@ -1057,5 +1050,5 @@ def launch_setup(context):
         rviz_node,
         joint_state_broadcaster_spawner,
         start_teleop_controllers_after_feedback_ready,
-        start_keyboard_gate_after_teleop_controller_ready,
+        *keyboard_gate_actions,
     ]

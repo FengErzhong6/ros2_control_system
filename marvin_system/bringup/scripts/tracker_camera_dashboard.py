@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+from collections import deque
 import signal
 import sys
 import time
@@ -53,6 +54,7 @@ class TrackerCameraDashboard(Node):
             ),
         ]
         self.frames = {stream.key: None for stream in self.streams}
+        self._frame_times = {stream.key: deque(maxlen=60) for stream in self.streams}
         self._warned_topics = set()
 
         image_qos = QoSProfile(
@@ -82,6 +84,15 @@ class TrackerCameraDashboard(Node):
         if key in self._warned_topics:
             self._warned_topics.remove(key)
 
+        received_monotonic = time.monotonic()
+        frame_times = self._frame_times[key]
+        frame_times.append(received_monotonic)
+        fps = 0.0
+        if len(frame_times) >= 2:
+            duration = frame_times[-1] - frame_times[0]
+            if duration > 0.0:
+                fps = (len(frame_times) - 1) / duration
+
         previous = self.frames[key]
         seq = 1 if previous is None else previous["seq"] + 1
         self.frames[key] = {
@@ -89,7 +100,8 @@ class TrackerCameraDashboard(Node):
             "image": image,
             "encoding": msg.encoding,
             "stamp": msg.header.stamp,
-            "received_monotonic": time.monotonic(),
+            "received_monotonic": received_monotonic,
+            "fps": fps,
         }
 
 
@@ -125,6 +137,11 @@ class CameraPanel(QFrame):
         topic.setTextInteractionFlags(Qt.TextSelectableByMouse)
         root.addWidget(topic)
 
+        self.fps = QLabel("FPS --")
+        self.fps.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.fps.setStyleSheet("color: #7ed0ff; font-size: 13px; font-weight: 700;")
+        root.addWidget(self.fps)
+
         self.image = QLabel(self._placeholder)
         self.image.setAlignment(Qt.AlignCenter)
         self.image.setMinimumSize(320, 240)
@@ -146,12 +163,14 @@ class CameraPanel(QFrame):
         self.meta.setStyleSheet("color: #aab4c0; font-size: 12px;")
         root.addWidget(self.meta)
 
-    def set_frame(self, pixmap: QPixmap, meta_text: str) -> None:
+    def set_frame(self, pixmap: QPixmap, fps_text: str, meta_text: str) -> None:
         self._pixmap = pixmap
         self._render_pixmap()
+        self.fps.setText(fps_text)
         self.meta.setText(meta_text)
 
-    def set_meta(self, meta_text: str) -> None:
+    def set_meta(self, fps_text: str, meta_text: str) -> None:
+        self.fps.setText(fps_text)
         self.meta.setText(meta_text)
 
     def _render_pixmap(self) -> None:
@@ -241,7 +260,7 @@ class TrackerCameraDashboardWindow(QWidget):
             if frame is None:
                 continue
 
-            meta_text = self._format_meta(frame, now)
+            fps_text, meta_text = self._format_meta(frame, now)
             if frame["seq"] != self._last_seq[stream.key]:
                 image = frame["image"]
                 height, width, _ = image.shape
@@ -252,20 +271,26 @@ class TrackerCameraDashboardWindow(QWidget):
                     image.strides[0],
                     QImage.Format_RGB888,
                 ).copy()
-                panel.set_frame(QPixmap.fromImage(qimage), meta_text)
+                panel.set_frame(QPixmap.fromImage(qimage), fps_text, meta_text)
                 self._last_seq[stream.key] = frame["seq"]
             else:
-                panel.set_meta(meta_text)
+                panel.set_meta(fps_text, meta_text)
 
-    def _format_meta(self, frame: dict, now: float) -> str:
+    def _format_meta(self, frame: dict, now: float) -> tuple[str, str]:
         image = frame["image"]
         height, width, _ = image.shape
-        age_ms = max(0, int((now - frame["received_monotonic"]) * 1000.0))
+        age_sec = max(0.0, now - frame["received_monotonic"])
+        age_ms = int(age_sec * 1000.0)
+        fps = frame.get("fps", 0.0)
+        if age_sec > 1.0:
+            fps = 0.0
         if frame["stamp"].sec == 0 and frame["stamp"].nanosec == 0:
             stamp_text = "stamp unavailable"
         else:
             stamp_text = f"stamp {frame['stamp'].sec}.{frame['stamp'].nanosec:09d}"
-        return f"{width}x{height} | {frame['encoding']} | {age_ms} ms ago | {stamp_text}"
+        fps_text = f"FPS {fps:.1f}"
+        meta_text = f"{width}x{height} | {frame['encoding']} | {age_ms} ms ago | {stamp_text}"
+        return fps_text, meta_text
 
 
 def main() -> None:
