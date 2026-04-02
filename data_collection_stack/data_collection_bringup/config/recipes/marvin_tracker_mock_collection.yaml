@@ -1,0 +1,27 @@
+recipe_id: marvin_tracker_mock_collection
+devices:
+  - id: htc_tracker
+    adapter: htc
+    required: true
+    depends_on: []
+    ready_timeout_sec: 10.0
+    launch_arguments:
+      use_mock_trackers: true
+      mock_publish_rate: 60.0
+  - id: marvin_dual
+    adapter: marvin
+    required: true
+    depends_on:
+      - htc_tracker
+    ready_timeout_sec: 30.0
+    launch_arguments:
+      gui: false
+      use_mock_hardware: true
+      use_keyboard_gate: false
+      start_tracker_publisher: false
+      start_cameras: false
+      show_camera_views: false
+record_topics:
+  - /joint_states
+  - /tf
+  - /tf_static

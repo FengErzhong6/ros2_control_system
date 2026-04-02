@@ -1,0 +1,9 @@
+string recipe_id
+string site_name
+string operator_id
+---
+bool success
+string message
+---
+string current_state
+string detail

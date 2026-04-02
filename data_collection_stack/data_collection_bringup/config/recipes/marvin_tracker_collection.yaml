@@ -1,0 +1,15 @@
+recipe_id: marvin_tracker_collection
+devices:
+  - id: htc_tracker
+    adapter: htc
+    required: true
+    depends_on: []
+  - id: marvin_dual
+    adapter: marvin
+    required: true
+    depends_on:
+      - htc_tracker
+record_topics:
+  - /joint_states
+  - /tf
+  - /tf_static

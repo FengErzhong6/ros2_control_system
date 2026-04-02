@@ -1,0 +1,7 @@
+site_name: default_lab
+trackers:
+  htc_tracker:
+    namespace: htc_tracker
+    serial_number: "TODO"
+    frame_id: tracker_root
+    publish_tf: true

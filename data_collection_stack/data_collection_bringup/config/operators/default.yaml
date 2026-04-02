@@ -1,0 +1,4 @@
+operator_id: default
+session_root: ~/.ros/data_collection
+preferred_tags: []
+manus_profile: default

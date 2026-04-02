@@ -1,0 +1,8 @@
+string reason
+---
+bool success
+string session_id
+string message
+---
+string current_state
+string detail

@@ -1,0 +1,4 @@
+startup_timeout_sec: 20.0
+ready_stability_window_sec: 2.0
+retry_count: 2
+retry_backoff_sec: 1.0

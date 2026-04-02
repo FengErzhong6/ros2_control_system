@@ -627,6 +627,10 @@ def generate_launch_description():
             description="Enable terminal Space key start/stop gate for tracker teleop.",
         ),
         DeclareLaunchArgument(
+            "start_tracker_publisher", default_value="true",
+            description="Launch the HTC tracker publisher inside this bringup.",
+        ),
+        DeclareLaunchArgument(
             "start_cameras", default_value="true",
             description="Launch the three cameras when using real hardware.",
         ),
@@ -649,6 +653,13 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "camera_retry_delay_sec", default_value="1.0",
             description="Delay in seconds before retrying a camera that failed to reach READY.",
+        ),
+        DeclareLaunchArgument(
+            "trackers_config",
+            default_value=PathJoinSubstitution(
+                [FindPackageShare("htc_system"), "bringup", "config", "trackers.yaml"]
+            ),
+            description="Path to the tracker inventory YAML file.",
         ),
         DeclareLaunchArgument(
             "cameras_config",
@@ -725,6 +736,9 @@ def launch_setup(context):
     use_mock_hardware = LaunchConfiguration("use_mock_hardware")
     use_mock_hardware_value = use_mock_hardware.perform(context).lower() == "true"
     use_keyboard_gate_value = LaunchConfiguration("use_keyboard_gate").perform(context).lower() == "true"
+    start_tracker_publisher_value = (
+        LaunchConfiguration("start_tracker_publisher").perform(context).lower() == "true"
+    )
     start_cameras_value = LaunchConfiguration("start_cameras").perform(context).lower() == "true"
     show_camera_views_value = LaunchConfiguration("show_camera_views").perform(context).lower() == "true"
     high_camera_name_value = LaunchConfiguration("high_camera_name").perform(context)
@@ -821,9 +835,7 @@ def launch_setup(context):
         f.write(tracker_teleop_params_override)
 
     # ── HTC Tracker publisher config (htc_system) ──────────────────────────
-    trackers_config = PathJoinSubstitution(
-        [FindPackageShare("htc_system"), "bringup", "config", "trackers.yaml"]
-    )
+    trackers_config = LaunchConfiguration("trackers_config")
 
     # Gripper controller configs (generated per enabled gripper)
     gripper_params_files = []
@@ -870,13 +882,17 @@ def launch_setup(context):
     )
 
     # HTC Tracker publisher (broadcasts TF: world -> tracker_left_hand, tracker_torso, etc.)
-    tracker_publisher_node = Node(
-        package="htc_system",
-        executable="tracker_publisher",
-        name="tracker_publisher",
-        output="screen",
-        parameters=[trackers_config],
-    )
+    tracker_publisher_actions = []
+    if start_tracker_publisher_value:
+        tracker_publisher_actions.append(
+            Node(
+                package="htc_system",
+                executable="tracker_publisher",
+                name="tracker_publisher",
+                output="screen",
+                parameters=[trackers_config],
+            )
+        )
 
     camera_actions = []
     if start_cameras_value and not use_mock_hardware_value:
@@ -1045,7 +1061,7 @@ def launch_setup(context):
     return [
         ros2_control_node,
         robot_state_publisher_node,
-        tracker_publisher_node,
+        *tracker_publisher_actions,
         *camera_actions,
         rviz_node,
         joint_state_broadcaster_spawner,

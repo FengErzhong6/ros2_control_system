@@ -1,0 +1,9 @@
+startup:
+  timeout_sec: 20.0
+  retry_count: 2
+  retry_backoff_sec: 1.0
+
+faults:
+  preview_topic_missing: degraded
+  rosbag_write_failure: fatal
+  tracker_tf_stale: degraded

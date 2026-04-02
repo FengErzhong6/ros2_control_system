@@ -1,0 +1,5 @@
+fault_policies:
+  rosbag_write_failure: fatal
+  marvin_controller_inactive: fatal
+  tracker_tf_stale: degraded
+  preview_topic_missing: degraded

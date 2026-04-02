@@ -1,0 +1,7 @@
+bool arm_after_home
+---
+bool success
+string message
+---
+string current_state
+string detail

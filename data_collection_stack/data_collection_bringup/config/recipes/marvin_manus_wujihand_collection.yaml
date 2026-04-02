@@ -1,0 +1,25 @@
+recipe_id: marvin_manus_wujihand_collection
+devices:
+  - id: htc_tracker
+    adapter: htc
+    required: true
+    depends_on: []
+  - id: manus_glove
+    adapter: manus
+    required: true
+    depends_on: []
+  - id: wujihand
+    adapter: wujihand
+    required: false
+    depends_on: []
+  - id: marvin_dual
+    adapter: marvin
+    required: true
+    depends_on:
+      - htc_tracker
+      - manus_glove
+record_topics:
+  - /joint_states
+  - /manus/gloves/raw
+  - /tf
+  - /tf_static

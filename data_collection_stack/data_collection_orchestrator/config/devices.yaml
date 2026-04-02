@@ -1,0 +1,26 @@
+device_registry:
+  marvin:
+    adapter: marvin
+    launch_package: marvin_system
+    launch_file: marvin_tracker_teleop.launch.py
+    ready_signals:
+      - /joint_states
+      - /controller_manager/list_controllers
+  htc:
+    adapter: htc
+    launch_package: htc_system
+    launch_file: tracker_publisher.launch.py
+    ready_signals:
+      - /tf
+  manus:
+    adapter: manus
+    launch_package: manus_system
+    launch_file: manus_raw_publisher.launch.py
+    ready_signals:
+      - /manus/gloves/raw
+  camera:
+    adapter: camera
+    launch_package: camera_system
+    launch_file: camera_bringup.launch.py
+    ready_signals:
+      - /image_raw

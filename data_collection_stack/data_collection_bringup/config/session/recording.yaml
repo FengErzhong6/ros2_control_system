@@ -1,0 +1,5 @@
+session_root: ~/.ros/data_collection
+bag_directory_name: rosbag
+snapshot_recipe: true
+snapshot_site_config: true
+preview_drop_policy: latest_only

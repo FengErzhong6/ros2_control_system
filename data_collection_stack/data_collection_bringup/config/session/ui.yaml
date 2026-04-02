@@ -1,0 +1,4 @@
+refresh_hz: 20
+camera_grid_columns: 2
+enable_hotkeys: true
+default_window_title: Data Collection Console

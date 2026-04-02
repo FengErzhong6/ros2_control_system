@@ -1,0 +1,28 @@
+recipe_id: camera_preview_perf_collection
+devices:
+  - id: cam_high
+    adapter: camera
+    required: true
+    depends_on: []
+    ready_timeout_sec: 45.0
+    launch_arguments:
+      use_mock_camera: false
+  - id: cam_left_wrist
+    adapter: camera
+    required: true
+    depends_on: []
+    ready_timeout_sec: 45.0
+    launch_arguments:
+      use_mock_camera: false
+  - id: cam_right_wrist
+    adapter: camera
+    required: true
+    depends_on: []
+    ready_timeout_sec: 45.0
+    launch_arguments:
+      use_mock_camera: false
+record_topics:
+  - /cam_high/cam_high/color/image_raw
+  - /cam_high/cam_high/color/camera_info
+  - /cam_left_wrist/image_raw
+  - /cam_right_wrist/image_raw

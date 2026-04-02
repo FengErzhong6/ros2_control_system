@@ -1,0 +1,9 @@
+string operator_id
+string session_tag
+---
+bool success
+string session_id
+string message
+---
+string current_state
+string detail

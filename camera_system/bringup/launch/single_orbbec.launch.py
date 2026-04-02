@@ -76,10 +76,51 @@ def _build_camera_params(target_camera_name: str, cameras_cfg: dict, defaults_cf
     }
 
 
+def _build_preview_node(camera_cfg: dict, image_topic: str):
+    preview_topic = camera_cfg.get("preview_topic")
+    if not isinstance(preview_topic, str) or not preview_topic.strip():
+        return None
+
+    preview_topic = preview_topic.strip()
+    if preview_topic == image_topic:
+        return None
+
+    preview_fps = float(camera_cfg.get("preview_fps", 20.0))
+    if preview_fps <= 0.0:
+        raise RuntimeError("preview_fps must be positive")
+
+    parameters = {
+        "input_topic": image_topic,
+        "output_topic": preview_topic,
+        "publish_rate": preview_fps,
+        "skip_when_no_subscribers": True,
+    }
+    if "preview_width" in camera_cfg:
+        preview_width = int(camera_cfg["preview_width"])
+        if preview_width <= 0:
+            raise RuntimeError("preview_width must be a positive integer")
+        parameters["output_width"] = preview_width
+    if "preview_height" in camera_cfg:
+        preview_height = int(camera_cfg["preview_height"])
+        if preview_height <= 0:
+            raise RuntimeError("preview_height must be a positive integer")
+        parameters["output_height"] = preview_height
+
+    return Node(
+        package="camera_system",
+        executable="camera_preview_bridge",
+        name=f"{camera_cfg['namespace']}_preview_bridge",
+        namespace="",
+        output="screen",
+        parameters=[parameters],
+    )
+
+
 def _launch_setup(context, *args, **kwargs):
     cameras_config_path = LaunchConfiguration("cameras_config").perform(context)
     defaults_config_path = LaunchConfiguration("orbbec_defaults_config").perform(context)
     target_camera_name = LaunchConfiguration("camera_name").perform(context)
+    use_mock_camera = _parse_bool(LaunchConfiguration("use_mock_camera").perform(context))
     respawn = _parse_bool(LaunchConfiguration("respawn").perform(context))
     respawn_delay = _parse_nonnegative_float(
         LaunchConfiguration("respawn_delay").perform(context),
@@ -90,25 +131,53 @@ def _launch_setup(context, *args, **kwargs):
     defaults_cfg = _load_yaml(defaults_config_path)
 
     namespace, camera_params = _build_camera_params(target_camera_name, cameras_cfg, defaults_cfg)
-
-    return [
-        Node(
+    driver_node = Node(
+        package="camera_system",
+        executable="orbbec_camera_node",
+        name="orbbec_camera_node",
+        namespace=namespace,
+        output="screen",
+        parameters=[camera_params],
+        respawn=respawn,
+        respawn_delay=respawn_delay,
+    )
+    if use_mock_camera:
+        driver_node = Node(
             package="camera_system",
-            executable="orbbec_camera_node",
-            name="orbbec_camera_node",
+            executable="mock_camera_publisher.py",
+            name="mock_camera_publisher",
             namespace=namespace,
             output="screen",
-            parameters=[camera_params],
-            respawn=respawn,
-            respawn_delay=respawn_delay,
-        ),
+            parameters=[
+                {
+                    "camera_name": target_camera_name,
+                    "frame_id": camera_params["frame_id"],
+                    "image_topic": camera_params["image_topic"],
+                    "camera_info_topic": "camera_info",
+                    "publish_camera_info": False,
+                    "encoding": camera_params["color_encoding"],
+                    "width": camera_params["color_width"],
+                    "height": camera_params["color_height"],
+                    "publish_rate": LaunchConfiguration("mock_publish_rate"),
+                }
+            ],
+        )
+
+    image_topic = f"/{namespace}/image_raw"
+    nodes = [driver_node]
+
+    preview_node = _build_preview_node(camera_cfg=cameras_cfg["cameras"][target_camera_name], image_topic=image_topic)
+    if preview_node is not None:
+        nodes.append(preview_node)
+
+    nodes.append(
         Node(
             package="image_tools",
             executable="showimage",
             name=f"{namespace}_image_view",
             namespace="",
             output="screen",
-            remappings=[("image", f"/{namespace}/image_raw")],
+            remappings=[("image", image_topic)],
             parameters=[
                 {
                     "reliability": "best_effort",
@@ -118,8 +187,9 @@ def _launch_setup(context, *args, **kwargs):
                 }
             ],
             condition=IfCondition(LaunchConfiguration("use_showimage")),
-        ),
-    ]
+        )
+    )
+    return nodes
 
 
 def generate_launch_description():
@@ -158,6 +228,16 @@ def generate_launch_description():
             "respawn_delay",
             default_value="2.0",
             description="Delay in seconds before the Orbbec driver node is restarted.",
+        ),
+        DeclareLaunchArgument(
+            "use_mock_camera",
+            default_value="false",
+            description="Publish synthetic images instead of starting the Orbbec driver.",
+        ),
+        DeclareLaunchArgument(
+            "mock_publish_rate",
+            default_value="30.0",
+            description="Publish rate in Hz for the mock camera.",
         ),
         OpaqueFunction(function=_launch_setup),
     ])

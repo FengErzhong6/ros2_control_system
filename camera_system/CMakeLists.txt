@@ -39,6 +39,15 @@ ament_target_dependencies(orbbec_camera_node PUBLIC
 )
 target_link_libraries(orbbec_camera_node PRIVATE orbbec_camera_node_lib)
 
+add_executable(camera_preview_bridge
+  src/camera_preview_bridge_main.cpp
+)
+target_compile_features(camera_preview_bridge PUBLIC cxx_std_17)
+ament_target_dependencies(camera_preview_bridge PUBLIC
+  rclcpp
+  sensor_msgs
+)
+
 add_executable(print_orbbec_serials
   test/print_orbbec_serials.cpp
 )
@@ -53,6 +62,7 @@ install(
   TARGETS
     orbbec_camera_node_lib
     orbbec_camera_node
+    camera_preview_bridge
     print_orbbec_serials
   EXPORT export_${PROJECT_NAME}
   ARCHIVE DESTINATION lib
@@ -68,6 +78,11 @@ install(
 install(
   DIRECTORY bringup/config bringup/launch
   DESTINATION share/${PROJECT_NAME}/bringup
+)
+
+install(
+  PROGRAMS scripts/mock_camera_publisher.py
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 if(BUILD_TESTING)

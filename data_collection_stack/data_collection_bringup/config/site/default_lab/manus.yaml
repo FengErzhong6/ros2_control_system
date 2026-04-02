@@ -1,0 +1,6 @@
+site_name: default_lab
+manus:
+  glove:
+    namespace: manus
+    calibration_profile: default
+    handedness: right
