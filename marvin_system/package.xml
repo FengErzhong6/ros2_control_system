@@ -46,6 +46,8 @@
   <exec_depend>forward_command_controller</exec_depend>
   <exec_depend>joint_state_broadcaster</exec_depend>
   <exec_depend>python3-pyqt5</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>ros2bag</exec_depend>
   <exec_depend>rosbag2_interfaces</exec_depend>
