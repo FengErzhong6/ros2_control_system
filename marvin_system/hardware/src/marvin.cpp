@@ -67,6 +67,36 @@ inline std::string eff_if(const std::string &jn)
     return jn + "/" + hardware_interface::HW_IF_EFFORT;
 }
 
+const char *arm_state_name(ArmState state)
+{
+    switch (state) {
+    case ARM_STATE_IDLE:
+        return "IDLE";
+    case ARM_STATE_POSITION:
+        return "POSITION";
+    case ARM_STATE_PVT:
+        return "PVT";
+    case ARM_STATE_TORQ:
+        return "TORQ";
+    case ARM_STATE_RELEASE:
+        return "RELEASE";
+    case ARM_STATE_ERROR:
+        return "ERROR";
+    case ARM_STATE_TRANS_TO_POSITION:
+        return "TRANS_TO_POSITION";
+    case ARM_STATE_TRANS_TO_PVT:
+        return "TRANS_TO_PVT";
+    case ARM_STATE_TRANS_TO_TORQ:
+        return "TRANS_TO_TORQ";
+    case ARM_STATE_TRANS_TO_RELEASE:
+        return "TRANS_TO_RELEASE";
+    case ARM_STATE_TRANS_TO_IDLE:
+        return "TRANS_TO_IDLE";
+    default:
+        return "UNKNOWN";
+    }
+}
+
 }  // namespace
 
 // ===========================================================================
@@ -211,6 +241,7 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
     const rclcpp_lifecycle::State &)
 {
     activated_ = false;
+    workspace_guard_.disarm();
     const auto &p = info_.hardware_parameters;
 
     joint_vel_ratio_     = param_int(p, "joint_vel_ratio",     30,   1, 100);
@@ -391,6 +422,24 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
         hold_b[j] = static_cast<double>(dcss.m_Out[1].m_FB_Joint_PosE[j]);
     }
 
+    auto log_mode_switch_status =
+        [this](size_t arm, const StateCtr &state, const char *phase) {
+            const auto cur_state = static_cast<ArmState>(state.m_CurState);
+            RCLCPP_INFO(
+                get_logger(),
+                "Arm %s %s: cur_state=%s(%d), cmd_state=%d, err=%d.",
+                arm == 0 ? "A" : "B",
+                phase,
+                arm_state_name(cur_state),
+                state.m_CurState,
+                state.m_CmdState,
+                state.m_ERRCode);
+        };
+
+    for (size_t arm = 0; arm < kArmCount; ++arm) {
+        log_mode_switch_status(arm, dcss.m_State[arm], "pre-activate state");
+    }
+
     // Request position mode for both arms, including initial hold positions
     // so the controller already has valid commands when it enters position mode.
     OnClearSet();
@@ -412,11 +461,32 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
     // would starve if we only polled without sending.
     bool arm_a_ready = false, arm_b_ready = false;
     const auto deadline = Clock::now() + std::chrono::milliseconds(state_timeout_ms_);
+    std::array<bool, kArmCount> has_status_snapshot{{false, false}};
+    std::array<int, kArmCount> last_cur_state{};
+    std::array<int, kArmCount> last_cmd_state{};
+    std::array<int, kArmCount> last_err_code{};
 
     while (!arm_a_ready || !arm_b_ready) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
         if (OnGetBuf(&dcss)) {
+            for (size_t arm = 0; arm < kArmCount; ++arm) {
+                const auto &state = dcss.m_State[arm];
+                if (!has_status_snapshot[arm] ||
+                    state.m_CurState != last_cur_state[arm] ||
+                    state.m_CmdState != last_cmd_state[arm] ||
+                    state.m_ERRCode != last_err_code[arm]) {
+                    log_mode_switch_status(
+                        arm, state, has_status_snapshot[arm]
+                        ? "mode-switch update"
+                        : "mode-switch feedback");
+                    has_status_snapshot[arm] = true;
+                    last_cur_state[arm] = state.m_CurState;
+                    last_cmd_state[arm] = state.m_CmdState;
+                    last_err_code[arm] = state.m_ERRCode;
+                }
+            }
+
             for (size_t j = 0; j < kJointsPerArm; ++j) {
                 hold_a[j] = static_cast<double>(dcss.m_Out[0].m_FB_Joint_PosE[j]);
                 hold_b[j] = static_cast<double>(dcss.m_Out[1].m_FB_Joint_PosE[j]);
@@ -449,8 +519,28 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
         }
 
         if (Clock::now() > deadline) {
-            RCLCPP_ERROR(get_logger(), "Timeout waiting for position mode (A=%s, B=%s).",
-                         arm_a_ready ? "OK" : "PENDING", arm_b_ready ? "OK" : "PENDING");
+            const auto a_state = has_status_snapshot[0]
+                               ? static_cast<ArmState>(last_cur_state[0])
+                               : static_cast<ArmState>(dcss.m_State[0].m_CurState);
+            const auto b_state = has_status_snapshot[1]
+                               ? static_cast<ArmState>(last_cur_state[1])
+                               : static_cast<ArmState>(dcss.m_State[1].m_CurState);
+            RCLCPP_ERROR(
+                get_logger(),
+                "Timeout waiting for position mode after %d ms "
+                "(A: ready=%s, cur_state=%s(%d), cmd_state=%d, err=%d; "
+                "B: ready=%s, cur_state=%s(%d), cmd_state=%d, err=%d).",
+                state_timeout_ms_,
+                arm_a_ready ? "OK" : "PENDING",
+                arm_state_name(a_state),
+                has_status_snapshot[0] ? last_cur_state[0] : dcss.m_State[0].m_CurState,
+                has_status_snapshot[0] ? last_cmd_state[0] : dcss.m_State[0].m_CmdState,
+                has_status_snapshot[0] ? last_err_code[0] : dcss.m_State[0].m_ERRCode,
+                arm_b_ready ? "OK" : "PENDING",
+                arm_state_name(b_state),
+                has_status_snapshot[1] ? last_cur_state[1] : dcss.m_State[1].m_CurState,
+                has_status_snapshot[1] ? last_cmd_state[1] : dcss.m_State[1].m_CmdState,
+                has_status_snapshot[1] ? last_err_code[1] : dcss.m_State[1].m_ERRCode);
             return hardware_interface::CallbackReturn::ERROR;
         }
 
@@ -469,7 +559,10 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
         OnSetSend();
     }
 
-    // Move to home position if configured (joints 7→1 for safety)
+    // Move to home position if configured (joints 7→1 for safety).
+    // Runtime workspace guarding is intentionally armed only after this
+    // startup sequence completes so recovery from a low initial pose is not
+    // blocked by the running-time z-floor policy.
     if (has_home_position_) {
         RCLCPP_INFO(get_logger(), "Moving to home position (Joint7 → Joint1) ...");
         constexpr double kHomeTolDeg = 0.5;
@@ -488,22 +581,6 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
              jt >= 0 && !timed_out; --jt) {
             cmd_a[jt] = home_position_deg_[0][jt];
             cmd_b[jt] = home_position_deg_[1][jt];
-
-            if (workspace_guard_.enabled()) {
-                double guarded_a[kJointsPerArm];
-                double guarded_b[kJointsPerArm];
-                std::copy(cmd_a, cmd_a + kJointsPerArm, guarded_a);
-                std::copy(cmd_b, cmd_b + kJointsPerArm, guarded_b);
-                const bool arm_a_safe = workspace_guard_.filter(0, guarded_a, get_logger());
-                const bool arm_b_safe = workspace_guard_.filter(1, guarded_b, get_logger());
-                if (!arm_a_safe || !arm_b_safe) {
-                    RCLCPP_ERROR(
-                        get_logger(),
-                        "Home position for Joint%d violates workspace z-floor safety check.",
-                        jt + 1);
-                    return hardware_interface::CallbackReturn::ERROR;
-                }
-            }
 
             RCLCPP_INFO(get_logger(), "Homing Joint%d ...", jt + 1);
 
@@ -601,6 +678,9 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
                 fb[j] = static_cast<double>(dcss.m_Out[arm].m_FB_Joint_PosE[j]);
             workspace_guard_.seed(arm, fb);
         }
+        workspace_guard_.arm();
+        RCLCPP_INFO(get_logger(),
+                    "Workspace z-floor check armed for runtime commands.");
     }
 
     activated_ = true;
@@ -617,6 +697,7 @@ hardware_interface::CallbackReturn MarvinHardware::on_deactivate(
     const rclcpp_lifecycle::State &)
 {
     activated_ = false;
+    workspace_guard_.disarm();
 
     if (connected_) {
         OnClearSet();
@@ -639,6 +720,7 @@ hardware_interface::CallbackReturn MarvinHardware::on_cleanup(
     const rclcpp_lifecycle::State &)
 {
     activated_ = false;
+    workspace_guard_.disarm();
 
     // Disconnect grippers BEFORE releasing Marvin link (they need it to send close cmd)
     for (size_t g = 0; g < gripper_count_; ++g) {

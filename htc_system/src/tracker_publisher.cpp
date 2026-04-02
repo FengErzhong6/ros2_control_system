@@ -1,9 +1,14 @@
 #include <cmath>
+#include <chrono>
+#include <cstdlib>
+#include <dlfcn.h>
+#include <filesystem>
+#include <map>
+#include <sstream>
 #include <string>
 #include <vector>
-#include <map>
-#include <chrono>
 
+#include "ament_index_cpp/get_package_prefix.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "tf2/LinearMath/Transform.h"
@@ -21,6 +26,204 @@ struct TrackerConfig {
 struct RoleCorrection {
     tf2::Vector3 offset{0.0, 0.0, 0.0};
     tf2::Quaternion rotation{0.0, 0.0, 0.0, 1.0};
+};
+
+class OpenVrLibrary
+{
+public:
+    using InitInternalFn = decltype(&vr::VR_InitInternal2);
+    using ShutdownInternalFn = decltype(&vr::VR_ShutdownInternal);
+    using GetGenericInterfaceFn = decltype(&vr::VR_GetGenericInterface);
+    using GetErrorDescriptionFn =
+        decltype(&vr::VR_GetVRInitErrorAsEnglishDescription);
+
+    ~OpenVrLibrary()
+    {
+        shutdown();
+    }
+
+    void initialize(const std::string &override_path)
+    {
+        std::vector<std::filesystem::path> candidates =
+            candidateLibraryPaths(override_path);
+        if (candidates.empty()) {
+            throw std::runtime_error("No OpenVR library path candidates available");
+        }
+
+        const int dlopen_flags =
+            RTLD_NOW | RTLD_LOCAL
+#ifdef RTLD_DEEPBIND
+            | RTLD_DEEPBIND
+#endif
+            ;
+
+        std::ostringstream attempts;
+        bool first_attempt = true;
+        for (const auto &candidate : candidates) {
+            if (!first_attempt) {
+                attempts << "; ";
+            }
+            first_attempt = false;
+
+            if (!std::filesystem::exists(candidate)) {
+                attempts << candidate << " (missing)";
+                continue;
+            }
+
+            dlerror();
+            handle_ = dlopen(candidate.c_str(), dlopen_flags);
+            if (handle_ != nullptr) {
+                library_path_ = candidate;
+                break;
+            }
+
+            const char *error = dlerror();
+            attempts << candidate << " (" << (error != nullptr ? error : "dlopen failed")
+                     << ")";
+        }
+
+        if (handle_ == nullptr) {
+            throw std::runtime_error(
+                "Failed to load OpenVR runtime. Attempts: " + attempts.str());
+        }
+
+        init_internal_ = loadSymbol<InitInternalFn>("VR_InitInternal2");
+        shutdown_internal_ = loadSymbol<ShutdownInternalFn>("VR_ShutdownInternal");
+        get_generic_interface_ =
+            loadSymbol<GetGenericInterfaceFn>("VR_GetGenericInterface");
+        get_error_description_ = loadSymbol<GetErrorDescriptionFn>(
+            "VR_GetVRInitErrorAsEnglishDescription");
+
+        vr::EVRInitError err = vr::VRInitError_None;
+        init_internal_(&err, vr::VRApplication_Other, nullptr);
+        if (err != vr::VRInitError_None) {
+            const std::string description = initErrorDescription(err);
+            unloadHandle();
+            throw std::runtime_error("OpenVR init failed: " + description);
+        }
+        initialized_ = true;
+
+        err = vr::VRInitError_None;
+        vr_system_ = static_cast<vr::IVRSystem *>(
+            get_generic_interface_(vr::IVRSystem_Version, &err));
+        if (err != vr::VRInitError_None || vr_system_ == nullptr) {
+            const std::string description = initErrorDescription(err);
+            shutdown();
+            throw std::runtime_error(
+                "Failed to acquire OpenVR IVRSystem interface: " + description);
+        }
+    }
+
+    void shutdown()
+    {
+        if (initialized_ && shutdown_internal_ != nullptr) {
+            shutdown_internal_();
+        }
+        initialized_ = false;
+        shutdown_internal_ = nullptr;
+        init_internal_ = nullptr;
+        get_generic_interface_ = nullptr;
+        get_error_description_ = nullptr;
+        vr_system_ = nullptr;
+        unloadHandle();
+    }
+
+    vr::IVRSystem *system() const
+    {
+        return vr_system_;
+    }
+
+    const std::filesystem::path &libraryPath() const
+    {
+        return library_path_;
+    }
+
+private:
+    template <typename Fn>
+    Fn loadSymbol(const char *name)
+    {
+        dlerror();
+        void *symbol = dlsym(handle_, name);
+        if (const char *error = dlerror(); error != nullptr) {
+            throw std::runtime_error(
+                std::string("Failed to resolve OpenVR symbol '") + name +
+                "': " + error);
+        }
+        return reinterpret_cast<Fn>(symbol);
+    }
+
+    static std::vector<std::filesystem::path> candidateLibraryPaths(
+        const std::string &override_path)
+    {
+        std::vector<std::filesystem::path> candidates;
+        auto append = [&candidates](const std::filesystem::path &path) {
+            if (path.empty()) {
+                return;
+            }
+            for (const auto &existing : candidates) {
+                if (existing == path) {
+                    return;
+                }
+            }
+            candidates.push_back(path);
+        };
+
+        if (!override_path.empty()) {
+            append(override_path);
+        }
+
+        if (const char *env_path = std::getenv("HTC_SYSTEM_OPENVR_LIBRARY");
+            env_path != nullptr && env_path[0] != '\0') {
+            append(env_path);
+        }
+
+        std::error_code ec;
+        const auto exe_path = std::filesystem::read_symlink("/proc/self/exe", ec);
+        if (!ec) {
+            append(exe_path.parent_path() / "libopenvr_api.so");
+            append(exe_path.parent_path().parent_path() / "libopenvr_api.so");
+        }
+
+        try {
+            const auto package_prefix =
+                std::filesystem::path(ament_index_cpp::get_package_prefix("htc_system"));
+            append(package_prefix / "lib" / "htc_system" / "libopenvr_api.so");
+            append(package_prefix / "lib" / "libopenvr_api.so");
+        } catch (const std::exception &) {
+            // Allow direct executable runs outside an installed environment.
+        }
+
+        append(std::filesystem::path(HTC_SYSTEM_SOURCE_DIR) / "third_party" /
+               "openvr" / "libopenvr_api.so");
+        return candidates;
+    }
+
+    std::string initErrorDescription(vr::EVRInitError err) const
+    {
+        if (get_error_description_ == nullptr) {
+            return "unknown";
+        }
+        const char *description = get_error_description_(err);
+        return description != nullptr ? description : "unknown";
+    }
+
+    void unloadHandle()
+    {
+        if (handle_ != nullptr) {
+            dlclose(handle_);
+            handle_ = nullptr;
+        }
+        library_path_.clear();
+    }
+
+    void *handle_ = nullptr;
+    InitInternalFn init_internal_ = nullptr;
+    ShutdownInternalFn shutdown_internal_ = nullptr;
+    GetGenericInterfaceFn get_generic_interface_ = nullptr;
+    GetErrorDescriptionFn get_error_description_ = nullptr;
+    vr::IVRSystem *vr_system_ = nullptr;
+    std::filesystem::path library_path_;
+    bool initialized_ = false;
 };
 
 // SteamVR 3×4 HmdMatrix34_t → TF TransformStamped.
@@ -98,6 +301,8 @@ public:
         coordinate_transform_ = declare_parameter("coordinate_transform", true);
         double rate = declare_parameter("publish_rate", 100.0);
         parent_frame_ = declare_parameter("parent_frame", "world");
+        openvr_library_path_ =
+            declare_parameter("openvr_library_path", std::string{});
 
         auto tracker_serials = declare_parameter<std::vector<std::string>>(
             "trackers.serials", std::vector<std::string>{});
@@ -125,15 +330,19 @@ public:
 
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
-        vr::EVRInitError err = vr::VRInitError_None;
-        vr_system_ = vr::VR_Init(&err, vr::VRApplication_Other);
-        if (err != vr::VRInitError_None) {
-            RCLCPP_FATAL(get_logger(), "OpenVR init failed: %s",
-                         vr::VR_GetVRInitErrorAsEnglishDescription(err));
-            throw std::runtime_error("OpenVR init failed");
+        try {
+            openvr_.initialize(openvr_library_path_);
+        } catch (const std::exception &e) {
+            RCLCPP_FATAL(
+                get_logger(), "OpenVR runtime initialization failed: %s", e.what());
+            throw;
         }
-        RCLCPP_INFO(get_logger(), "OpenVR initialized, publishing TF to parent_frame='%s'",
-                    parent_frame_.c_str());
+        vr_system_ = openvr_.system();
+        const std::string openvr_library = openvr_.libraryPath().string();
+        RCLCPP_INFO(
+            get_logger(),
+            "OpenVR initialized from %s, publishing TF to parent_frame='%s'",
+            openvr_library.c_str(), parent_frame_.c_str());
 
         scanDevices();
 
@@ -148,7 +357,7 @@ public:
 
     ~TrackerPublisher() override
     {
-        vr::VR_Shutdown();
+        openvr_.shutdown();
         RCLCPP_INFO(get_logger(), "OpenVR shutdown");
     }
 
@@ -313,8 +522,10 @@ private:
     }
 
     vr::IVRSystem *vr_system_ = nullptr;
+    OpenVrLibrary openvr_;
     bool coordinate_transform_;
     std::string parent_frame_;
+    std::string openvr_library_path_;
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     std::vector<TrackerConfig> tracker_configs_;
     std::vector<TrackerState> active_trackers_;

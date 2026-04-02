@@ -3,6 +3,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -23,6 +24,7 @@
 #include "tf2_ros/buffer.h"
 #include "tf2_ros/transform_listener.h"
 
+#include "TrackingIk.h"
 #include "marvin_system/marvin_kine_utils.hpp"
 
 namespace marvin_system {
@@ -59,8 +61,8 @@ private:
     bool kine_initialized_{false};
     std::string kine_config_path_;
     MarvinKineData kine_data_;
-    std::array<FX_InvKineSolvePara, kArmCount> ik_params_{};
-    std::array<std::array<double, kJointsPerArm>, kArmCount> last_joint_deg_{};
+    tracking_ik::Geometry tracking_ik_geometry_{};
+    bool tracking_ik_geometry_loaded_{false};
 
     // TF2 for tracker pose lookup
     std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
@@ -96,16 +98,27 @@ private:
     // Parameters
     double position_scale_{1.0};
     double base_x_scale_{1.0};
-    bool enable_orientation_{true};
-    bool ik_fallback_near_ref_{true};
-    bool ik_clamp_joint_limits_{true};
-    std::string base_frame_{"base_link"};
-    std::array<double, 3> shoulder_v_elbow_default_{{0.0, 0.0, -1.0}};
-    double zsp_angle_{0.0};
+    bool enable_ik_reference_logs_{false};
+    inline static constexpr std::array<double, 3> kDefaultShoulderVElbow{
+        {0.0, 0.0, -1.0}};
     double j4_bound_{0.0};
     double dh_d1_{0.0};
     rclcpp::Duration tracker_timeout_{0, 100000000};
     std::array<std::string, kArmCount> viz_base_frames_{{"Base_L", "Base_R"}};
+    struct TrackingIkConfig {
+        double fk_accept_tol{1e-3};
+        double fine_psi_range_deg{2.0};
+        double fine_psi_step_deg{0.1};
+        double fast_psi_range_deg{12.0};
+        double fast_psi_step_deg{0.5};
+        double expand_psi_range_deg{63.0};
+        double expand_psi_step_deg{2.0};
+        double desired_dir_weight{0.03};
+        double continuity_dir_weight{0.03};
+        double magnitude_weight{0.05};
+        double psi_delta_weight{0.02};
+        double branch_switch_penalty{20.0};
+    } tracking_ik_config_{};
 
     /** chest → shoulder (标定人机胸系到肩关节系). */
     std::array<tf2::Transform, kArmCount> shoulder_T_chest_;
@@ -116,27 +129,14 @@ private:
     /** 肘向量方向修正旋转 (RPY→quaternion)，左右手分别配置. */
     std::array<tf2::Quaternion, kArmCount> elbow_dir_correction_{
         {tf2::Quaternion::getIdentity(), tf2::Quaternion::getIdentity()}};
+    /** startup seed 的 ref_dir 符号规范化，左右手分别配置. */
+    std::array<double, kArmCount> startup_ref_dir_sign_{{1.0, -1.0}};
 
-    // Smoothing parameters (low-pass + velocity clamping)
+    // Joint command conditioning parameters
     double smoothing_alpha_{0.3};
     double max_joint_velocity_{2.0};  // rad/s
-    std::array<std::array<double, kJointsPerArm>, kArmCount> smoothed_joints_rad_{};
-
-    // IK target: last successful solution (smoothing always converges to this)
-    std::array<std::array<double, kJointsPerArm>, kArmCount> target_joints_rad_{};
-    std::array<bool, kArmCount> has_valid_target_{{false, false}};
-    std::array<std::array<double, kJointsPerArm>, kArmCount> home_joints_rad_{};
     bool has_home_joints_{false};
     double home_tolerance_rad_{0.5 * kDeg2Rad};
-
-    // TF timestamp tracking: recompute IK when either hand or upper-arm input changes
-    std::array<rclcpp::Time, kArmCount> last_hand_tf_stamp_{
-        {rclcpp::Time(0, 0, RCL_ROS_TIME), rclcpp::Time(0, 0, RCL_ROS_TIME)}};
-    std::array<rclcpp::Time, kArmCount> last_arm_tf_stamp_{
-        {rclcpp::Time(0, 0, RCL_ROS_TIME), rclcpp::Time(0, 0, RCL_ROS_TIME)}};
-    std::array<bool, kArmCount> last_hand_tf_valid_{{false, false}};
-    std::array<bool, kArmCount> last_arm_tf_valid_{{false, false}};
-    std::array<bool, kArmCount> tracker_fresh_{{false, false}};
 
     // IK result tracking
     enum class IKResult : int8_t {
@@ -147,10 +147,8 @@ private:
         kOutOfRange = -2,
         kJointLimitExceeded = -3,
         kSingularity = -4,
+        kSolveFailed = -5,
     };
-    std::array<IKResult, kArmCount> last_ik_result_{
-        {IKResult::kNoTarget, IKResult::kNoTarget}};
-    std::array<bool, kArmCount> marker_visible_{{false, false}};
 
     enum class TeleopState : int8_t {
         kDisarmed = 0,
@@ -175,6 +173,8 @@ private:
         bool arm_valid{false};
         bool has_base_T_ee{false};
         geometry_msgs::msg::PoseStamped base_T_ee;
+        bool tracker_y_axis_valid{false};
+        std::array<double, 3> tracker_y_axis{{0.0, 0.0, -1.0}};
         std::array<double, 3> shoulder_v_elbow{{0.0, 0.0, -1.0}};
         IKResult dir_result{IKResult::kNoTarget};
         IKResult ref_result{IKResult::kNoTarget};
@@ -184,8 +184,50 @@ private:
         bool has_solution{false};
         std::array<double, kJointsPerArm> q_joints_rad{};
         double solution_j4_deg{0.0};
+        bool solver_reachable{false};
+        bool used_expanded_search{false};
+        int64_t candidate_count{0};
+        int64_t psi_eval_count{0};
+        int64_t selected_branch{-1};
+        double selected_psi_deg{0.0};
+        double best_fk_residual_l1{0.0};
+        double best_ref_score_l1{0.0};
+        double best_desired_dir_score{0.0};
+        double best_continuity_dir_score{0.0};
+        std::array<double, 3> request_prev_selected_ref_dir{{0.0, 0.0, -1.0}};
+        int64_t request_prev_selected_branch{-1};
+        std::array<double, 3> selected_ref_dir{{0.0, 0.0, -1.0}};
+        bool solved_upper_arm_dir_valid{false};
+        std::array<double, 3> solved_upper_arm_dir{{0.0, 0.0, 0.0}};
+        double solved_upper_arm_dir_angle_deg{0.0};
     };
-    std::array<ArmDiagnostics, kArmCount> pending_diagnostics_;
+    struct PendingDiagnosticsSlot {
+        std::atomic<uint64_t> sequence{0};
+        std::atomic<bool> pending{false};
+        ArmDiagnostics snapshot;
+    };
+
+    struct ArmRuntimeState {
+        ArmRuntimeState() = default;
+        std::array<double, kJointsPerArm> last_joint_deg{};
+        std::array<double, 3> last_selected_ref_dir{{0.0, 0.0, -1.0}};
+        int64_t last_selected_branch{-1};
+        std::array<double, kJointsPerArm> smoothed_joints_rad{};
+        std::array<double, kJointsPerArm> target_joints_rad{};
+        bool has_valid_target{false};
+        std::array<double, kJointsPerArm> home_joints_rad{};
+        rclcpp::Time last_hand_tf_stamp{0, 0, RCL_ROS_TIME};
+        rclcpp::Time last_arm_tf_stamp{0, 0, RCL_ROS_TIME};
+        bool last_hand_tf_valid{false};
+        bool last_arm_tf_valid{false};
+        bool last_hand_tf_fresh{false};
+        bool last_arm_tf_fresh{false};
+        bool tracker_fresh{false};
+        IKResult last_ik_result{IKResult::kNoTarget};
+        bool marker_visible{false};
+        PendingDiagnosticsSlot pending_diagnostics;
+    };
+    std::array<ArmRuntimeState, kArmCount> arm_state_;
 
     struct TrackerInputState {
         rclcpp::Time hand_stamp{0, 0, RCL_ROS_TIME};
@@ -194,6 +236,7 @@ private:
         bool arm_changed{false};
         bool tracker_input_changed{false};
         bool hand_fresh{false};
+        bool arm_fresh{false};
     };
 
     // Configuration helpers
@@ -213,6 +256,7 @@ private:
     // Activation/runtime helpers
     bool bindJointInterfaces();
     void initializeJointTargetsFromState();
+    bool seedTrackingStateFromCurrentJoints(size_t arm);
     void resetTrackerState();
     void resetTeleopRuntime(TeleopState teleop_state);
     void holdAllArms(double dt);
@@ -240,13 +284,18 @@ private:
     void fillArmTargetFromTracker(
         size_t arm, const CachedTrackerData &snap,
         geometry_msgs::msg::PoseStamped &base_T_ee,
-        std::array<double, 3> &shoulder_v_elbow) const;
+        std::array<double, 3> &shoulder_v_elbow,
+        std::array<double, 3> *tracker_y_axis = nullptr) const;
     void handleStaleTracker(size_t arm, const CachedTrackerData &snap, bool tracker_input_changed);
     void handleFreshTrackerUpdate(size_t arm, const CachedTrackerData &snap);
     void processArmUpdate(size_t arm, const CachedTrackerData &snap,
                           const rclcpp::Time &now, double dt, bool force_reacquire);
     std::string buildIkLogChain(const ArmDiagnostics &diag) const;
     void logArmDiagnostics(size_t arm, const ArmDiagnostics &diag);
+    bool readCurrentJointPositions(
+        size_t arm, std::array<double, kJointsPerArm> &joints_rad) const;
+    bool computeCurrentUpperArmDir(
+        size_t arm, std::array<double, 3> &upper_arm_dir) const;
     void handleSetArmed(
         const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
         std::shared_ptr<std_srvs::srv::SetBool::Response> response);

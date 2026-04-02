@@ -457,6 +457,8 @@ ros2 launch marvin_system marvin_joy_control.launch.py use_gripper_L:=true
 - `controller_manager/ros2_control_node`
 - `robot_state_publisher/robot_state_publisher`
 - `htc_system/tracker_publisher`
+- `camera_system` 双腕 Orbbec + 顶部 RealSense，按需
+- `marvin_system/tracker_camera_dashboard.py`，按需
 - `controller_manager/spawner` 若干
 - `rviz2/rviz2`，可选
 - 终端键盘门控线程，按需
@@ -468,6 +470,10 @@ ros2 launch marvin_system marvin_joy_control.launch.py use_gripper_L:=true
 | `gui` | `true` | 是否启动 RViz |
 | `use_mock_hardware` | `false` | 是否启用 mock hardware |
 | `use_keyboard_gate` | `true` | 是否启用终端按键门控 |
+| `start_cameras` | `true` | 是否在真实硬件模式下启动 `cameras.yaml` 里的三路相机 |
+| `show_camera_views` | `true` | 启动相机后是否弹出单窗口相机面板 |
+| `high_camera_name` | `cam_high` | 顶部 RealSense 在 `cameras.yaml` 里的键名 |
+| `cameras_config` | `camera_system/bringup/config/cameras.yaml` | 相机清单配置 |
 | `description_package` | `marvin_system` | 描述包 |
 | `description_file` | `description/urdf/marvin_dual.urdf` | 模型文件 |
 | `use_gripper_L` | `false` | 是否启用左夹爪 |
@@ -488,10 +494,15 @@ ros2 launch marvin_system marvin_tracker_teleop.launch.py
 ```bash
 ros2 launch marvin_system marvin_tracker_teleop.launch.py use_mock_hardware:=true
 ros2 launch marvin_system marvin_tracker_teleop.launch.py use_keyboard_gate:=false
+ros2 launch marvin_system marvin_tracker_teleop.launch.py
+ros2 launch marvin_system marvin_tracker_teleop.launch.py show_camera_views:=false
 ```
 
 使用说明：
 - 依赖 `htc_system` 与 `marvin_system` 在同一工作区可用。
+- 默认会在真实硬件模式下额外启动 `camera_system/bringup/config/cameras.yaml` 中的 `cam_left_wrist`、`cam_right_wrist` 和 `high_camera_name` 对应的相机。
+- `show_camera_views:=true` 时，会弹出一个单独的相机面板窗口，同时显示顶部、左腕、右腕三路图像。
+- `use_mock_hardware:=true` 时，不会启动摄像头和相机面板，即使 `start_cameras:=true` 也会跳过。
 - 启用 `use_keyboard_gate:=true` 时，需要当前终端可读取按键输入。
 - 空格键会调用 `/tracker_teleop_controller/set_armed` 和 `/set_enabled`，`n` 会调用 `/tracker_teleop_controller/go_home`。
 
