@@ -9,8 +9,6 @@ from typing import Any, Optional
 class SupervisorConfig:
     recipe_id: str
     recipe_directory: Optional[Path]
-    site_config_root: Optional[Path]
-    operator_config: Optional[Path]
     startup_policy_config: Optional[Path]
     fault_policy_config: Optional[Path]
 

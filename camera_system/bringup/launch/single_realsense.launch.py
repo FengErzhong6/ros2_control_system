@@ -79,6 +79,10 @@ def _build_camera_params(
         "enable_color": profile_cfg.get("color_enabled", True),
         "rgb_camera.color_profile": color_profile,
         "rgb_camera.color_format": profile_cfg.get("color_format", "RGB8"),
+        "rgb_camera.enable_auto_exposure": profile_cfg.get("rgb_enable_auto_exposure", True),
+        "rgb_camera.auto_exposure_priority": profile_cfg.get(
+            "rgb_auto_exposure_priority", False
+        ),
         "enable_depth": profile_cfg.get("depth_enabled", False),
         "depth_module.depth_profile": depth_profile,
         "depth_module.depth_format": profile_cfg.get("depth_format", "Z16"),
@@ -86,6 +90,10 @@ def _build_camera_params(
         "enable_infra1": profile_cfg.get("infrared_enabled", False),
         "enable_infra2": False,
         "depth_module.infra_profile": infra_profile,
+        "enable_gyro": profile_cfg.get("enable_gyro", False),
+        "enable_accel": profile_cfg.get("enable_accel", False),
+        "unite_imu_method": profile_cfg.get("unite_imu_method", 0),
+        "enable_sync": profile_cfg.get("enable_sync", False),
         "pointcloud.enable": profile_cfg.get("point_cloud_enabled", False),
         "align_depth.enable": profile_cfg.get("align_depth_enabled", False),
         "publish_tf": profile_cfg.get("publish_tf", True),
@@ -145,7 +153,6 @@ def _launch_setup(context, *args, **kwargs):
     cameras_config_path = LaunchConfiguration("cameras_config").perform(context)
     defaults_config_path = LaunchConfiguration("realsense_defaults_config").perform(context)
     target_camera_name = LaunchConfiguration("camera_name").perform(context)
-    use_mock_camera = _parse_bool(LaunchConfiguration("use_mock_camera").perform(context))
     respawn = _parse_bool(LaunchConfiguration("respawn").perform(context))
     respawn_delay = _parse_nonnegative_float(
         LaunchConfiguration("respawn_delay").perform(context),
@@ -171,27 +178,6 @@ def _launch_setup(context, *args, **kwargs):
         respawn=respawn,
         respawn_delay=respawn_delay,
     )
-    if use_mock_camera:
-        driver_node = Node(
-            package="camera_system",
-            executable="mock_camera_publisher.py",
-            name="mock_camera_publisher",
-            namespace=namespace,
-            output="screen",
-            parameters=[
-                {
-                    "camera_name": target_camera_name,
-                    "frame_id": mock_params["frame_id"],
-                    "image_topic": f"{namespace}/color/image_raw",
-                    "camera_info_topic": f"{namespace}/color/camera_info",
-                    "publish_camera_info": True,
-                    "encoding": mock_params["encoding"],
-                    "width": mock_params["width"],
-                    "height": mock_params["height"],
-                    "publish_rate": LaunchConfiguration("mock_publish_rate"),
-                }
-            ],
-        )
 
     nodes = [driver_node]
 
@@ -261,16 +247,6 @@ def generate_launch_description():
             "respawn_delay",
             default_value="2.0",
             description="Delay in seconds before the RealSense driver node is restarted.",
-        ),
-        DeclareLaunchArgument(
-            "use_mock_camera",
-            default_value="false",
-            description="Publish synthetic images instead of starting the RealSense driver.",
-        ),
-        DeclareLaunchArgument(
-            "mock_publish_rate",
-            default_value="30.0",
-            description="Publish rate in Hz for the mock camera.",
         ),
         OpaqueFunction(function=_launch_setup),
     ])

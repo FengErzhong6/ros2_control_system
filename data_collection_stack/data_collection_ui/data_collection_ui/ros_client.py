@@ -183,7 +183,7 @@ class RosClient:
         defaults = self._default_paths()
         self._node.declare_parameter("recipe_id", "marvin_tracker_collection")
         self._node.declare_parameter("recipe_directory", str(defaults["recipe_directory"]))
-        self._node.declare_parameter("site_config_root", str(defaults["site_config_root"]))
+        self._node.declare_parameter("cameras_config", str(defaults["cameras_config"]))
         self._node.declare_parameter("ui_config", str(defaults["ui_config"]))
 
     def _default_paths(self) -> dict[str, Path]:
@@ -193,17 +193,21 @@ class RosClient:
             bringup_share = (
                 Path(__file__).resolve().parents[2] / "data_collection_bringup"
             )
+        try:
+            camera_share = Path(get_package_share_directory("camera_system"))
+        except PackageNotFoundError:
+            camera_share = Path(__file__).resolve().parents[3] / "camera_system"
 
         return {
             "recipe_directory": bringup_share / "config" / "recipes",
-            "site_config_root": bringup_share / "config" / "site" / "default_lab",
+            "cameras_config": camera_share / "bringup" / "config" / "cameras.yaml",
             "ui_config": bringup_share / "config" / "session" / "ui.yaml",
         }
 
     def _load_runtime_config(self) -> UiRuntimeConfig:
         recipe_id = str(self._node.get_parameter("recipe_id").value)
         recipe_directory = Path(str(self._node.get_parameter("recipe_directory").value)).expanduser()
-        site_config_root = Path(str(self._node.get_parameter("site_config_root").value)).expanduser()
+        cameras_config = Path(str(self._node.get_parameter("cameras_config").value)).expanduser()
         ui_config_path = Path(str(self._node.get_parameter("ui_config").value)).expanduser()
 
         ui_data = _load_yaml_map(ui_config_path)
@@ -215,7 +219,7 @@ class RosClient:
             self._load_camera_stream_configs(
                 recipe_id=recipe_id,
                 recipe_directory=recipe_directory,
-                site_config_root=site_config_root,
+                cameras_config=cameras_config,
             )
         )
 
@@ -233,11 +237,11 @@ class RosClient:
         *,
         recipe_id: str,
         recipe_directory: Path,
-        site_config_root: Path,
+        cameras_config: Path,
     ) -> list[CameraStreamConfig]:
-        site_cameras = _load_yaml_map(site_config_root / "cameras.yaml").get("cameras", {})
+        site_cameras = _load_yaml_map(cameras_config).get("cameras", {})
         if not isinstance(site_cameras, dict):
-            raise RuntimeError(f"Expected cameras mapping in {site_config_root / 'cameras.yaml'}")
+            raise RuntimeError(f"Expected cameras mapping in {cameras_config}")
 
         recipe_devices = _load_yaml_map(self._resolve_recipe_path(recipe_id, recipe_directory)).get(
             "devices", []

@@ -120,7 +120,6 @@ def _launch_setup(context, *args, **kwargs):
     cameras_config_path = LaunchConfiguration("cameras_config").perform(context)
     defaults_config_path = LaunchConfiguration("orbbec_defaults_config").perform(context)
     target_camera_name = LaunchConfiguration("camera_name").perform(context)
-    use_mock_camera = _parse_bool(LaunchConfiguration("use_mock_camera").perform(context))
     respawn = _parse_bool(LaunchConfiguration("respawn").perform(context))
     respawn_delay = _parse_nonnegative_float(
         LaunchConfiguration("respawn_delay").perform(context),
@@ -141,27 +140,6 @@ def _launch_setup(context, *args, **kwargs):
         respawn=respawn,
         respawn_delay=respawn_delay,
     )
-    if use_mock_camera:
-        driver_node = Node(
-            package="camera_system",
-            executable="mock_camera_publisher.py",
-            name="mock_camera_publisher",
-            namespace=namespace,
-            output="screen",
-            parameters=[
-                {
-                    "camera_name": target_camera_name,
-                    "frame_id": camera_params["frame_id"],
-                    "image_topic": camera_params["image_topic"],
-                    "camera_info_topic": "camera_info",
-                    "publish_camera_info": False,
-                    "encoding": camera_params["color_encoding"],
-                    "width": camera_params["color_width"],
-                    "height": camera_params["color_height"],
-                    "publish_rate": LaunchConfiguration("mock_publish_rate"),
-                }
-            ],
-        )
 
     image_topic = f"/{namespace}/image_raw"
     nodes = [driver_node]
@@ -228,16 +206,6 @@ def generate_launch_description():
             "respawn_delay",
             default_value="2.0",
             description="Delay in seconds before the Orbbec driver node is restarted.",
-        ),
-        DeclareLaunchArgument(
-            "use_mock_camera",
-            default_value="false",
-            description="Publish synthetic images instead of starting the Orbbec driver.",
-        ),
-        DeclareLaunchArgument(
-            "mock_publish_rate",
-            default_value="30.0",
-            description="Publish rate in Hz for the mock camera.",
         ),
         OpaqueFunction(function=_launch_setup),
     ])

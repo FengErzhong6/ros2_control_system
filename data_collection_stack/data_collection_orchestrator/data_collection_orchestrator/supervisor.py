@@ -85,16 +85,12 @@ class DataCollectionSupervisor(Node):
     def _declare_config(self) -> SupervisorConfig:
         self.declare_parameter("recipe_id", "marvin_tracker_collection")
         self.declare_parameter("recipe_directory", "")
-        self.declare_parameter("site_config_root", "")
-        self.declare_parameter("operator_config", "")
         self.declare_parameter("startup_policy_config", "")
         self.declare_parameter("fault_policy_config", "")
 
         return SupervisorConfig(
             recipe_id=self.get_parameter("recipe_id").value,
             recipe_directory=_optional_path(self.get_parameter("recipe_directory").value),
-            site_config_root=_optional_path(self.get_parameter("site_config_root").value),
-            operator_config=_optional_path(self.get_parameter("operator_config").value),
             startup_policy_config=_optional_path(
                 self.get_parameter("startup_policy_config").value
             ),

@@ -206,8 +206,6 @@ class CameraAdapter(AdapterBase):
         arguments.setdefault("cameras_config", str(self._cameras_config_path()))
         arguments.setdefault("use_showimage", False)
         arguments.setdefault("respawn", False)
-        arguments.setdefault("use_mock_camera", False)
-        arguments.setdefault("mock_publish_rate", 30.0)
         if camera_cfg["driver"] == "orbbec":
             pkg_share = Path(get_package_share_directory("camera_system"))
             arguments.setdefault(
@@ -231,13 +229,6 @@ class CameraAdapter(AdapterBase):
         raw_value = self.device.config.get("cameras_config")
         if raw_value:
             return Path(str(raw_value)).expanduser()
-
-        if self.node is not None and hasattr(self.node, "_config"):
-            site_root = getattr(self.node._config, "site_config_root", None)
-            if site_root:
-                candidate = Path(site_root) / self.DEFAULT_SITE_CONFIG_RELATIVE_PATH
-                if candidate.exists():
-                    return candidate
 
         package_share = Path(get_package_share_directory("camera_system"))
         return package_share / "bringup" / "config" / "cameras.yaml"

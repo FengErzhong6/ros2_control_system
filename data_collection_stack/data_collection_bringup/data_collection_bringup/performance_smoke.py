@@ -44,8 +44,6 @@ class TopicSpec:
 class CameraLaunchSpec:
     camera_id: str
     driver: str
-    use_mock_camera: bool
-    mock_publish_rate: float
 
 
 @dataclass
@@ -261,19 +259,52 @@ def _default_recipe_directory(bringup_share: Path) -> Path:
     return bringup_share / "config" / "recipes"
 
 
-def _default_site_config_root(bringup_share: Path, site_name: str) -> Path:
-    return bringup_share / "config" / "site" / site_name
+def _camera_system_share() -> Path:
+    try:
+        return Path(get_package_share_directory("camera_system"))
+    except PackageNotFoundError:
+        return Path(__file__).resolve().parents[3] / "camera_system"
 
 
-def _camera_launch_specs(recipe_path: Path, site_config_root: Path) -> list[CameraLaunchSpec]:
+def _default_cameras_config() -> Path:
+    return _camera_system_share() / "bringup" / "config" / "cameras.yaml"
+
+
+def _expected_record_fps(camera_cfg: dict) -> float:
+    driver = str(camera_cfg.get("driver", "")).strip()
+    profile_name = str(camera_cfg.get("profile", "")).strip()
+    if not profile_name:
+        return 0.0
+
+    camera_share = _camera_system_share()
+    if driver == "realsense":
+        defaults_path = camera_share / "bringup" / "config" / "realsense_defaults.yaml"
+    elif driver == "orbbec":
+        defaults_path = camera_share / "bringup" / "config" / "orbbec_defaults.yaml"
+    else:
+        return 0.0
+
+    profiles = _load_yaml_map(defaults_path).get("profiles", {})
+    if not isinstance(profiles, dict):
+        return 0.0
+    profile_cfg = profiles.get(profile_name)
+    if not isinstance(profile_cfg, dict):
+        return 0.0
+    try:
+        return float(profile_cfg.get("color_fps", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _camera_launch_specs(recipe_path: Path, cameras_config: Path) -> list[CameraLaunchSpec]:
     recipe_data = _load_yaml_map(recipe_path)
     recipe_devices = recipe_data.get("devices", [])
     if not isinstance(recipe_devices, list):
         raise RuntimeError(f"Expected devices list in recipe {recipe_path}")
 
-    site_cameras = _load_yaml_map(site_config_root / "cameras.yaml").get("cameras", {})
+    site_cameras = _load_yaml_map(cameras_config).get("cameras", {})
     if not isinstance(site_cameras, dict):
-        raise RuntimeError(f"Expected cameras mapping in {site_config_root / 'cameras.yaml'}")
+        raise RuntimeError(f"Expected cameras mapping in {cameras_config}")
 
     specs: list[CameraLaunchSpec] = []
     for raw_device in recipe_devices:
@@ -288,30 +319,24 @@ def _camera_launch_specs(recipe_path: Path, site_config_root: Path) -> list[Came
         camera_cfg = site_cameras.get(camera_id)
         if not isinstance(camera_cfg, dict):
             raise RuntimeError(f"Camera '{camera_id}' missing in site cameras config.")
-        launch_arguments = raw_device.get("launch_arguments", {})
-        if not isinstance(launch_arguments, dict):
-            launch_arguments = {}
-
         specs.append(
             CameraLaunchSpec(
                 camera_id=camera_id,
                 driver=str(camera_cfg.get("driver", "")).strip(),
-                use_mock_camera=bool(launch_arguments.get("use_mock_camera", False)),
-                mock_publish_rate=float(launch_arguments.get("mock_publish_rate", 30.0)),
             )
         )
     return specs
 
 
-def _build_topic_specs(recipe_path: Path, site_config_root: Path) -> tuple[list[TopicSpec], list[TopicSpec]]:
+def _build_topic_specs(recipe_path: Path, cameras_config: Path) -> tuple[list[TopicSpec], list[TopicSpec]]:
     recipe_data = _load_yaml_map(recipe_path)
     recipe_devices = recipe_data.get("devices", [])
     if not isinstance(recipe_devices, list):
         raise RuntimeError(f"Expected devices list in recipe {recipe_path}")
 
-    site_cameras = _load_yaml_map(site_config_root / "cameras.yaml").get("cameras", {})
+    site_cameras = _load_yaml_map(cameras_config).get("cameras", {})
     if not isinstance(site_cameras, dict):
-        raise RuntimeError(f"Expected cameras mapping in {site_config_root / 'cameras.yaml'}")
+        raise RuntimeError(f"Expected cameras mapping in {cameras_config}")
 
     record_specs: list[TopicSpec] = []
     preview_specs: list[TopicSpec] = []
@@ -329,9 +354,11 @@ def _build_topic_specs(recipe_path: Path, site_config_root: Path) -> tuple[list[
         if not isinstance(camera_cfg, dict):
             raise RuntimeError(f"Camera '{camera_id}' missing in site cameras config.")
 
-        mock_publish_rate = float(raw_device.get("launch_arguments", {}).get("mock_publish_rate", 0.0))
-        preview_fps = float(camera_cfg.get("preview_fps", mock_publish_rate))
-        expected_preview_fps = min(mock_publish_rate, preview_fps) if mock_publish_rate > 0 else preview_fps
+        expected_record_fps = _expected_record_fps(camera_cfg)
+        preview_fps = float(camera_cfg.get("preview_fps", expected_record_fps))
+        expected_preview_fps = (
+            min(expected_record_fps, preview_fps) if expected_record_fps > 0 else preview_fps
+        )
 
         record_topics = camera_cfg.get("record_topics", [])
         if not isinstance(record_topics, list):
@@ -344,7 +371,7 @@ def _build_topic_specs(recipe_path: Path, site_config_root: Path) -> tuple[list[
                 TopicSpec(
                     topic=topic.strip(),
                     kind="record",
-                    expected_fps=mock_publish_rate,
+                    expected_fps=expected_record_fps,
                     topic_type="camera_info" if topic.endswith("/camera_info") else "image",
                     camera_id=camera_id,
                 )
@@ -375,10 +402,13 @@ def _resolve_recipe_path(recipe_directory: Path, recipe_id: str) -> Path:
     raise RuntimeError(f"Recipe '{recipe_id}' not found under {recipe_directory}")
 
 
-def _launch_stack(recipe_id: str, use_ui: bool, bringup_share: Path, site_name: str) -> subprocess.Popen:
+def _launch_stack(
+    recipe_id: str,
+    use_ui: bool,
+    bringup_share: Path,
+    cameras_config: Path,
+) -> subprocess.Popen:
     recipe_directory = _default_recipe_directory(bringup_share)
-    site_config_root = _default_site_config_root(bringup_share, site_name)
-    operator_config = bringup_share / "config" / "operators" / "default.yaml"
     startup_policy = bringup_share / "config" / "policies" / "startup.yaml"
     fault_policy = bringup_share / "config" / "policies" / "fault.yaml"
     ui_config = bringup_share / "config" / "session" / "ui.yaml"
@@ -389,11 +419,9 @@ def _launch_stack(recipe_id: str, use_ui: bool, bringup_share: Path, site_name: 
         "data_collection_bringup",
         "collection_app.launch.py",
         f"recipe_id:={recipe_id}",
-        f"site_name:={site_name}",
         f"use_ui:={'true' if use_ui else 'false'}",
         f"recipe_directory:={recipe_directory}",
-        f"site_config_root:={site_config_root}",
-        f"operator_config:={operator_config}",
+        f"cameras_config:={cameras_config}",
         f"startup_policy_config:={startup_policy}",
         f"fault_policy_config:={fault_policy}",
         f"ui_config:={ui_config}",
@@ -413,13 +441,12 @@ def _launch_stack(recipe_id: str, use_ui: bool, bringup_share: Path, site_name: 
 
 def _launch_direct_cameras(
     recipe_path: Path,
-    site_config_root: Path,
+    cameras_config: Path,
 ) -> list[subprocess.Popen]:
     processes: list[subprocess.Popen] = []
-    cameras_config_path = site_config_root / "cameras.yaml"
     env = os.environ.copy()
 
-    for spec in _camera_launch_specs(recipe_path, site_config_root):
+    for spec in _camera_launch_specs(recipe_path, cameras_config):
         if spec.driver == "realsense":
             launch_file = "single_realsense.launch.py"
         elif spec.driver == "orbbec":
@@ -433,11 +460,9 @@ def _launch_direct_cameras(
             "camera_system",
             launch_file,
             f"camera_name:={spec.camera_id}",
-            f"cameras_config:={cameras_config_path}",
+            f"cameras_config:={cameras_config}",
             "use_showimage:=false",
             "respawn:=false",
-            f"use_mock_camera:={'true' if spec.use_mock_camera else 'false'}",
-            f"mock_publish_rate:={spec.mock_publish_rate}",
         ]
         processes.append(
             subprocess.Popen(
@@ -610,11 +635,11 @@ def _comparison_report(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Camera preview/record performance smoke test.")
-    parser.add_argument("--recipe-id", default="camera_preview_perf_mock_collection")
-    parser.add_argument("--site-name", default="default_lab")
+    parser.add_argument("--recipe-id", default="camera_preview_perf_collection")
     parser.add_argument("--baseline-sec", type=float, default=4.0)
     parser.add_argument("--loaded-sec", type=float, default=4.0)
     parser.add_argument("--bringup-share", default="")
+    parser.add_argument("--cameras-config", default="")
     parser.add_argument("--launch-mode", choices=["direct", "stack"], default="direct")
     parser.add_argument("--use-ui", action="store_true")
     parser.add_argument("--report-json", default="")
@@ -630,9 +655,11 @@ def main(argv: list[str] | None = None) -> int:
         Path(args.bringup_share).expanduser() if args.bringup_share else _default_bringup_share()
     )
     recipe_directory = _default_recipe_directory(bringup_share)
-    site_config_root = _default_site_config_root(bringup_share, args.site_name)
+    cameras_config = (
+        Path(args.cameras_config).expanduser() if args.cameras_config else _default_cameras_config()
+    )
     recipe_path = _resolve_recipe_path(recipe_directory, args.recipe_id)
-    record_specs, preview_specs = _build_topic_specs(recipe_path, site_config_root)
+    record_specs, preview_specs = _build_topic_specs(recipe_path, cameras_config)
     if not record_specs or not preview_specs:
         raise RuntimeError("Performance smoke requires both record and preview camera topics.")
 
@@ -649,11 +676,11 @@ def main(argv: list[str] | None = None) -> int:
                     recipe_id=args.recipe_id,
                     use_ui=args.use_ui,
                     bringup_share=bringup_share,
-                    site_name=args.site_name,
+                    cameras_config=cameras_config,
                 )
             ]
         else:
-            launch_processes = _launch_direct_cameras(recipe_path, site_config_root)
+            launch_processes = _launch_direct_cameras(recipe_path, cameras_config)
         time.sleep(2.0)
         for process in launch_processes:
             _ensure_process_running(process)
@@ -690,7 +717,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         report = {
             "recipe_id": args.recipe_id,
-            "site_name": args.site_name,
+            "cameras_config": str(cameras_config),
             "launch_mode": args.launch_mode,
             "use_ui": args.use_ui,
             "start_summary": start_summary,

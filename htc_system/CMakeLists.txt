@@ -48,7 +48,6 @@ install(
 
 install(
   PROGRAMS scripts/export_tf_bag_to_csv.py
-           scripts/mock_tracker_publisher.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

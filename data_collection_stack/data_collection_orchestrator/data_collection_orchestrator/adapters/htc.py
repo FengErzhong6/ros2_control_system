@@ -19,7 +19,6 @@ class HtcAdapter(AdapterBase):
     DEFAULT_LAUNCH_PACKAGE = "htc_system"
     DEFAULT_LAUNCH_FILE = "tracker_publisher.launch.py"
     DEFAULT_TRACKERS_CONFIG_RELATIVE_PATH = "bringup/config/trackers.yaml"
-    DEFAULT_MOCK_PUBLISH_RATE = 60.0
 
     def __init__(self, device, node=None) -> None:
         super().__init__(device, node=node)
@@ -188,26 +187,11 @@ class HtcAdapter(AdapterBase):
     def _runtime_arguments(self) -> dict[str, object]:
         arguments = self._raw_launch_arguments()
         arguments.setdefault("trackers_config", str(self._trackers_config_path()))
-        arguments.setdefault("use_mock_trackers", False)
-        arguments.setdefault("mock_publish_rate", self.DEFAULT_MOCK_PUBLISH_RATE)
         return arguments
 
     def _build_command(self) -> list[str]:
         runtime_arguments = self._runtime_arguments()
         trackers_config = str(self._trackers_config_path())
-        if self._use_mock_trackers():
-            return [
-                "ros2",
-                "run",
-                "htc_system",
-                "mock_tracker_publisher.py",
-                "--ros-args",
-                "-p",
-                f"config_file:={trackers_config}",
-                "-p",
-                f"publish_rate:={runtime_arguments['mock_publish_rate']}",
-            ]
-
         return [
             "ros2",
             "run",
@@ -235,14 +219,6 @@ class HtcAdapter(AdapterBase):
         if isinstance(raw_arguments, dict):
             return dict(raw_arguments)
         return {}
-
-    def _use_mock_trackers(self) -> bool:
-        raw_value = self._raw_launch_arguments().get("use_mock_trackers", False)
-        if isinstance(raw_value, bool):
-            return raw_value
-        if isinstance(raw_value, str):
-            return raw_value.strip().lower() == "true"
-        return bool(raw_value)
 
     def _expected_frames(self, trackers_config: Path) -> list[str]:
         override = self.device.config.get("expected_frames")
