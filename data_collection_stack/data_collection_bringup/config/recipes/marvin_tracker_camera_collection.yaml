@@ -1,0 +1,34 @@
+recipe_id: marvin_tracker_camera_collection
+devices:
+  - id: cam_high
+    adapter: camera
+    required: true
+    depends_on: []
+    ready_timeout_sec: 45.0
+  - id: cam_left_wrist
+    adapter: camera
+    required: true
+    depends_on: []
+    ready_timeout_sec: 45.0
+  - id: cam_right_wrist
+    adapter: camera
+    required: true
+    depends_on: []
+    ready_timeout_sec: 45.0
+  - id: htc_tracker
+    adapter: htc
+    required: true
+    depends_on: []
+  - id: marvin_dual
+    adapter: marvin
+    required: true
+    depends_on:
+      - htc_tracker
+record_topics:
+  - /cam_high/cam_high/color/image_raw
+  - /cam_high/cam_high/color/camera_info
+  - /cam_left_wrist/image_raw
+  - /cam_right_wrist/image_raw
+  - /joint_states
+  - /tf
+  - /tf_static

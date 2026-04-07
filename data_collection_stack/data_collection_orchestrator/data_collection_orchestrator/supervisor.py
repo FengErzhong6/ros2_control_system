@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+import time
 from typing import Optional
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+import yaml
 
 from data_collection_interfaces.action import (
     GoHome,
@@ -24,7 +26,8 @@ from data_collection_interfaces.srv import (
 from .adapters import create_adapter
 from .command_server import CommandServer
 from .event_log import EventLog
-from .models import ActiveSession, DeviceSpec, RecipeSpec, SupervisorConfig
+from .health_monitor import HealthMonitor
+from .models import ActiveSession, DeviceSpec, RecipeSpec, StartupPolicy, SupervisorConfig
 from .recipe_loader import discover_recipes, load_recipe
 from .session_manager import SessionManager
 from .state_machine import Commands, SystemStates, allowed_commands_for, is_command_allowed
@@ -36,12 +39,52 @@ def _optional_path(raw_value: str) -> Optional[Path]:
     return Path(raw_value).expanduser()
 
 
+def _optional_text(raw_value: str) -> Optional[str]:
+    value = raw_value.strip()
+    if not value:
+        return None
+    return value
+
+
+def _load_yaml_map(path: Path | None) -> dict:
+    if path is None or not path.exists():
+        return {}
+
+    with path.open("r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Expected YAML mapping at root: {path}")
+    return data
+
+
+def _nonnegative_float(raw_value: object, default: float) -> float:
+    try:
+        parsed = float(raw_value)
+    except (TypeError, ValueError):
+        return default
+    if parsed < 0.0:
+        return default
+    return parsed
+
+
+def _nonnegative_int(raw_value: object, default: int) -> int:
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        return default
+    if parsed < 0:
+        return default
+    return parsed
+
+
 class DataCollectionSupervisor(Node):
     def __init__(self) -> None:
         super().__init__("data_collection_supervisor")
 
         self._config = self._declare_config()
+        self._startup_policy = self._load_startup_policy()
         self._event_log = EventLog()
+        self._health_monitor = HealthMonitor()
         self._session_manager = SessionManager()
         self._recipes = discover_recipes(self._config.recipe_directory)
         self._selected_recipe_id = self._config.recipe_id
@@ -68,6 +111,7 @@ class DataCollectionSupervisor(Node):
         )
         self._command_server = CommandServer(self, self)
         self.create_timer(1.0, self._publish_state)
+        self.create_timer(2.0, self._run_health_monitor)
 
         self._set_system_state(
             SystemStates.IDLE,
@@ -79,14 +123,20 @@ class DataCollectionSupervisor(Node):
         self.get_logger().info(
             "Supervisor ready. "
             f"recipe_id={self._config.recipe_id} recipes={len(self._recipes)} "
-            f"actions={self._command_server.describe()}"
+            f"actions={self._command_server.describe()} "
+            f"startup_retry_count={self._startup_policy.retry_count} "
+            f"startup_retry_backoff_sec={self._startup_policy.retry_backoff_sec:.1f}"
         )
 
     def _declare_config(self) -> SupervisorConfig:
-        self.declare_parameter("recipe_id", "marvin_tracker_collection")
+        self.declare_parameter("recipe_id", "marvin_tracker_manus_camera_collection")
         self.declare_parameter("recipe_directory", "")
         self.declare_parameter("startup_policy_config", "")
         self.declare_parameter("fault_policy_config", "")
+        self.declare_parameter("cameras_config", "")
+        self.declare_parameter("trackers_config", "")
+        self.declare_parameter("manus_config", "")
+        self.declare_parameter("manus_user_name", "")
 
         return SupervisorConfig(
             recipe_id=self.get_parameter("recipe_id").value,
@@ -96,6 +146,29 @@ class DataCollectionSupervisor(Node):
             ),
             fault_policy_config=_optional_path(
                 self.get_parameter("fault_policy_config").value
+            ),
+            cameras_config=_optional_path(self.get_parameter("cameras_config").value),
+            trackers_config=_optional_path(self.get_parameter("trackers_config").value),
+            manus_config=_optional_path(self.get_parameter("manus_config").value),
+            manus_user_name=_optional_text(self.get_parameter("manus_user_name").value),
+        )
+
+    def _load_startup_policy(self) -> StartupPolicy:
+        raw_policy = _load_yaml_map(self._config.startup_policy_config)
+        defaults = StartupPolicy()
+        return StartupPolicy(
+            startup_timeout_sec=_nonnegative_float(
+                raw_policy.get("startup_timeout_sec"), defaults.startup_timeout_sec
+            ),
+            ready_stability_window_sec=_nonnegative_float(
+                raw_policy.get("ready_stability_window_sec"),
+                defaults.ready_stability_window_sec,
+            ),
+            retry_count=_nonnegative_int(
+                raw_policy.get("retry_count"), defaults.retry_count
+            ),
+            retry_backoff_sec=_nonnegative_float(
+                raw_policy.get("retry_backoff_sec"), defaults.retry_backoff_sec
             ),
         )
 
@@ -139,6 +212,7 @@ class DataCollectionSupervisor(Node):
         self._device_specs = {}
         self._devices = {}
         self._current_recipe = None
+        self._health_monitor.reset()
         self._session_manager.end_session()
 
     def _load_recipe_or_fail(self, recipe_id: str) -> RecipeSpec | None:
@@ -148,19 +222,61 @@ class DataCollectionSupervisor(Node):
         return recipe
 
     def _install_recipe(self, recipe: RecipeSpec) -> None:
-        self._current_recipe = recipe
+        runtime_devices = [self._apply_runtime_config(device) for device in recipe.devices]
+        self._current_recipe = RecipeSpec(
+            recipe_id=recipe.recipe_id,
+            path=recipe.path,
+            devices=runtime_devices,
+            record_topics=list(recipe.record_topics),
+        )
         self._selected_recipe_id = recipe.recipe_id
-        self._device_specs = {device.device_id: device for device in recipe.devices}
+        self._device_specs = {device.device_id: device for device in runtime_devices}
         self._devices = {
             device.device_id: self._create_device_state(device)
-            for device in recipe.devices
+            for device in runtime_devices
         }
         self._adapters = {
             device.device_id: create_adapter(device, node=self)
-            for device in recipe.devices
+            for device in runtime_devices
         }
+        self._health_monitor.reset()
         self._clear_faults()
         self._publish_state()
+
+    def _apply_runtime_config(self, device: DeviceSpec) -> DeviceSpec:
+        config = dict(device.config)
+
+        if device.adapter == "camera" and self._config.cameras_config is not None:
+            config.setdefault("cameras_config", str(self._config.cameras_config))
+
+        if device.adapter == "htc" and self._config.trackers_config is not None:
+            config.setdefault("trackers_config", str(self._config.trackers_config))
+
+        if device.adapter == "marvin":
+            raw_launch_arguments = config.get("launch_arguments")
+            launch_arguments = {}
+            if isinstance(raw_launch_arguments, dict):
+                launch_arguments.update(raw_launch_arguments)
+            if self._config.cameras_config is not None:
+                launch_arguments.setdefault("cameras_config", str(self._config.cameras_config))
+            if self._config.trackers_config is not None:
+                launch_arguments.setdefault("trackers_config", str(self._config.trackers_config))
+            if launch_arguments:
+                config["launch_arguments"] = launch_arguments
+
+        if device.adapter == "manus":
+            if self._config.manus_config is not None:
+                config.setdefault("config_file", str(self._config.manus_config))
+            if self._config.manus_user_name is not None:
+                config.setdefault("user_name", self._config.manus_user_name)
+
+        return DeviceSpec(
+            device_id=device.device_id,
+            adapter=device.adapter,
+            required=device.required,
+            depends_on=list(device.depends_on),
+            config=config,
+        )
 
     def _create_device_state(self, device: DeviceSpec) -> DeviceState:
         msg = DeviceState()
@@ -188,6 +304,52 @@ class DataCollectionSupervisor(Node):
             msg.last_ready_stamp = self.get_clock().now().to_msg()
         self._publish_state()
 
+    def _update_device_health(self, device_id: str, health_state: int, summary: str) -> None:
+        msg = self._devices[device_id]
+        if msg.health_state == health_state and msg.summary == summary:
+            return
+        msg.health_state = health_state
+        msg.summary = summary
+        if health_state == DeviceState.HEALTH_OK:
+            msg.last_ready_stamp = self.get_clock().now().to_msg()
+        self._event_log.record(f"{device_id}: health={health_state} summary={summary}")
+        self._publish_state()
+
+    def _health_monitor_enabled(self) -> bool:
+        return self._state.system_state in {
+            SystemStates.READY,
+            SystemStates.ARMED,
+            SystemStates.RECORDING,
+            SystemStates.PAUSED,
+        }
+
+    def _run_health_monitor(self) -> None:
+        if self._current_recipe is None or not self._health_monitor_enabled():
+            return
+
+        reports = self._health_monitor.evaluate(
+            self._current_recipe.devices,
+            self._adapters,
+            fault_on_unhealthy=self._state.system_state == SystemStates.RECORDING,
+        )
+        fatal_device_id = ""
+        fatal_summary = ""
+        for device in self._current_recipe.devices:
+            report = reports.get(device.device_id)
+            if report is None:
+                continue
+            self._update_device_health(
+                device.device_id,
+                report.health_state,
+                report.summary,
+            )
+            if report.should_fault and not fatal_summary:
+                fatal_device_id = device.device_id
+                fatal_summary = report.summary
+
+        if fatal_summary and self._state.system_state != SystemStates.FAULT:
+            self._set_fault(fatal_summary, device_id=fatal_device_id)
+
     def _all_dependency_devices_ready(self, device: DeviceSpec) -> bool:
         for dependency_id in device.depends_on:
             dependency_state = self._devices.get(dependency_id)
@@ -203,6 +365,15 @@ class DataCollectionSupervisor(Node):
         feedback.detail = detail
         goal_handle.publish_feedback(feedback)
 
+    def _device_ready_timeout_sec(self, device: DeviceSpec) -> float:
+        raw_timeout = device.config.get("ready_timeout_sec")
+        if raw_timeout is None:
+            return self._startup_policy.startup_timeout_sec
+        return _nonnegative_float(
+            raw_timeout,
+            self._startup_policy.startup_timeout_sec,
+        )
+
     def _command_blocked(self, command: str) -> str | None:
         if is_command_allowed(self._state.system_state, command):
             return None
@@ -211,8 +382,106 @@ class DataCollectionSupervisor(Node):
             f"allowed={self._state.allowed_commands}"
         )
 
+    def _attempt_device_start(self, device: DeviceSpec, goal_handle) -> str | None:
+        adapter = self._adapters[device.device_id]
+        max_attempts = 1 + self._startup_policy.retry_count
+        ready_timeout_sec = self._device_ready_timeout_sec(device)
+
+        for attempt_index in range(max_attempts):
+            attempt_number = attempt_index + 1
+            attempt_label = f"attempt {attempt_number}/{max_attempts}"
+            self._mark_device(
+                device.device_id,
+                DeviceState.LIFECYCLE_STARTING,
+                DeviceState.HEALTH_UNKNOWN,
+                f"Running precheck ({attempt_label}).",
+            )
+            self._publish_feedback(
+                goal_handle,
+                StartSystem,
+                f"Precheck {device.device_id} ({attempt_label}).",
+            )
+
+            precheck = adapter.precheck()
+            if precheck.is_failure():
+                failure = precheck.summary
+            else:
+                bringup = adapter.bringup()
+                if bringup.is_failure():
+                    failure = bringup.summary
+                else:
+                    ready = adapter.wait_ready(timeout_sec=ready_timeout_sec)
+                    if not ready.is_failure():
+                        self._mark_device(
+                            device.device_id,
+                            DeviceState.LIFECYCLE_READY,
+                            DeviceState.HEALTH_OK,
+                            ready.summary,
+                            ready=True,
+                        )
+                        self._publish_feedback(
+                            goal_handle,
+                            StartSystem,
+                            f"Device {device.device_id} ready ({attempt_label}).",
+                        )
+                        return None
+                    failure = ready.summary
+
+            self.get_logger().warn(
+                f"Startup {attempt_label} failed for {device.device_id}: {failure}"
+            )
+            self._mark_device(
+                device.device_id,
+                DeviceState.LIFECYCLE_STARTING,
+                DeviceState.HEALTH_DEGRADED,
+                f"{failure} [{attempt_label}]",
+            )
+            adapter.shutdown()
+
+            if attempt_number >= max_attempts:
+                self._mark_device(
+                    device.device_id,
+                    DeviceState.LIFECYCLE_FAULT,
+                    DeviceState.HEALTH_FAILED,
+                    failure,
+                )
+                return failure
+
+            if self._startup_policy.retry_backoff_sec > 0.0:
+                self._publish_feedback(
+                    goal_handle,
+                    StartSystem,
+                    f"{device.device_id} failed {attempt_label}; retrying in "
+                    f"{self._startup_policy.retry_backoff_sec:.1f}s.",
+                )
+                time.sleep(self._startup_policy.retry_backoff_sec)
+
+        return f"{device.device_id}: startup attempts exhausted unexpectedly."
+
+    def _rollback_started_devices(self, started_device_ids: list[str]) -> str | None:
+        rollback_failure = None
+        for device_id in reversed(started_device_ids):
+            device = self._device_specs[device_id]
+            self._mark_device(
+                device_id,
+                DeviceState.LIFECYCLE_STOPPING,
+                DeviceState.HEALTH_UNKNOWN,
+                "Rolling back after startup failure.",
+            )
+            result = self._adapters[device_id].shutdown()
+            if result.is_failure() and device.required and rollback_failure is None:
+                rollback_failure = result.summary
+            self._mark_device(
+                device_id,
+                DeviceState.LIFECYCLE_IDLE,
+                DeviceState.HEALTH_UNKNOWN,
+                result.summary,
+            )
+        return rollback_failure
+
     def _bringup_devices(self, goal_handle) -> str | None:
         assert self._current_recipe is not None
+        started_device_ids: list[str] = []
 
         self._set_system_state(
             SystemStates.STARTING,
@@ -227,46 +496,23 @@ class DataCollectionSupervisor(Node):
 
         for device in self._current_recipe.devices:
             if not self._all_dependency_devices_ready(device):
-                return (
+                failure = (
                     f"Device {device.device_id} has unresolved dependencies: "
                     f"{device.depends_on}"
                 )
+                rollback_failure = self._rollback_started_devices(started_device_ids)
+                if rollback_failure is not None:
+                    return f"{failure}\nRollback failure: {rollback_failure}"
+                return failure
 
-            adapter = self._adapters[device.device_id]
-            self._mark_device(
-                device.device_id,
-                DeviceState.LIFECYCLE_STARTING,
-                DeviceState.HEALTH_UNKNOWN,
-                "Running precheck.",
-            )
-            self._publish_feedback(
-                goal_handle, StartSystem, f"Precheck {device.device_id}."
-            )
+            failure = self._attempt_device_start(device, goal_handle)
+            if failure is not None:
+                rollback_failure = self._rollback_started_devices(started_device_ids)
+                if rollback_failure is not None:
+                    return f"{failure}\nRollback failure: {rollback_failure}"
+                return failure
 
-            precheck = adapter.precheck()
-            if precheck.is_failure():
-                return precheck.summary
-
-            bringup = adapter.bringup()
-            if bringup.is_failure():
-                return bringup.summary
-
-            ready = adapter.wait_ready(timeout_sec=0.0)
-            if ready.is_failure():
-                return ready.summary
-
-            self._mark_device(
-                device.device_id,
-                DeviceState.LIFECYCLE_READY,
-                DeviceState.HEALTH_OK,
-                ready.summary,
-                ready=True,
-            )
-            self._publish_feedback(
-                goal_handle,
-                StartSystem,
-                f"Device {device.device_id} ready.",
-            )
+            started_device_ids.append(device.device_id)
 
         return None
 

@@ -149,9 +149,36 @@ class HtcAdapter(AdapterBase):
         return AdapterResult.ok(f"{self.device.device_id}: HTC launch stopped.")
 
     def diagnose(self) -> AdapterResult:
+        if self._process is None:
+            return AdapterResult.failed(f"{self.device.device_id}: HTC launch not started.")
+        if self._process.poll() is not None:
+            return AdapterResult.failed(
+                f"{self.device.device_id}: HTC launch exited with code {self._process.returncode}."
+            )
+
+        trackers_config = self._trackers_config_path()
+        expected_frames = self._expected_frames(trackers_config)
+        output = self._read_tf_message(timeout_sec=self._diagnose_timeout_sec())
+        published_frames = [
+            frame for frame in expected_frames if output and f"child_frame_id: {frame}" in output
+        ]
+        if len(published_frames) != len(expected_frames):
+            return AdapterResult.degraded(
+                f"{self.device.device_id}: missing tracker TF frames. "
+                f"expected={expected_frames} seen={published_frames}",
+                metadata={
+                    "expected_frames": expected_frames,
+                    "published_frames": published_frames,
+                    "trackers_config": str(trackers_config),
+                    "log_path": None if self._log_path is None else str(self._log_path),
+                },
+            )
+
         return AdapterResult.ok(
-            self._diagnostic_summary(),
+            f"{self.device.device_id}: tracker TF healthy with frames {expected_frames}.",
             metadata={
+                "expected_frames": expected_frames,
+                "published_frames": published_frames,
                 "log_path": None if self._log_path is None else str(self._log_path),
                 "command": self._launch_command,
             },
@@ -240,6 +267,13 @@ class HtcAdapter(AdapterBase):
             return float(configured)
         except (TypeError, ValueError):
             return 15.0
+
+    def _diagnose_timeout_sec(self) -> float:
+        configured = self.device.config.get("diagnose_timeout_sec", 1.0)
+        try:
+            return max(0.2, float(configured))
+        except (TypeError, ValueError):
+            return 1.0
 
     def _read_tf_message(self, timeout_sec: float) -> str:
         try:

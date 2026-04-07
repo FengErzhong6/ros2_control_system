@@ -18,6 +18,10 @@ class AdapterResult:
         return cls(status="FAILED", summary=summary, metadata=metadata)
 
     @classmethod
+    def degraded(cls, summary: str, metadata: dict | None = None) -> "AdapterResult":
+        return cls(status="DEGRADED", summary=summary, metadata=metadata)
+
+    @classmethod
     def unsupported(
         cls, summary: str = "Not implemented", metadata: dict | None = None
     ) -> "AdapterResult":

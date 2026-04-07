@@ -146,9 +146,31 @@ class CameraAdapter(AdapterBase):
         return AdapterResult.ok(f"{self.device.device_id}: camera launch stopped.")
 
     def diagnose(self) -> AdapterResult:
+        if self._process is None:
+            return AdapterResult.failed(f"{self.device.device_id}: camera launch not started.")
+        if self._process.poll() is not None:
+            return AdapterResult.failed(
+                f"{self.device.device_id}: camera launch exited with code {self._process.returncode}."
+            )
+
+        cameras_config = self._cameras_config_path()
+        camera_cfg = self._camera_cfg(cameras_config)
+        image_topic = self._image_topic(camera_cfg)
+        if not self._topic_has_message(image_topic, timeout_sec=self._diagnose_timeout_sec()):
+            return AdapterResult.degraded(
+                f"{self.device.device_id}: no recent image received on {image_topic}.",
+                metadata={
+                    "image_topic": image_topic,
+                    "driver": camera_cfg["driver"],
+                    "log_path": None if self._log_path is None else str(self._log_path),
+                },
+            )
+
         return AdapterResult.ok(
-            self._diagnostic_summary(),
+            f"{self.device.device_id}: preview/record path healthy at {image_topic}.",
             metadata={
+                "image_topic": image_topic,
+                "driver": camera_cfg["driver"],
                 "log_path": None if self._log_path is None else str(self._log_path),
                 "command": self._launch_command,
             },
@@ -272,6 +294,13 @@ class CameraAdapter(AdapterBase):
             return float(configured)
         except (TypeError, ValueError):
             return 20.0
+
+    def _diagnose_timeout_sec(self) -> float:
+        configured = self.device.config.get("diagnose_timeout_sec", 0.75)
+        try:
+            return max(0.1, float(configured))
+        except (TypeError, ValueError):
+            return 0.75
 
     def _topic_has_message(self, topic_name: str, timeout_sec: float) -> bool:
         if self.node is not None:

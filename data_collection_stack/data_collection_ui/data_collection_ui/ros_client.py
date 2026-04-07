@@ -181,7 +181,7 @@ class RosClient:
 
     def _declare_parameters(self) -> None:
         defaults = self._default_paths()
-        self._node.declare_parameter("recipe_id", "marvin_tracker_collection")
+        self._node.declare_parameter("recipe_id", "marvin_tracker_manus_camera_collection")
         self._node.declare_parameter("recipe_directory", str(defaults["recipe_directory"]))
         self._node.declare_parameter("cameras_config", str(defaults["cameras_config"]))
         self._node.declare_parameter("ui_config", str(defaults["ui_config"]))

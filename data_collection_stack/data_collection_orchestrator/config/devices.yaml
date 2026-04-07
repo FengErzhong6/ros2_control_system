@@ -17,7 +17,7 @@ device_registry:
     launch_package: manus_system
     launch_file: manus_raw_publisher.launch.py
     ready_signals:
-      - /manus/gloves/raw
+      - /manus_raw_publisher_node/gloves_raw
   camera:
     adapter: camera
     launch_package: camera_system

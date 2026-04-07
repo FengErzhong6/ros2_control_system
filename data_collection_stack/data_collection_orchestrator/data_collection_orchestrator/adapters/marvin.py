@@ -145,9 +145,49 @@ class MarvinAdapter(AdapterBase):
         return AdapterResult.ok(f"{self.device.device_id}: Marvin launch stopped.")
 
     def diagnose(self) -> AdapterResult:
+        if self._process is None:
+            return AdapterResult.failed(f"{self.device.device_id}: Marvin launch not started.")
+        if self._process.poll() is not None:
+            return AdapterResult.failed(
+                f"{self.device.device_id}: Marvin launch exited with code {self._process.returncode}."
+            )
+
+        controllers = self._list_controllers()
+        if controllers is None:
+            return AdapterResult.degraded(
+                f"{self.device.device_id}: unable to query controller_manager.",
+                metadata={
+                    "log_path": None if self._log_path is None else str(self._log_path),
+                    "command": self._launch_command,
+                },
+            )
+
+        missing_controllers = [
+            controller_name
+            for controller_name, required_state in self.REQUIRED_CONTROLLERS.items()
+            if controllers.get(controller_name) != required_state
+        ]
+        if missing_controllers:
+            return AdapterResult.failed(
+                f"{self.device.device_id}: required controllers not active: {missing_controllers}",
+                metadata={"controllers": controllers},
+            )
+
+        missing_services = [
+            service_name
+            for service_name, service_type in self.REQUIRED_SERVICES.items()
+            if not self._service_available(service_name, service_type)
+        ]
+        if missing_services:
+            return AdapterResult.failed(
+                f"{self.device.device_id}: required teleop services unavailable: {missing_services}",
+                metadata={"controllers": controllers},
+            )
+
         return AdapterResult.ok(
-            self._diagnostic_summary(),
+            f"{self.device.device_id}: controller_manager and teleop services healthy.",
             metadata={
+                "controllers": controllers,
                 "log_path": None if self._log_path is None else str(self._log_path),
                 "command": self._launch_command,
             },

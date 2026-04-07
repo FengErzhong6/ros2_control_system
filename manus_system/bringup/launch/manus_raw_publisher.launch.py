@@ -8,7 +8,8 @@ from launch.substitutions import PathJoinSubstitution
 
 def generate_launch_description():
     user_name = LaunchConfiguration("user_name")
-    config = PathJoinSubstitution(
+    config_file = LaunchConfiguration("config_file")
+    default_config = PathJoinSubstitution(
         [FindPackageShare("manus_system"), "config", "manus_raw_publisher.yaml"]
     )
 
@@ -17,11 +18,16 @@ def generate_launch_description():
         executable="manus_raw_publisher_node",
         name="manus_raw_publisher_node",
         output="screen",
-        parameters=[config, {"user_name": user_name}],
+        parameters=[config_file, {"user_name": user_name}],
     )
 
     return LaunchDescription(
         [
+            DeclareLaunchArgument(
+                "config_file",
+                default_value=default_config,
+                description="Path to the MANUS raw publisher parameter YAML file.",
+            ),
             DeclareLaunchArgument(
                 "user_name",
                 default_value="",

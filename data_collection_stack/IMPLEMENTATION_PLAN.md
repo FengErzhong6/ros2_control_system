@@ -537,6 +537,28 @@ UI preview component should use:
 If Python preview is still insufficient later, the preview module can be migrated to C++/Qt without changing orchestrator semantics.
 
 
+### 10.4 Control-State Recording Rule
+
+The same split used for camera preview vs record must also be applied to high-rate control state.
+
+For control-related topics such as `/joint_states`:
+
+- Control Path
+  original topic at controller-native rate, consumed by controllers, monitors, and fast diagnostics
+- Archive Path
+  stack-owned reduced-rate topic such as `/joint_states_record`, consumed by rosbag and replay/export tools
+
+Important rule:
+
+- rosbag must not be expected to downsample a hot control topic on its own
+- if archival rate must be reduced, it must be reduced before rosbag by a dedicated bridge or downsampler node
+
+Practical consequence:
+
+- a 1 kHz controller feedback topic should not be recorded directly by default on the control host
+- a lower-rate archive topic, for example 50 to 100 Hz, should be the default recording source for trajectory-style datasets
+
+
 ## 11. Recorder Design
 
 Recording must be centralized in `record_manager`.
@@ -550,6 +572,62 @@ Responsibilities:
 - stop rosbag cleanly
 - write result summary
 - record performance metrics and fault history
+
+
+### 11.1 Boundary Rule
+
+The recorder must be owned by `data_collection_stack`, not by a device package, UI widget, joystick node, or keyboard gate helper.
+
+Rules:
+
+- device packages may keep standalone recording helpers for local debugging
+- stack-driven collection sessions must disable package-owned recording paths
+- recipe, topic selection, sample segmentation, and session persistence must be decided by the supervisor and `record_manager`
+
+
+### 11.2 Bag Lifecycle Rule
+
+The production recorder must use one bag per collection session by default.
+
+Rules:
+
+- `StartSession` starts one rosbag process for the session
+- `StopSession` stops that rosbag process
+- sample boundaries inside one session should be represented by markers and event logs, not by stopping and recreating rosbag for every sample
+- pause or resume may be used within one active session, but stop and flush must not sit in the operator hot path for per-sample interaction
+
+This rule exists because repeated `stop -> flush -> start new bag` on the control host can introduce large latency spikes and unstable teleoperation behavior.
+
+
+### 11.3 Archived Topic Policy
+
+`record_manager` should record archive-suitable topics, not blindly record every control-path topic.
+
+Rules:
+
+- high-rate control topics should have stack-owned archive variants when needed
+- example:
+  - control topic `/joint_states`
+  - archive topic `/joint_states_record`
+- replay and export tools should accept configurable bag topics so they can consume archive topics without requiring the raw control-rate source
+
+For the first trajectory-focused implementation:
+
+- use reduced-rate archived joint state for session recording by default
+- do not make raw high-rate `/joint_states` the default recording source on the control host
+
+
+### 11.4 Performance Rule
+
+Recorder behavior must be chosen to protect teleoperation and control responsiveness first.
+
+Rules:
+
+- synchronous bag stop and flush must not happen on every sample boundary
+- compression should not be the default first-line optimization on the control host because online compression can increase CPU load and worsen latency
+- control loop frequency must not be reduced only to make recording easier unless there is a separate control justification
+- performance validation must first be done with recording disabled, then repeated with the centralized recorder enabled
+
 
 Recommended session layout:
 
@@ -568,6 +646,7 @@ data/
         events.jsonl
         faults.jsonl
         performance.jsonl
+        samples.jsonl
       rosbag/
       exports/
 ```
@@ -581,6 +660,8 @@ data/
 - host info
 - git commit if available
 - selected devices
+- recording mode and bag topic groups
+- sample segmentation strategy
 
 
 ## 12. UI Design
@@ -767,6 +848,10 @@ Typical contents:
 - recording root
 - bag naming policy
 - default bag topic groups
+- reduced-rate archive topic policy
+- sample marker policy
+- storage backend and writer options
+- whether compression is allowed by default
 - preview rate limits
 - session metadata defaults
 
@@ -805,6 +890,7 @@ The current codebase already contains several important YAML files. They should 
   remove `start_manus` from `marvin` config and let recipe decide whether `manus` participates
 - `marvin_system/bringup/config/marvin_tracker_teleop.yaml`
   move its recording-related contents to stack-owned session or recipe config because recording policy is not a `marvin` intrinsic
+  stack-launched collection flow should disable package-owned keyboard-gated recording and let `record_manager` own rosbag lifecycle
 - `htc_system/bringup/config/trackers.yaml`
   split publish defaults from deployment inventory
   keep generic publisher defaults in `htc_system`
@@ -937,12 +1023,17 @@ Deliverables:
 
 - `record_manager`
 - session directory generation
+- one bag per session by default, not one bag per sample
 - rosbag lifecycle
+- reduced-rate archive topics for high-rate control data such as `/joint_states_record`
+- sample marker and event-log based segmentation
 - config snapshot and event log persistence
 
 Acceptance:
 
 - start/stop session works through supervisor only
+- recording path does not introduce unacceptable teleop latency
+- sample boundaries are recoverable from markers and logs without restarting rosbag
 - metadata is complete and replayable
 
 
@@ -999,10 +1090,12 @@ Testing should be layered.
 
 ### Hardware-In-The-Loop Tests
 
+- full device chain startup with recording disabled
 - camera bringup stability
 - tracker TF freshness
 - marvin controller activation
 - recorder throughput
+- recorder-on vs recorder-off latency comparison
 
 ### Operator Acceptance Tests
 
@@ -1054,6 +1147,8 @@ Recommended immediate actions:
 3. Implement a headless `supervisor` skeleton with a minimal state machine
 4. Integrate `marvin` adapter first
 5. Integrate cameras with preview and recording split
-6. Add a minimal Qt UI after the headless flow works
+6. Validate the full hardware chain without centralized recording first
+7. Implement centralized recording only after the no-record path is stable
+8. Add a minimal Qt UI after the headless flow works
 
 This ordering keeps the core control plane stable before UI complexity is introduced.

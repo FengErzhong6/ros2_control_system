@@ -20,6 +20,6 @@ devices:
       - manus_glove
 record_topics:
   - /joint_states
-  - /manus/gloves/raw
+  - /manus_raw_publisher_node/gloves_raw
   - /tf
   - /tf_static
