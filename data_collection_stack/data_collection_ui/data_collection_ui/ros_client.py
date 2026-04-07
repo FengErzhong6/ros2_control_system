@@ -1,17 +1,27 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 import threading
 import time
 
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
+from data_collection_interfaces.action import (
+    GoHome,
+    ShutdownSystem,
+    StartSession,
+    StartSystem,
+    StopSession,
+)
+from data_collection_interfaces.msg import DeviceState, FaultEvent, SystemState
+from data_collection_interfaces.srv import AcknowledgeFault
 import rclpy
+from rclpy.action import ActionClient
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
-from data_collection_interfaces.msg import DeviceState, FaultEvent, SystemState
 import yaml
 
 from .view_model import CameraStreamConfig, UiRuntimeConfig
@@ -71,6 +81,13 @@ class CameraStreamSnapshot:
     header_stamp_sec: float | None
 
 
+@dataclass(frozen=True)
+class UiEventEntry:
+    stamp_sec: float
+    level: str
+    message: str
+
+
 @dataclass
 class _CameraStreamRuntime:
     config: CameraStreamConfig
@@ -90,10 +107,25 @@ class RosClient:
         self._config = self._load_runtime_config()
         self._lock = threading.Lock()
         self._system_state = SystemStateSnapshot(recipe_id=self._config.recipe_id)
+        self._event_entries: deque[UiEventEntry] = deque(maxlen=200)
+        self._pending_commands: set[str] = set()
         self._camera_runtimes = {
             stream.camera_id: _CameraStreamRuntime(config=stream, rx_window_start=time.monotonic())
             for stream in self._config.camera_streams
         }
+        self._start_system_client = ActionClient(self._node, StartSystem, "start_system")
+        self._shutdown_system_client = ActionClient(
+            self._node,
+            ShutdownSystem,
+            "shutdown_system",
+        )
+        self._start_session_client = ActionClient(self._node, StartSession, "start_session")
+        self._stop_session_client = ActionClient(self._node, StopSession, "stop_session")
+        self._go_home_client = ActionClient(self._node, GoHome, "go_home")
+        self._acknowledge_fault_client = self._node.create_client(
+            AcknowledgeFault,
+            "acknowledge_fault",
+        )
         self._subscriptions = [
             self._node.create_subscription(SystemState, "system_state", self._on_system_state, 10)
         ]
@@ -111,6 +143,7 @@ class RosClient:
             f"recipe={self._config.recipe_id} refresh_hz={self._config.refresh_hz} "
             f"camera_topics={[stream.preview_topic for stream in self._config.camera_streams]}"
         )
+        self._record_event("INFO", f"UI ready for recipe {self._config.recipe_id}.")
 
         self._executor = SingleThreadedExecutor()
         self._executor.add_node(self._node)
@@ -148,6 +181,14 @@ class RosClient:
         with self._lock:
             return self._system_state
 
+    def event_entries(self) -> tuple[UiEventEntry, ...]:
+        with self._lock:
+            return tuple(self._event_entries)
+
+    def pending_commands(self) -> tuple[str, ...]:
+        with self._lock:
+            return tuple(sorted(self._pending_commands))
+
     def camera_stream_snapshots(self) -> list[CameraStreamSnapshot]:
         now = time.monotonic()
         with self._lock:
@@ -179,6 +220,86 @@ class RosClient:
                 )
         return snapshots
 
+    def connect_system(self, *, operator_id: str, site_name: str) -> None:
+        goal = StartSystem.Goal()
+        goal.recipe_id = self._config.recipe_id
+        goal.site_name = site_name.strip()
+        goal.operator_id = operator_id.strip()
+        self._send_action(
+            command_name="StartSystem",
+            client=self._start_system_client,
+            goal=goal,
+            dispatch_message=(
+                f"Connect requested for recipe {self._config.recipe_id} "
+                f"(operator={goal.operator_id or 'unknown'}, site={goal.site_name or 'default'})."
+            ),
+        )
+
+    def disconnect_system(self, *, force: bool = False) -> None:
+        goal = ShutdownSystem.Goal()
+        goal.force = force
+        self._send_action(
+            command_name="ShutdownSystem",
+            client=self._shutdown_system_client,
+            goal=goal,
+            dispatch_message=f"Disconnect requested. force={force}.",
+        )
+
+    def start_collection(self, *, operator_id: str, session_tag: str) -> None:
+        goal = StartSession.Goal()
+        goal.operator_id = operator_id.strip()
+        goal.session_tag = session_tag.strip()
+        self._send_action(
+            command_name="StartSession",
+            client=self._start_session_client,
+            goal=goal,
+            dispatch_message=(
+                f"Start Collection requested "
+                f"(operator={goal.operator_id or 'unknown'}, tag={goal.session_tag or '-'})."
+            ),
+        )
+
+    def stop_collection(self, *, reason: str = "ui_stop") -> None:
+        goal = StopSession.Goal()
+        goal.reason = reason
+        self._send_action(
+            command_name="StopSession",
+            client=self._stop_session_client,
+            goal=goal,
+            dispatch_message=f"Stop Collection requested. reason={reason}.",
+        )
+
+    def go_home(self) -> None:
+        goal = GoHome.Goal()
+        goal.arm_after_home = False
+        self._send_action(
+            command_name="GoHome",
+            client=self._go_home_client,
+            goal=goal,
+            dispatch_message="Go Home requested.",
+        )
+
+    def acknowledge_fault(self, *, fault_id: str = "") -> None:
+        command_name = "AcknowledgeFault"
+        if not self._begin_command(command_name):
+            return
+
+        if not self._acknowledge_fault_client.wait_for_service(timeout_sec=1.0):
+            self._record_event("ERROR", "Acknowledge Fault service is unavailable.")
+            self._finish_command(command_name)
+            return
+
+        request = AcknowledgeFault.Request()
+        request.fault_id = fault_id
+        self._record_event("INFO", "Acknowledge Fault requested.")
+        future = self._acknowledge_fault_client.call_async(request)
+        future.add_done_callback(
+            lambda completed_future: self._handle_acknowledge_fault_result(
+                command_name,
+                completed_future,
+            )
+        )
+
     def _declare_parameters(self) -> None:
         defaults = self._default_paths()
         self._node.declare_parameter("recipe_id", "marvin_tracker_manus_camera_collection")
@@ -190,9 +311,7 @@ class RosClient:
         try:
             bringup_share = Path(get_package_share_directory("data_collection_bringup"))
         except PackageNotFoundError:
-            bringup_share = (
-                Path(__file__).resolve().parents[2] / "data_collection_bringup"
-            )
+            bringup_share = Path(__file__).resolve().parents[2] / "data_collection_bringup"
         try:
             camera_share = Path(get_package_share_directory("camera_system"))
         except PackageNotFoundError:
@@ -308,6 +427,7 @@ class RosClient:
         return ""
 
     def _on_system_state(self, msg: SystemState) -> None:
+        previous_snapshot = self.system_state_snapshot()
         snapshot = SystemStateSnapshot(
             system_state=msg.system_state,
             recipe_id=msg.recipe_id,
@@ -319,6 +439,14 @@ class RosClient:
         )
         with self._lock:
             self._system_state = snapshot
+        if (
+            snapshot.system_state != previous_snapshot.system_state
+            or snapshot.summary != previous_snapshot.summary
+        ):
+            self._record_event(
+                "STATE",
+                f"{snapshot.system_state}: {snapshot.summary or 'No summary'}",
+            )
 
     def _on_image(self, camera_id: str, msg: Image) -> None:
         now = time.monotonic()
@@ -379,3 +507,113 @@ class RosClient:
             detail=msg.detail,
             stamp_sec=stamp_sec,
         )
+
+    def _begin_command(self, command_name: str) -> bool:
+        with self._lock:
+            if command_name in self._pending_commands:
+                self._event_entries.append(
+                    UiEventEntry(
+                        stamp_sec=time.time(),
+                        level="WARN",
+                        message=f"{command_name} is already in progress.",
+                    )
+                )
+                return False
+            self._pending_commands.add(command_name)
+        return True
+
+    def _finish_command(self, command_name: str) -> None:
+        with self._lock:
+            self._pending_commands.discard(command_name)
+
+    def _record_event(self, level: str, message: str) -> None:
+        with self._lock:
+            self._event_entries.append(
+                UiEventEntry(
+                    stamp_sec=time.time(),
+                    level=level,
+                    message=message,
+                )
+            )
+
+    def _send_action(self, *, command_name: str, client, goal, dispatch_message: str) -> None:
+        if not self._begin_command(command_name):
+            return
+
+        if not client.wait_for_server(timeout_sec=1.0):
+            self._record_event("ERROR", f"{command_name} action server is unavailable.")
+            self._finish_command(command_name)
+            return
+
+        self._record_event("INFO", dispatch_message)
+        goal_future = client.send_goal_async(goal)
+        goal_future.add_done_callback(
+            lambda completed_future: self._handle_goal_response(
+                command_name,
+                completed_future,
+            )
+        )
+
+    def _handle_goal_response(self, command_name: str, future) -> None:
+        try:
+            goal_handle = future.result()
+        except Exception as exc:  # pragma: no cover - defensive callback path
+            self._record_event("ERROR", f"{command_name} goal submission failed: {exc}")
+            self._finish_command(command_name)
+            return
+
+        if goal_handle is None or not goal_handle.accepted:
+            self._record_event("ERROR", f"{command_name} was rejected by the server.")
+            self._finish_command(command_name)
+            return
+
+        self._record_event("INFO", f"{command_name} accepted.")
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(
+            lambda completed_future: self._handle_action_result(
+                command_name,
+                completed_future,
+            )
+        )
+
+    def _handle_action_result(self, command_name: str, future) -> None:
+        try:
+            response = future.result()
+        except Exception as exc:  # pragma: no cover - defensive callback path
+            self._record_event("ERROR", f"{command_name} result failed: {exc}")
+            self._finish_command(command_name)
+            return
+
+        result = response.result
+        success = bool(getattr(result, "success", False))
+        message = str(getattr(result, "message", "")).strip()
+        session_id = str(getattr(result, "session_id", "")).strip()
+        detail_suffix = ""
+        if session_id:
+            detail_suffix = f" (session_id={session_id})"
+
+        if success:
+            self._record_event(
+                "INFO",
+                f"{command_name} succeeded: {message or 'No message'}{detail_suffix}",
+            )
+        else:
+            self._record_event(
+                "ERROR",
+                f"{command_name} failed: {message or 'No message'}{detail_suffix}",
+            )
+        self._finish_command(command_name)
+
+    def _handle_acknowledge_fault_result(self, command_name: str, future) -> None:
+        try:
+            response = future.result()
+        except Exception as exc:  # pragma: no cover - defensive callback path
+            self._record_event("ERROR", f"{command_name} failed: {exc}")
+            self._finish_command(command_name)
+            return
+
+        if response.success:
+            self._record_event("INFO", f"{command_name} succeeded: {response.message}")
+        else:
+            self._record_event("ERROR", f"{command_name} failed: {response.message}")
+        self._finish_command(command_name)

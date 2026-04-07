@@ -132,7 +132,7 @@ class CameraTileWidget(QFrame):
     def _set_waiting_text(self) -> None:
         self._stats_label.setText(
             f"Topic: {self._stream_config.preview_topic}\n"
-            "RX FPS: 0.0\n"
+            "Stream FPS: 0.0\n"
             "Display FPS: 0.0\n"
             "Frame Age: n/a\n"
             "Resolution: waiting"
@@ -150,7 +150,7 @@ class CameraTileWidget(QFrame):
 
         self._stats_label.setText(
             f"Topic: {snapshot.preview_topic}\n"
-            f"RX FPS: {snapshot.rx_fps:.1f}\n"
+            f"Stream FPS: {snapshot.rx_fps:.1f}\n"
             f"Display FPS: {self._display_fps:.1f}\n"
             f"Frame Age: {frame_age_text}\n"
             f"Resolution: {snapshot.image_msg.width}x{snapshot.image_msg.height}"
