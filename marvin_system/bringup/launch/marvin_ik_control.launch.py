@@ -76,11 +76,9 @@ def launch_setup(context):
         ' left_rpy:="', left_rpy, '"',
         ' right_xyz:="', right_xyz, '"',
         ' right_rpy:="', right_rpy, '"',
+        f" use_gripper_L:={'true' if grip_L else 'false'}",
+        f" use_gripper_R:={'true' if grip_R else 'false'}",
     ]
-    if grip_L:
-        xacro_cmd.append(" use_gripper_L:=true")
-    if grip_R:
-        xacro_cmd.append(" use_gripper_R:=true")
 
     robot_description = {
         "robot_description": ParameterValue(Command(xacro_cmd), value_type=str)

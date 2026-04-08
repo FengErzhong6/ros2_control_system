@@ -75,7 +75,9 @@ def generate_launch_description():
 
 def launch_setup(context):
     gui = LaunchConfiguration("gui")
-    use_mock_hardware = LaunchConfiguration("use_mock_hardware")
+    use_mock_hardware_value = (
+        LaunchConfiguration("use_mock_hardware").perform(context).lower() == "true"
+    )
     config_file = LaunchConfiguration("config_file").perform(context)
     config = load_launch_config(config_file)
     start_manus = bool(config.get("start_manus", False))
@@ -110,14 +112,12 @@ def launch_setup(context):
         ' left_rpy:="', left_rpy, '"',
         ' right_xyz:="', right_xyz, '"',
         ' right_rpy:="', right_rpy, '"',
-        " use_mock_hardware:=", use_mock_hardware,
+        f" use_mock_hardware:={'true' if use_mock_hardware_value else 'false'}",
+        f" use_gripper_L:={'true' if grip_L else 'false'}",
+        f" use_gripper_R:={'true' if grip_R else 'false'}",
         f" gripper_velocity:={gripper_velocity}",
         f" gripper_acceleration:={gripper_acceleration}",
     ]
-    if grip_L:
-        xacro_cmd.append(" use_gripper_L:=true")
-    if grip_R:
-        xacro_cmd.append(" use_gripper_R:=true")
 
     robot_description = {
         "robot_description": ParameterValue(Command(xacro_cmd), value_type=str)

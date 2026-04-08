@@ -1,0 +1,9 @@
+marvin_motion_server:
+  ros__parameters:
+    scene:
+      table:
+        enabled: true
+        size: [1.2, 0.8, 0.05]
+        pose:
+          position: [0.0, 0.0, -0.025]
+          orientation: [0.0, 0.0, 0.0, 1.0]

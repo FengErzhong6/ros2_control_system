@@ -84,7 +84,9 @@ def generate_launch_description():
 
 def launch_setup(context):
     gui = LaunchConfiguration("gui")
-    use_mock_hardware = LaunchConfiguration("use_mock_hardware")
+    use_mock_hardware_value = (
+        LaunchConfiguration("use_mock_hardware").perform(context).lower() == "true"
+    )
 
     trajectory_bag = LaunchConfiguration("trajectory_bag").perform(context).strip()
     if not trajectory_bag:
@@ -110,12 +112,10 @@ def launch_setup(context):
         ' left_rpy:="', left_rpy, '"',
         ' right_xyz:="', right_xyz, '"',
         ' right_rpy:="', right_rpy, '"',
-        " use_mock_hardware:=", use_mock_hardware,
+        f" use_mock_hardware:={'true' if use_mock_hardware_value else 'false'}",
+        f" use_gripper_L:={'true' if grip_L else 'false'}",
+        f" use_gripper_R:={'true' if grip_R else 'false'}",
     ]
-    if grip_L:
-        xacro_cmd.append(" use_gripper_L:=true")
-    if grip_R:
-        xacro_cmd.append(" use_gripper_R:=true")
 
     robot_description = {
         "robot_description": ParameterValue(Command(xacro_cmd), value_type=str)

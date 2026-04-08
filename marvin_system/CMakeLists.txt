@@ -14,12 +14,17 @@ export_windows_symbols()
 
 set(THIS_PACKAGE_INCLUDE_DEPENDS
   controller_interface
+  controller_manager_msgs
   geometry_msgs
   hardware_interface
+  moveit_core
+  moveit_msgs
+  moveit_ros_planning_interface
   pluginlib
   rclcpp
   rclcpp_lifecycle
   sensor_msgs
+  shape_msgs
   std_msgs
   std_srvs
   tf2_ros
@@ -170,6 +175,24 @@ ament_target_dependencies(joy_to_pose
   std_msgs
 )
 
+add_executable(motion_server
+  motion/src/motion_server.cpp
+)
+target_compile_features(motion_server PUBLIC cxx_std_17)
+ament_target_dependencies(motion_server
+  controller_manager_msgs
+  geometry_msgs
+  moveit_core
+  moveit_msgs
+  moveit_ros_planning_interface
+  rclcpp
+  sensor_msgs
+  shape_msgs
+  std_msgs
+  std_srvs
+  tf2_ros
+)
+
 add_executable(ik_solution_explorer
   test/ik_solution_explorer.cpp
 )
@@ -222,14 +245,33 @@ install(
     bringup/scripts/tracker_camera_startup_manager.py
     bringup/scripts/tracker_camera_dashboard.py
     bringup/scripts/tracker_teleop_keyboard.py
+    motion/scripts/motion_server.py
     description/scripts/joint_gui_publisher.py
     description/scripts/vector_marker_publisher.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
 install(
+  TARGETS
+    gui_joint_state_to_forward_command
+    joy_to_pose
+    motion_server
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(
   DIRECTORY bringup/config bringup/launch
   DESTINATION share/${PROJECT_NAME}/bringup
+)
+
+install(
+  DIRECTORY motion/config
+  DESTINATION share/${PROJECT_NAME}/motion
+)
+
+install(
+  FILES motion/README.md MOVEIT_INTEGRATION_PLAN.md
+  DESTINATION share/${PROJECT_NAME}/motion
 )
 
 install(

@@ -575,71 +575,11 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
         OnSetSend();
     }
 
-    // Move to home position if configured (joints 7→1 for safety).
-    // Runtime workspace guarding is intentionally armed only after this
-    // startup sequence completes so recovery from a low initial pose is not
-    // blocked by the running-time z-floor policy.
     if (has_home_position_) {
-        RCLCPP_INFO(get_logger(), "Moving to home position (Joint7 → Joint1) ...");
-        constexpr double kHomeTolDeg = 0.5;
-
-        double cmd_a[kJointsPerArm], cmd_b[kJointsPerArm];
-        for (size_t j = 0; j < kJointsPerArm; ++j) {
-            cmd_a[j] = static_cast<double>(dcss.m_Out[0].m_FB_Joint_PosE[j]);
-            cmd_b[j] = static_cast<double>(dcss.m_Out[1].m_FB_Joint_PosE[j]);
-        }
-
-        const auto home_deadline =
-            Clock::now() + std::chrono::milliseconds(home_timeout_ms_);
-        bool timed_out = false;
-
-        for (int jt = static_cast<int>(kJointsPerArm) - 1;
-             jt >= 0 && !timed_out; --jt) {
-            cmd_a[jt] = home_position_deg_[0][jt];
-            cmd_b[jt] = home_position_deg_[1][jt];
-
-            RCLCPP_INFO(get_logger(), "Homing Joint%d ...", jt + 1);
-
-            while (true) {
-                OnClearSet();
-                OnSetJointCmdPos_A(cmd_a);
-                OnSetJointCmdPos_B(cmd_b);
-                OnSetSend();
-
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-
-                if (OnGetBuf(&dcss)) {
-                    for (size_t arm = 0; arm < kArmCount; ++arm) {
-                        if (static_cast<ArmState>(dcss.m_State[arm].m_CurState)
-                            == ARM_STATE_ERROR) {
-                            RCLCPP_ERROR(get_logger(),
-                                "Arm %zu error during homing at Joint%d (err=%d).",
-                                arm, jt + 1, dcss.m_State[arm].m_ERRCode);
-                            return hardware_interface::CallbackReturn::ERROR;
-                        }
-                    }
-
-                    double fb_a = static_cast<double>(
-                        dcss.m_Out[0].m_FB_Joint_PosE[jt]);
-                    double fb_b = static_cast<double>(
-                        dcss.m_Out[1].m_FB_Joint_PosE[jt]);
-
-                    if (std::abs(fb_a - home_position_deg_[0][jt]) <= kHomeTolDeg &&
-                        std::abs(fb_b - home_position_deg_[1][jt]) <= kHomeTolDeg) {
-                        break;
-                    }
-                }
-
-                if (Clock::now() > home_deadline) {
-                    RCLCPP_WARN(get_logger(),
-                        "Home position timeout (%d ms) at Joint%d, continuing.",
-                        home_timeout_ms_, jt + 1);
-                    timed_out = true;
-                    break;
-                }
-            }
-        }
-        RCLCPP_INFO(get_logger(), "Home position sequence complete.");
+        RCLCPP_WARN(
+            get_logger(),
+            "Home position is configured in hardware parameters but startup auto-home is disabled. "
+            "Use the motion layer to execute a planned go-home sequence.");
     }
 
     // Seed ros2_control state & command interfaces from current feedback.

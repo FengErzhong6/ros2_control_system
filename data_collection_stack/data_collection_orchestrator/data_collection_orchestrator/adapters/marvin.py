@@ -32,7 +32,7 @@ class MarvinAdapter(AdapterBase):
     REQUIRED_SERVICES = {
         "/tracker_teleop_controller/set_armed": "std_srvs/srv/SetBool",
         "/tracker_teleop_controller/set_enabled": "std_srvs/srv/SetBool",
-        "/tracker_teleop_controller/go_home": "std_srvs/srv/Trigger",
+        "/marvin_motion/go_home": "std_srvs/srv/Trigger",
     }
 
     def __init__(self, device, node=None) -> None:
@@ -47,7 +47,7 @@ class MarvinAdapter(AdapterBase):
         self._service_callback_group = None
         self._set_armed_client = None
         self._set_enabled_client = None
-        self._go_home_client = None
+        self._motion_go_home_client = None
         self._joint_positions: dict[str, float] = {}
         self._last_joint_state_monotonic = 0.0
         self._home_joint_targets, self._home_tolerance_rad = self._load_home_targets()
@@ -80,9 +80,9 @@ class MarvinAdapter(AdapterBase):
                 "/tracker_teleop_controller/set_enabled",
                 callback_group=self._service_callback_group,
             )
-            self._go_home_client = self.node.create_client(
+            self._motion_go_home_client = self.node.create_client(
                 Trigger,
-                "/tracker_teleop_controller/go_home",
+                "/marvin_motion/go_home",
                 callback_group=self._service_callback_group,
             )
 
@@ -271,7 +271,7 @@ class MarvinAdapter(AdapterBase):
 
     def home(self) -> AdapterResult:
         command_result = self._call_trigger_service(
-            "/tracker_teleop_controller/go_home",
+            "/marvin_motion/go_home",
             timeout_sec=10.0,
         )
         if command_result.is_failure():
@@ -501,8 +501,8 @@ class MarvinAdapter(AdapterBase):
             return self._set_armed_client
         if service_name == "/tracker_teleop_controller/set_enabled":
             return self._set_enabled_client
-        if service_name == "/tracker_teleop_controller/go_home":
-            return self._go_home_client
+        if service_name == "/marvin_motion/go_home":
+            return self._motion_go_home_client
         return None
 
     def _controller_config_path(self) -> Path:

@@ -1,12 +1,26 @@
+from pathlib import Path
+
+import yaml
+
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, OpaqueFunction, RegisterEventHandler
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
-from launch.event_handlers import OnProcessExit
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
+
+
+def load_yaml_file(path: str | Path):
+    with open(path, "r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle) or {}
+
+
+def load_text_file(path: str | Path) -> str:
+    with open(path, "r", encoding="utf-8") as handle:
+        return handle.read()
 
 
 def generate_launch_description():
@@ -26,14 +40,6 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "description_file", default_value="description/urdf/marvin_dual.urdf",
             description="Composite URDF/XACRO file to load.",
-        ),
-        DeclareLaunchArgument(
-            "controllers_file", default_value="",
-            description="Controller YAML (auto-selected when empty).",
-        ),
-        DeclareLaunchArgument(
-            "use_jsp_gui", default_value="true",
-            description="Start the custom joint GUI publisher for slider command input.",
         ),
         DeclareLaunchArgument(
             "use_gripper_L", default_value="true",
@@ -59,6 +65,10 @@ def generate_launch_description():
             "right_rpy", default_value="1.5707963 0 0",
             description="Mount pose (rpy) of Base_R in world.",
         ),
+        DeclareLaunchArgument(
+            "motion_allow_legacy_home_fallback", default_value="false",
+            description="Allow /marvin_motion/go_home to forward to legacy tracker teleop home.",
+        ),
         OpaqueFunction(function=launch_setup),
     ])
 
@@ -68,11 +78,9 @@ def launch_setup(context):
     use_mock_hardware_value = (
         LaunchConfiguration("use_mock_hardware").perform(context).lower() == "true"
     )
-    use_jsp_gui = LaunchConfiguration("use_jsp_gui")
 
     pkg = LaunchConfiguration("description_package").perform(context)
     desc_file = LaunchConfiguration("description_file").perform(context)
-    ctrl_file_arg = LaunchConfiguration("controllers_file").perform(context)
     grip_L = LaunchConfiguration("use_gripper_L").perform(context).lower() == "true"
     grip_R = LaunchConfiguration("use_gripper_R").perform(context).lower() == "true"
     left_xyz = LaunchConfiguration("left_xyz")
@@ -80,7 +88,6 @@ def launch_setup(context):
     right_xyz = LaunchConfiguration("right_xyz")
     right_rpy = LaunchConfiguration("right_rpy")
 
-    # ── Robot description (xacro) ─────────────────────────────────────────
     xacro_cmd = [
         PathJoinSubstitution([FindExecutable(name="xacro")]),
         " ",
@@ -98,31 +105,46 @@ def launch_setup(context):
         "robot_description": ParameterValue(Command(xacro_cmd), value_type=str)
     }
 
-    # ── Controller config (auto-select if not overridden) ─────────────────
-    if ctrl_file_arg:
-        ctrl_file = ctrl_file_arg
-    elif grip_L or grip_R:
-        ctrl_file = "bringup/config/marvin_dual_gripper_controllers.yaml"
-    else:
-        ctrl_file = "bringup/config/marvin_dual_controllers.yaml"
-
     controllers_yaml = PathJoinSubstitution(
-        [FindPackageShare("marvin_system"), ctrl_file]
+        [FindPackageShare("marvin_system"), "bringup", "config", "marvin_dual_trajectory_controllers.yaml"]
     )
+    home_poses_file = PathJoinSubstitution(
+        [FindPackageShare("marvin_system"), "motion", "config", "home_poses.yaml"]
+    )
+    cell_scene_file = PathJoinSubstitution(
+        [FindPackageShare("marvin_system"), "motion", "config", "cell_scene.yaml"]
+    )
+    rviz_config_file = PathJoinSubstitution(
+        [FindPackageShare("marvin_system"), "description", "rviz", "marvin_dual.rviz"]
+    )
+    pkg_share = get_package_share_directory("marvin_system")
+    srdf_path = Path(pkg_share) / "description" / "srdf" / "marvin_dual.srdf"
+    kinematics_path = Path(pkg_share) / "motion" / "config" / "kinematics.yaml"
+    joint_limits_path = Path(pkg_share) / "motion" / "config" / "joint_limits.yaml"
+    planning_pipelines_path = Path(pkg_share) / "motion" / "config" / "planning_pipelines.yaml"
+    ompl_planning_path = Path(pkg_share) / "motion" / "config" / "ompl_planning.yaml"
+    moveit_controllers_path = Path(pkg_share) / "motion" / "config" / "moveit_controllers.yaml"
 
-    # ── Joint names for bridge (arm + optional grippers) ──────────────────
-    joint_names = [
-        "Joint1_L", "Joint2_L", "Joint3_L", "Joint4_L",
-        "Joint5_L", "Joint6_L", "Joint7_L",
-        "Joint1_R", "Joint2_R", "Joint3_R", "Joint4_R",
-        "Joint5_R", "Joint6_R", "Joint7_R",
+    move_group_params = [
+        robot_description,
+        {"robot_description_semantic": load_text_file(srdf_path)},
+        {"robot_description_kinematics": load_yaml_file(kinematics_path)},
+        {"robot_description_planning": load_yaml_file(joint_limits_path)},
+        load_yaml_file(planning_pipelines_path),
+        {"ompl": load_yaml_file(ompl_planning_path)},
+        load_yaml_file(moveit_controllers_path),
+        {
+            "moveit_manage_controllers": False,
+            "publish_robot_description": True,
+            "publish_robot_description_semantic": True,
+            "publish_planning_scene": True,
+            "publish_geometry_updates": True,
+            "publish_state_updates": True,
+            "publish_transforms_updates": True,
+            "allow_trajectory_execution": True,
+            "monitor_dynamics": False,
+        },
     ]
-    if grip_L:
-        joint_names.append("gripper_L")
-    if grip_R:
-        joint_names.append("gripper_R")
-
-    # ── Core ──────────────────────────────────────────────────────────────
 
     ros2_control_node = Node(
         package="controller_manager",
@@ -138,13 +160,47 @@ def launch_setup(context):
         parameters=[robot_description],
     )
 
-    # ── Visualisation ─────────────────────────────────────────────────────
-
-    rviz_config_file = PathJoinSubstitution(
-        [FindPackageShare("marvin_system"), "description", "rviz", "marvin_dual.rviz"]
+    move_group_node = Node(
+        package="moveit_ros_move_group",
+        executable="move_group",
+        output="screen",
+        parameters=move_group_params,
     )
-    home_joint_positions_file = PathJoinSubstitution(
-        [FindPackageShare("marvin_system"), "description", "config", "home_joint_positions.yaml"]
+
+    motion_server_node = Node(
+        package="marvin_system",
+        executable="motion_server",
+        name="marvin_motion_server",
+        output="screen",
+        parameters=[
+            home_poses_file,
+            cell_scene_file,
+            {"robot_description_semantic": load_text_file(srdf_path)},
+            {"robot_description_kinematics": load_yaml_file(kinematics_path)},
+            {"robot_description_planning": load_yaml_file(joint_limits_path)},
+            {
+                "backend": "moveit",
+                "go_home_service_name": "/marvin_motion/go_home",
+                "legacy_go_home_service": "/tracker_teleop_controller/go_home",
+                "planning_group": "dual_arm",
+                "home_pose_id": "home",
+                "planning_time_sec": 5.0,
+                "move_group_wait_sec": 10.0,
+                "num_planning_attempts": 3,
+                "max_velocity_scaling": 0.2,
+                "max_acceleration_scaling": 0.2,
+                "execute_trajectory": True,
+                "planning_pipeline_id": "ompl",
+                "planner_id": "RRTConnect",
+                "scene_frame_id": "world",
+                "switch_to_trajectory_controller": False,
+                "reactivate_controller_after_moveit": False,
+                "allow_legacy_go_home_fallback": ParameterValue(
+                    LaunchConfiguration("motion_allow_legacy_home_fallback"),
+                    value_type=bool,
+                ),
+            },
+        ],
     )
 
     rviz_node = Node(
@@ -157,43 +213,26 @@ def launch_setup(context):
         condition=IfCondition(gui),
     )
 
-    # ── GUI slider → forward controller bridge ────────────────────────────
-
-    joint_state_publisher_gui_node = Node(
-        package="marvin_system",
-        executable="joint_gui_publisher.py",
-        output="both",
-        parameters=[home_joint_positions_file],
-        remappings=[("joint_states", "gui_joint_states")],
-        condition=IfCondition(use_jsp_gui),
-    )
-
-    gui_to_forward_bridge = Node(
-        package="marvin_system",
-        executable="gui_joint_state_to_forward_command",
-        output="screen",
-        parameters=[
-            {"input_topic": "gui_joint_states"},
-            {"output_topic": "/forward_position_controller/commands"},
-            {"joint_names": joint_names},
-        ],
-        condition=IfCondition(use_jsp_gui),
-    )
-
-    # ── Controller spawners ───────────────────────────────────────────────
-
     joint_state_broadcaster_spawner = Node(
         package="controller_manager",
         executable="spawner",
-        arguments=["joint_state_broadcaster"],
+        arguments=[
+            "joint_state_broadcaster",
+            "--controller-manager-timeout",
+            "30.0",
+            "--service-call-timeout",
+            "30.0",
+            "--switch-timeout",
+            "30.0",
+        ],
         output="screen",
     )
 
-    forward_position_controller_spawner = Node(
+    dual_arm_trajectory_controller_spawner = Node(
         package="controller_manager",
         executable="spawner",
         arguments=[
-            "forward_position_controller",
+            "dual_arm_trajectory_controller",
             "--param-file",
             controllers_yaml,
             "--controller-manager-timeout",
@@ -206,32 +245,12 @@ def launch_setup(context):
         output="screen",
     )
 
-    start_bridge_after_feedback_ready = RegisterEventHandler(
-        OnProcessExit(
-            target_action=joint_state_broadcaster_spawner,
-            on_exit=[
-                forward_position_controller_spawner,
-                gui_to_forward_bridge,
-            ],
-        ),
-    )
-
-    start_gui_after_forward_controller_ready = RegisterEventHandler(
-        OnProcessExit(
-            target_action=forward_position_controller_spawner,
-            on_exit=[
-                joint_state_publisher_gui_node,
-            ],
-        ),
-    )
-
-    # ── Assemble ──────────────────────────────────────────────────────────
-
     return [
         ros2_control_node,
         robot_state_publisher_node,
+        move_group_node,
+        motion_server_node,
         rviz_node,
         joint_state_broadcaster_spawner,
-        start_bridge_after_feedback_ready,
-        start_gui_after_forward_controller_ready,
+        dual_arm_trajectory_controller_spawner,
     ]

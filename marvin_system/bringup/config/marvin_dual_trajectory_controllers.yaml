@@ -1,0 +1,50 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 1000  # Hz
+
+    dual_arm_trajectory_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+dual_arm_trajectory_controller:
+  ros__parameters:
+    joints:
+      - Joint1_L
+      - Joint2_L
+      - Joint3_L
+      - Joint4_L
+      - Joint5_L
+      - Joint6_L
+      - Joint7_L
+      - Joint1_R
+      - Joint2_R
+      - Joint3_R
+      - Joint4_R
+      - Joint5_R
+      - Joint6_R
+      - Joint7_R
+    command_interfaces:
+      - position
+    state_interfaces:
+      - position
+      - velocity
+    state_publish_rate: 100.0
+    action_monitor_rate: 20.0
+    allow_partial_joints_goal: false
+    interpolate_from_desired_state: false
+    constraints:
+      goal_time: 1.0
+      stopped_velocity_tolerance: 0.05
+      Joint1_L: {trajectory: 0.1, goal: 0.05}
+      Joint2_L: {trajectory: 0.1, goal: 0.05}
+      Joint3_L: {trajectory: 0.1, goal: 0.05}
+      Joint4_L: {trajectory: 0.1, goal: 0.05}
+      Joint5_L: {trajectory: 0.1, goal: 0.05}
+      Joint6_L: {trajectory: 0.1, goal: 0.05}
+      Joint7_L: {trajectory: 0.1, goal: 0.05}
+      Joint1_R: {trajectory: 0.1, goal: 0.05}
+      Joint2_R: {trajectory: 0.1, goal: 0.05}
+      Joint3_R: {trajectory: 0.1, goal: 0.05}
+      Joint4_R: {trajectory: 0.1, goal: 0.05}
+      Joint5_R: {trajectory: 0.1, goal: 0.05}
+      Joint6_R: {trajectory: 0.1, goal: 0.05}
+      Joint7_R: {trajectory: 0.1, goal: 0.05}

@@ -21,7 +21,7 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, EmitEvent, OpaqueFunction, RegisterEventHandler
+from launch.actions import DeclareLaunchArgument, EmitEvent, OpaqueFunction, RegisterEventHandler, TimerAction
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
@@ -54,6 +54,11 @@ def load_yaml_file(path):
     if not isinstance(data, dict):
         raise RuntimeError(f"Expected mapping at YAML root: {path}")
     return data
+
+
+def load_text_file(path):
+    with open(path, "r", encoding="utf-8") as handle:
+        return handle.read()
 
 
 def resolve_camera_namespace(cameras_cfg: dict, camera_name: str) -> str:
@@ -680,6 +685,14 @@ def generate_launch_description():
             description="Path to the shared camera inventory YAML file.",
         ),
         DeclareLaunchArgument(
+            "motion_allow_legacy_home_fallback", default_value="true",
+            description="Allow /marvin_motion/go_home to forward to tracker_teleop_controller/go_home.",
+        ),
+        DeclareLaunchArgument(
+            "enable_moveit_go_home", default_value="false",
+            description="Enable experimental MoveIt-backed go_home inside tracker teleop bringup.",
+        ),
+        DeclareLaunchArgument(
             "config_file",
             default_value=PathJoinSubstitution(
                 [FindPackageShare("marvin_system"), "bringup", "config", "marvin_tracker_teleop.yaml"]
@@ -752,6 +765,9 @@ def launch_setup(context):
     )
     start_cameras_value = LaunchConfiguration("start_cameras").perform(context).lower() == "true"
     show_camera_views_value = LaunchConfiguration("show_camera_views").perform(context).lower() == "true"
+    enable_moveit_go_home_value = (
+        LaunchConfiguration("enable_moveit_go_home").perform(context).lower() == "true"
+    )
     start_manus_gripper_bridge_value = (
         LaunchConfiguration("start_manus_gripper_bridge").perform(context).lower() == "true"
     )
@@ -812,12 +828,10 @@ def launch_setup(context):
         ' left_rpy:="', left_rpy, '"',
         ' right_xyz:="', right_xyz, '"',
         ' right_rpy:="', right_rpy, '"',
-        " use_mock_hardware:=", use_mock_hardware,
+        f" use_mock_hardware:={'true' if use_mock_hardware_value else 'false'}",
+        f" use_gripper_L:={'true' if grip_L else 'false'}",
+        f" use_gripper_R:={'true' if grip_R else 'false'}",
     ]
-    if grip_L:
-        xacro_cmd.append(" use_gripper_L:=true")
-    if grip_R:
-        xacro_cmd.append(" use_gripper_R:=true")
     if start_manus_gripper_bridge_value and not (grip_L or grip_R):
         raise RuntimeError(
             "start_manus_gripper_bridge:=true requires at least one enabled gripper "
@@ -832,6 +846,10 @@ def launch_setup(context):
     controllers_yaml = PathJoinSubstitution(
         [FindPackageShare("marvin_system"), "bringup", "config",
          "marvin_tracker_teleop_controllers.yaml"]
+    )
+    trajectory_controllers_yaml = PathJoinSubstitution(
+        [FindPackageShare("marvin_system"), "bringup", "config",
+         "marvin_dual_trajectory_controllers.yaml"]
     )
     enable_ik_reference_logs = resolve_bool_arg(
         LaunchConfiguration("enable_ik_reference_logs").perform(context),
@@ -853,6 +871,18 @@ def launch_setup(context):
     tracker_teleop_params_file = os.path.join(tempfile.mkdtemp(), "tracker_teleop_kine_params.yaml")
     with open(tracker_teleop_params_file, "w") as f:
         f.write(tracker_teleop_params_override)
+
+    trajectory_controller_manager_override = (
+        "controller_manager:\n"
+        "  ros__parameters:\n"
+        "    dual_arm_trajectory_controller:\n"
+        "      type: joint_trajectory_controller/JointTrajectoryController\n"
+    )
+    trajectory_controller_manager_file = os.path.join(
+        tempfile.mkdtemp(), "dual_arm_controller_manager.yaml"
+    )
+    with open(trajectory_controller_manager_file, "w") as f:
+        f.write(trajectory_controller_manager_override)
 
     # ── HTC Tracker publisher config (htc_system) ──────────────────────────
     trackers_config = LaunchConfiguration("trackers_config")
@@ -883,15 +913,19 @@ def launch_setup(context):
         gripper_params_files.append(path)
 
     # ── Core nodes ─────────────────────────────────────────────────────────
+    ros2_control_parameters = [
+        robot_description,
+        controllers_yaml,
+        tracker_teleop_params_file,
+    ] + gripper_params_files
+    if enable_moveit_go_home_value:
+        ros2_control_parameters.insert(2, trajectory_controller_manager_file)
+
     ros2_control_node = Node(
         package="controller_manager",
         executable="ros2_control_node",
         output="both",
-        parameters=[
-            robot_description,
-            controllers_yaml,
-            tracker_teleop_params_file,
-        ] + gripper_params_files,
+        parameters=ros2_control_parameters,
     )
 
     robot_state_publisher_node = Node(
@@ -994,6 +1028,109 @@ def launch_setup(context):
         condition=IfCondition(gui),
     )
 
+    home_poses_file = PathJoinSubstitution(
+        [FindPackageShare("marvin_system"), "motion", "config", "home_poses.yaml"]
+    )
+    cell_scene_file = PathJoinSubstitution(
+        [FindPackageShare("marvin_system"), "motion", "config", "cell_scene.yaml"]
+    )
+    srdf_path = os.path.join(pkg_share, "description", "srdf", "marvin_dual.srdf")
+    kinematics_path = os.path.join(pkg_share, "motion", "config", "kinematics.yaml")
+    joint_limits_path = os.path.join(pkg_share, "motion", "config", "joint_limits.yaml")
+    planning_pipelines_path = os.path.join(pkg_share, "motion", "config", "planning_pipelines.yaml")
+    ompl_planning_path = os.path.join(pkg_share, "motion", "config", "ompl_planning.yaml")
+    moveit_controllers_path = os.path.join(pkg_share, "motion", "config", "moveit_controllers.yaml")
+
+    if enable_moveit_go_home_value:
+        motion_server_node = Node(
+            package="marvin_system",
+            executable="motion_server",
+            name="marvin_motion_server",
+            output="screen",
+            parameters=[
+                robot_description,
+                home_poses_file,
+                cell_scene_file,
+                {"robot_description_semantic": load_text_file(srdf_path)},
+                {"robot_description_kinematics": load_yaml_file(kinematics_path)},
+                {"robot_description_planning": load_yaml_file(joint_limits_path)},
+                {
+                    "backend": "moveit",
+                    "go_home_service_name": "/marvin_motion/go_home",
+                    "legacy_go_home_service": "/tracker_teleop_controller/go_home",
+                    "planning_group": "dual_arm",
+                    "home_pose_id": "home",
+                    "planning_time_sec": 5.0,
+                    "move_group_wait_sec": 10.0,
+                    "num_planning_attempts": 3,
+                    "max_velocity_scaling": 0.2,
+                    "max_acceleration_scaling": 0.2,
+                    "execute_trajectory": True,
+                    "planning_pipeline_id": "ompl",
+                    "planner_id": "RRTConnect",
+                    "scene_frame_id": "world",
+                    "switch_to_trajectory_controller": True,
+                    "reactivate_controller_after_moveit": True,
+                    "controller_switch_timeout_sec": 5.0,
+                    "controller_manager_switch_service": "/controller_manager/switch_controller",
+                    "trajectory_controller_name": "dual_arm_trajectory_controller",
+                    "primary_controller_name": "tracker_teleop_controller",
+                    "allow_legacy_go_home_fallback": ParameterValue(
+                        LaunchConfiguration("motion_allow_legacy_home_fallback"),
+                        value_type=bool,
+                    ),
+                },
+            ],
+        )
+    else:
+        motion_server_node = Node(
+            package="marvin_system",
+            executable="motion_server.py",
+            name="marvin_motion_server",
+            output="screen",
+            parameters=[
+                home_poses_file,
+                cell_scene_file,
+                {
+                    "backend": "legacy",
+                    "go_home_service_name": "/marvin_motion/go_home",
+                    "legacy_go_home_service": "/tracker_teleop_controller/go_home",
+                    "allow_legacy_go_home_fallback": ParameterValue(
+                        LaunchConfiguration("motion_allow_legacy_home_fallback"),
+                        value_type=bool,
+                    ),
+                },
+            ],
+        )
+
+    move_group_params = [
+        robot_description,
+        {"robot_description_semantic": load_text_file(srdf_path)},
+        {"robot_description_kinematics": load_yaml_file(kinematics_path)},
+        {"robot_description_planning": load_yaml_file(joint_limits_path)},
+        load_yaml_file(planning_pipelines_path),
+        {"ompl": load_yaml_file(ompl_planning_path)},
+        load_yaml_file(moveit_controllers_path),
+        {
+            "moveit_manage_controllers": False,
+            "publish_robot_description": True,
+            "publish_robot_description_semantic": True,
+            "publish_planning_scene": True,
+            "publish_geometry_updates": True,
+            "publish_state_updates": True,
+            "publish_transforms_updates": True,
+            "allow_trajectory_execution": True,
+            "monitor_dynamics": False,
+        },
+    ]
+
+    move_group_node = Node(
+        package="moveit_ros_move_group",
+        executable="move_group",
+        output="screen",
+        parameters=move_group_params,
+    )
+
     # ── Controller spawners ───────────────────────────────────────────────
     joint_state_broadcaster_spawner = Node(
         package="controller_manager",
@@ -1029,6 +1166,24 @@ def launch_setup(context):
         output="screen",
     )
 
+    dual_arm_trajectory_controller_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=[
+            "dual_arm_trajectory_controller",
+            "--param-file",
+            trajectory_controllers_yaml,
+            "--inactive",
+            "--controller-manager-timeout",
+            "30.0",
+            "--service-call-timeout",
+            "30.0",
+            "--switch-timeout",
+            "30.0",
+        ],
+        output="screen",
+    )
+
     gripper_spawners = []
     for name in gripper_names:
         gripper_spawners.append(Node(
@@ -1046,14 +1201,27 @@ def launch_setup(context):
             output="screen",
         ))
 
+    teleop_followup_actions = [tracker_teleop_controller_spawner] + gripper_spawners
+    if enable_moveit_go_home_value:
+        teleop_followup_actions.append(dual_arm_trajectory_controller_spawner)
+
     start_teleop_controllers_after_feedback_ready = RegisterEventHandler(
         OnProcessExit(
             target_action=joint_state_broadcaster_spawner,
-            on_exit=[
-                tracker_teleop_controller_spawner,
-            ] + gripper_spawners,
+            on_exit=teleop_followup_actions,
         ),
     )
+
+    moveit_runtime_actions = []
+    immediate_motion_nodes = [motion_server_node]
+    if enable_moveit_go_home_value:
+        immediate_motion_nodes = []
+        moveit_runtime_actions.append(
+            TimerAction(
+                period=4.0,
+                actions=[move_group_node, motion_server_node],
+            )
+        )
 
     keyboard_gate_actions = []
     if use_keyboard_gate_value:
@@ -1096,8 +1264,10 @@ def launch_setup(context):
         *tracker_publisher_actions,
         *camera_actions,
         *manus_gripper_actions,
+        *immediate_motion_nodes,
         rviz_node,
         joint_state_broadcaster_spawner,
         start_teleop_controllers_after_feedback_ready,
+        *moveit_runtime_actions,
         *keyboard_gate_actions,
     ]

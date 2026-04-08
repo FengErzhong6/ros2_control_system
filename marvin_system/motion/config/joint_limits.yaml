@@ -1,0 +1,15 @@
+joint_limits:
+  Joint1_L: {has_velocity_limits: true, max_velocity: 2.0, has_acceleration_limits: true, max_acceleration: 2.0}
+  Joint2_L: {has_velocity_limits: true, max_velocity: 2.0, has_acceleration_limits: true, max_acceleration: 2.0}
+  Joint3_L: {has_velocity_limits: true, max_velocity: 2.0, has_acceleration_limits: true, max_acceleration: 2.0}
+  Joint4_L: {has_velocity_limits: true, max_velocity: 2.0, has_acceleration_limits: true, max_acceleration: 2.0}
+  Joint5_L: {has_velocity_limits: true, max_velocity: 2.0, has_acceleration_limits: true, max_acceleration: 2.0}
+  Joint6_L: {has_velocity_limits: true, max_velocity: 2.0, has_acceleration_limits: true, max_acceleration: 2.0}
+  Joint7_L: {has_velocity_limits: true, max_velocity: 2.0, has_acceleration_limits: true, max_acceleration: 2.0}
+  Joint1_R: {has_velocity_limits: true, max_velocity: 2.0, has_acceleration_limits: true, max_acceleration: 2.0}
+  Joint2_R: {has_velocity_limits: true, max_velocity: 2.0, has_acceleration_limits: true, max_acceleration: 2.0}
+  Joint3_R: {has_velocity_limits: true, max_velocity: 2.0, has_acceleration_limits: true, max_acceleration: 2.0}
+  Joint4_R: {has_velocity_limits: true, max_velocity: 2.0, has_acceleration_limits: true, max_acceleration: 2.0}
+  Joint5_R: {has_velocity_limits: true, max_velocity: 2.0, has_acceleration_limits: true, max_acceleration: 2.0}
+  Joint6_R: {has_velocity_limits: true, max_velocity: 2.0, has_acceleration_limits: true, max_acceleration: 2.0}
+  Joint7_R: {has_velocity_limits: true, max_velocity: 2.0, has_acceleration_limits: true, max_acceleration: 2.0}
