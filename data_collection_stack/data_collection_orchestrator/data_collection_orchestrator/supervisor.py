@@ -6,6 +6,7 @@ import time
 from typing import Optional
 
 import rclpy
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 import yaml
@@ -30,6 +31,7 @@ from .event_log import EventLog
 from .health_monitor import HealthMonitor
 from .models import ActiveSession, DeviceSpec, RecipeSpec, StartupPolicy, SupervisorConfig
 from .recipe_loader import discover_recipes, load_recipe
+from .runtime_manifest import RuntimeManifest
 from .session_manager import SessionManager
 from .state_machine import Commands, SystemStates, allowed_commands_for, is_command_allowed
 
@@ -83,6 +85,7 @@ class DataCollectionSupervisor(Node):
         super().__init__("data_collection_supervisor")
 
         self._config = self._declare_config()
+        self._runtime_manifest = RuntimeManifest()
         self._startup_policy = self._load_startup_policy()
         self._event_log = EventLog()
         self._health_monitor = HealthMonitor()
@@ -113,6 +116,11 @@ class DataCollectionSupervisor(Node):
         self._command_server = CommandServer(self, self)
         self.create_timer(1.0, self._publish_state)
         self.create_timer(2.0, self._run_health_monitor)
+
+        stale_cleanup_notes = self._runtime_manifest.cleanup_stale_runtime()
+        for note in stale_cleanup_notes:
+            self.get_logger().warn(note)
+            self._event_log.record(note)
 
         self._set_system_state(
             SystemStates.IDLE,
@@ -174,11 +182,16 @@ class DataCollectionSupervisor(Node):
         )
 
     def _publish_state(self) -> None:
+        if not rclpy.ok():
+            return
         self._state.stamp = self.get_clock().now().to_msg()
         self._state.devices = list(self._devices.values())
         active_session = self._session_manager.active_session
         self._state.active_session_id = "" if active_session is None else active_session.session_id
-        self._publisher.publish(self._state)
+        try:
+            self._publisher.publish(self._state)
+        except Exception:
+            return
 
     def _set_system_state(self, system_state: str, summary: str) -> None:
         self._state.system_state = system_state
@@ -186,6 +199,10 @@ class DataCollectionSupervisor(Node):
         self._state.allowed_commands = allowed_commands_for(system_state)
         self._state.recipe_id = self._selected_recipe_id
         self._event_log.record(f"{system_state}: {summary}")
+        self._runtime_manifest.set_context(
+            recipe_id=self._selected_recipe_id,
+            system_state=system_state,
+        )
         self._publish_state()
 
     def _set_fault(self, summary: str, device_id: str = "") -> None:
@@ -204,17 +221,25 @@ class DataCollectionSupervisor(Node):
 
     def _reset_recipe_runtime(self, shutdown_adapters: bool = False) -> None:
         if shutdown_adapters:
-            for adapter in self._adapters.values():
-                try:
-                    adapter.shutdown()
-                except Exception as exc:  # pragma: no cover - defensive cleanup path
-                    self.get_logger().error(f"Adapter shutdown during reset failed: {exc}")
+            if self._current_recipe is not None:
+                shutdown_failure = self._shutdown_devices()
+                if shutdown_failure is not None:
+                    self.get_logger().error(
+                        f"Shutdown during runtime reset reported failure: {shutdown_failure}"
+                    )
+            else:
+                for adapter in self._adapters.values():
+                    try:
+                        adapter.shutdown()
+                    except Exception as exc:  # pragma: no cover - defensive cleanup path
+                        self.get_logger().error(f"Adapter shutdown during reset failed: {exc}")
         self._adapters = {}
         self._device_specs = {}
         self._devices = {}
         self._current_recipe = None
         self._health_monitor.reset()
         self._session_manager.end_session()
+        self._runtime_manifest.clear()
 
     def _load_recipe_or_fail(self, recipe_id: str) -> RecipeSpec | None:
         recipe = load_recipe(self._config.recipe_directory, recipe_id)
@@ -242,6 +267,11 @@ class DataCollectionSupervisor(Node):
         }
         self._health_monitor.reset()
         self._clear_faults()
+        self._runtime_manifest.clear()
+        self._runtime_manifest.set_context(
+            recipe_id=recipe.recipe_id,
+            system_state=self._state.system_state,
+        )
         self._publish_state()
 
     def _apply_runtime_config(self, device: DeviceSpec) -> DeviceSpec:
@@ -375,6 +405,17 @@ class DataCollectionSupervisor(Node):
             self._startup_policy.startup_timeout_sec,
         )
 
+    def _register_runtime_process(
+        self,
+        device: DeviceSpec,
+        metadata: dict | None,
+    ) -> None:
+        self._runtime_manifest.register_device(
+            device_id=device.device_id,
+            adapter=device.adapter,
+            metadata=metadata,
+        )
+
     def _startup_layers(self) -> list[list[DeviceSpec]]:
         assert self._current_recipe is not None
 
@@ -415,82 +456,6 @@ class DataCollectionSupervisor(Node):
             f"{command} is not allowed while system_state={self._state.system_state}. "
             f"allowed={self._state.allowed_commands}"
         )
-
-    def _attempt_device_start(self, device: DeviceSpec, goal_handle) -> str | None:
-        adapter = self._adapters[device.device_id]
-        max_attempts = 1 + self._startup_policy.retry_count
-        ready_timeout_sec = self._device_ready_timeout_sec(device)
-
-        for attempt_index in range(max_attempts):
-            attempt_number = attempt_index + 1
-            attempt_label = f"attempt {attempt_number}/{max_attempts}"
-            self._mark_device(
-                device.device_id,
-                DeviceState.LIFECYCLE_STARTING,
-                DeviceState.HEALTH_UNKNOWN,
-                f"Running precheck ({attempt_label}).",
-            )
-            self._publish_feedback(
-                goal_handle,
-                StartSystem,
-                f"Precheck {device.device_id} ({attempt_label}).",
-            )
-
-            precheck = adapter.precheck()
-            if precheck.is_failure():
-                failure = precheck.summary
-            else:
-                bringup = adapter.bringup()
-                if bringup.is_failure():
-                    failure = bringup.summary
-                else:
-                    ready = adapter.wait_ready(timeout_sec=ready_timeout_sec)
-                    if not ready.is_failure():
-                        self._mark_device(
-                            device.device_id,
-                            DeviceState.LIFECYCLE_READY,
-                            DeviceState.HEALTH_OK,
-                            ready.summary,
-                            ready=True,
-                        )
-                        self._publish_feedback(
-                            goal_handle,
-                    StartSystem,
-                    f"Device {device.device_id} ready ({attempt_label}).",
-                )
-                return None
-            failure = ready.summary
-
-            self.get_logger().warn(
-                f"Startup {attempt_label} failed for {device.device_id}: {failure}"
-            )
-            self._mark_device(
-                device.device_id,
-                DeviceState.LIFECYCLE_STARTING,
-                DeviceState.HEALTH_DEGRADED,
-                f"{failure} [{attempt_label}]",
-            )
-            adapter.shutdown()
-
-            if attempt_number >= max_attempts:
-                self._mark_device(
-                    device.device_id,
-                    DeviceState.LIFECYCLE_FAULT,
-                    DeviceState.HEALTH_FAILED,
-                    failure,
-                )
-                return failure
-
-            if self._startup_policy.retry_backoff_sec > 0.0:
-                self._publish_feedback(
-                    goal_handle,
-                    StartSystem,
-                    f"{device.device_id} failed {attempt_label}; retrying in "
-                    f"{self._startup_policy.retry_backoff_sec:.1f}s.",
-                )
-                time.sleep(self._startup_policy.retry_backoff_sec)
-
-        return f"{device.device_id}: startup attempts exhausted unexpectedly."
 
     def _rollback_started_devices(self, started_device_ids: list[str]) -> str | None:
         started_device_id_set = set(started_device_ids)
@@ -561,6 +526,8 @@ class DataCollectionSupervisor(Node):
             result = results[device_id]
             if result.is_failure() and device.required and shutdown_failure is None:
                 shutdown_failure = result.summary
+            if not result.is_failure():
+                self._runtime_manifest.unregister_device(device_id)
             self._mark_device(
                 device_id,
                 DeviceState.LIFECYCLE_IDLE,
@@ -576,43 +543,55 @@ class DataCollectionSupervisor(Node):
             stopping_summary="Retry cleanup after startup failure.",
         )
 
-    def _attempt_layer_start(
+    def _attempt_device_bringup(
         self,
         layer_index: int,
-        layer: list[DeviceSpec],
+        device: DeviceSpec,
         goal_handle,
     ) -> str | None:
         max_attempts = 1 + self._startup_policy.retry_count
-        layer_device_ids = [device.device_id for device in layer]
-        layer_name = ", ".join(layer_device_ids)
 
         for attempt_index in range(max_attempts):
             attempt_number = attempt_index + 1
             attempt_label = f"attempt {attempt_number}/{max_attempts}"
+
             self._publish_feedback(
                 goal_handle,
                 StartSystem,
-                f"Starting layer {layer_index} [{layer_name}] ({attempt_label}).",
+                f"Launching device {device.device_id} in layer {layer_index} ({attempt_label}).",
             )
-
-            failure = None
-            started_this_attempt: list[str] = []
-
-            for device in layer:
-                self._mark_device(
-                    device.device_id,
-                    DeviceState.LIFECYCLE_STARTING,
-                    DeviceState.HEALTH_UNKNOWN,
-                    f"Running precheck ({attempt_label}).",
-                )
-                self._publish_feedback(
-                    goal_handle,
-                    StartSystem,
-                    f"Precheck {device.device_id} ({attempt_label}).",
-                )
-                precheck = self._adapters[device.device_id].precheck()
-                if precheck.is_failure():
-                    failure = precheck.summary
+            self._mark_device(
+                device.device_id,
+                DeviceState.LIFECYCLE_STARTING,
+                DeviceState.HEALTH_UNKNOWN,
+                f"Running precheck ({attempt_label}).",
+            )
+            self._publish_feedback(
+                goal_handle,
+                StartSystem,
+                f"Precheck {device.device_id} ({attempt_label}).",
+            )
+            precheck = self._adapters[device.device_id].precheck()
+            if precheck.is_failure():
+                failure = precheck.summary
+                if attempt_number >= max_attempts:
+                    self._mark_device(
+                        device.device_id,
+                        DeviceState.LIFECYCLE_FAULT,
+                        DeviceState.HEALTH_FAILED,
+                        failure,
+                    )
+                else:
+                    self._mark_device(
+                        device.device_id,
+                        DeviceState.LIFECYCLE_STARTING,
+                        DeviceState.HEALTH_DEGRADED,
+                        f"{failure} [{attempt_label}]",
+                    )
+            else:
+                bringup = self._adapters[device.device_id].bringup()
+                if bringup.is_failure():
+                    failure = bringup.summary
                     if attempt_number >= max_attempts:
                         self._mark_device(
                             device.device_id,
@@ -627,32 +606,102 @@ class DataCollectionSupervisor(Node):
                             DeviceState.HEALTH_DEGRADED,
                             f"{failure} [{attempt_label}]",
                         )
-                    break
+                    cleanup_failure = self._shutdown_device_ids_parallel(
+                        [device.device_id],
+                        stopping_summary="Retry cleanup after device launch failure.",
+                    )
+                    if cleanup_failure is not None:
+                        return f"{failure}\nDevice cleanup failure: {cleanup_failure}"
+                else:
+                    self._register_runtime_process(device, bringup.metadata)
+                    return None
 
-            if failure is None:
-                for device in layer:
-                    bringup = self._adapters[device.device_id].bringup()
-                    if bringup.is_failure():
-                        failure = bringup.summary
-                        if attempt_number >= max_attempts:
-                            self._mark_device(
-                                device.device_id,
-                                DeviceState.LIFECYCLE_FAULT,
-                                DeviceState.HEALTH_FAILED,
-                                failure,
-                            )
-                        else:
-                            self._mark_device(
-                                device.device_id,
-                                DeviceState.LIFECYCLE_STARTING,
-                                DeviceState.HEALTH_DEGRADED,
-                                f"{failure} [{attempt_label}]",
-                            )
-                        break
-                    started_this_attempt.append(device.device_id)
+            self.get_logger().warn(
+                f"Launch device {device.device_id} in layer {layer_index} "
+                f"{attempt_label} failed: {failure}"
+            )
+            if attempt_number >= max_attempts:
+                return failure
 
-            if failure is None:
-                for device in layer:
+            if self._startup_policy.retry_backoff_sec > 0.0:
+                self._publish_feedback(
+                    goal_handle,
+                    StartSystem,
+                    f"Device {device.device_id} launch failed {attempt_label}; retrying in "
+                    f"{self._startup_policy.retry_backoff_sec:.1f}s.",
+                )
+                time.sleep(self._startup_policy.retry_backoff_sec)
+
+        return (
+            f"Device {device.device_id} in layer {layer_index} "
+            "launch attempts exhausted unexpectedly."
+        )
+
+    def _attempt_device_start(
+        self,
+        layer_index: int,
+        device: DeviceSpec,
+        goal_handle,
+    ) -> str | None:
+        max_attempts = 1 + self._startup_policy.retry_count
+
+        for attempt_index in range(max_attempts):
+            attempt_number = attempt_index + 1
+            attempt_label = f"attempt {attempt_number}/{max_attempts}"
+
+            self._publish_feedback(
+                goal_handle,
+                StartSystem,
+                f"Starting device {device.device_id} in layer {layer_index} ({attempt_label}).",
+            )
+            self._mark_device(
+                device.device_id,
+                DeviceState.LIFECYCLE_STARTING,
+                DeviceState.HEALTH_UNKNOWN,
+                f"Running precheck ({attempt_label}).",
+            )
+            self._publish_feedback(
+                goal_handle,
+                StartSystem,
+                f"Precheck {device.device_id} ({attempt_label}).",
+            )
+            precheck = self._adapters[device.device_id].precheck()
+            if precheck.is_failure():
+                failure = precheck.summary
+                if attempt_number >= max_attempts:
+                    self._mark_device(
+                        device.device_id,
+                        DeviceState.LIFECYCLE_FAULT,
+                        DeviceState.HEALTH_FAILED,
+                        failure,
+                    )
+                else:
+                    self._mark_device(
+                        device.device_id,
+                        DeviceState.LIFECYCLE_STARTING,
+                        DeviceState.HEALTH_DEGRADED,
+                        f"{failure} [{attempt_label}]",
+                    )
+            else:
+                bringup = self._adapters[device.device_id].bringup()
+                if bringup.is_failure():
+                    failure = bringup.summary
+                    if attempt_number >= max_attempts:
+                        self._mark_device(
+                            device.device_id,
+                            DeviceState.LIFECYCLE_FAULT,
+                            DeviceState.HEALTH_FAILED,
+                            failure,
+                        )
+                    else:
+                        self._mark_device(
+                            device.device_id,
+                            DeviceState.LIFECYCLE_STARTING,
+                            DeviceState.HEALTH_DEGRADED,
+                            f"{failure} [{attempt_label}]",
+                        )
+                else:
+                    self._register_runtime_process(device, bringup.metadata)
                     ready = self._adapters[device.device_id].wait_ready(
                         timeout_sec=self._device_ready_timeout_sec(device)
                     )
@@ -672,31 +721,32 @@ class DataCollectionSupervisor(Node):
                                 DeviceState.HEALTH_DEGRADED,
                                 f"{failure} [{attempt_label}]",
                             )
-                        break
+                    else:
+                        self._mark_device(
+                            device.device_id,
+                            DeviceState.LIFECYCLE_READY,
+                            DeviceState.HEALTH_OK,
+                            ready.summary,
+                            ready=True,
+                        )
+                        self._publish_feedback(
+                            goal_handle,
+                            StartSystem,
+                            f"Device {device.device_id} ready ({attempt_label}).",
+                        )
+                        return None
 
-                    self._mark_device(
-                        device.device_id,
-                        DeviceState.LIFECYCLE_READY,
-                        DeviceState.HEALTH_OK,
-                        ready.summary,
-                        ready=True,
+                    cleanup_failure = self._shutdown_device_ids_parallel(
+                        [device.device_id],
+                        stopping_summary="Retry cleanup after device startup failure.",
                     )
-                    self._publish_feedback(
-                        goal_handle,
-                        StartSystem,
-                        f"Device {device.device_id} ready ({attempt_label}).",
-                    )
-
-            if failure is None:
-                return None
+                    if cleanup_failure is not None:
+                        return f"{failure}\nDevice cleanup failure: {cleanup_failure}"
 
             self.get_logger().warn(
-                f"Startup layer {layer_index} {attempt_label} failed: {failure}"
+                f"Startup device {device.device_id} in layer {layer_index} "
+                f"{attempt_label} failed: {failure}"
             )
-            shutdown_failure = self._shutdown_layer_devices(started_this_attempt)
-            if shutdown_failure is not None:
-                return f"{failure}\nLayer cleanup failure: {shutdown_failure}"
-
             if attempt_number >= max_attempts:
                 return failure
 
@@ -704,12 +754,54 @@ class DataCollectionSupervisor(Node):
                 self._publish_feedback(
                     goal_handle,
                     StartSystem,
-                    f"Layer {layer_index} failed {attempt_label}; retrying in "
+                    f"Device {device.device_id} failed {attempt_label}; retrying in "
                     f"{self._startup_policy.retry_backoff_sec:.1f}s.",
                 )
                 time.sleep(self._startup_policy.retry_backoff_sec)
 
-        return f"Layer {layer_index} startup attempts exhausted unexpectedly."
+        return (
+            f"Device {device.device_id} in layer {layer_index} "
+            "startup attempts exhausted unexpectedly."
+        )
+
+    def _attempt_layer_start(
+        self,
+        layer_index: int,
+        layer: list[DeviceSpec],
+        goal_handle,
+    ) -> str | None:
+        layer_device_ids = [device.device_id for device in layer]
+        layer_name = ", ".join(layer_device_ids)
+        started_device_ids: list[str] = []
+
+        self._publish_feedback(
+            goal_handle,
+            StartSystem,
+            f"Starting layer {layer_index} [{layer_name}].",
+        )
+
+        for device in layer:
+            failure = self._attempt_device_bringup(layer_index, device, goal_handle)
+            if failure is None:
+                started_device_ids.append(device.device_id)
+                continue
+
+            rollback_failure = self._shutdown_layer_devices(started_device_ids)
+            if rollback_failure is not None:
+                return f"{failure}\nLayer cleanup failure: {rollback_failure}"
+            return failure
+
+        for device in layer:
+            failure = self._attempt_device_start(layer_index, device, goal_handle)
+            if failure is None:
+                continue
+
+            rollback_failure = self._shutdown_layer_devices(started_device_ids)
+            if rollback_failure is not None:
+                return f"{failure}\nLayer cleanup failure: {rollback_failure}"
+            return failure
+
+        return None
 
     def _bringup_devices(self, goal_handle) -> str | None:
         assert self._current_recipe is not None
@@ -1162,12 +1254,15 @@ class DataCollectionSupervisor(Node):
 def main(args: list[str] | None = None) -> None:
     rclpy.init(args=args)
     node = DataCollectionSupervisor()
+    executor = MultiThreadedExecutor(num_threads=6)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
         node.shutdown_runtime()
+        executor.shutdown()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

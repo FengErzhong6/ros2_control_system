@@ -639,6 +639,17 @@ def generate_launch_description():
             description="Open a single camera dashboard window when cameras are launched.",
         ),
         DeclareLaunchArgument(
+            "start_manus_gripper_bridge", default_value="false",
+            description="Start the MANUS glove-to-gripper bridge inside this bringup.",
+        ),
+        DeclareLaunchArgument(
+            "manus_gripper_config",
+            default_value=PathJoinSubstitution(
+                [FindPackageShare("manus_system"), "config", "manus_gripper.yaml"]
+            ),
+            description="Path to the MANUS gripper bridge config file.",
+        ),
+        DeclareLaunchArgument(
             "high_camera_name", default_value="cam_high",
             description="Camera key in cameras.yaml for the RealSense top camera.",
         ),
@@ -741,6 +752,10 @@ def launch_setup(context):
     )
     start_cameras_value = LaunchConfiguration("start_cameras").perform(context).lower() == "true"
     show_camera_views_value = LaunchConfiguration("show_camera_views").perform(context).lower() == "true"
+    start_manus_gripper_bridge_value = (
+        LaunchConfiguration("start_manus_gripper_bridge").perform(context).lower() == "true"
+    )
+    manus_gripper_config = LaunchConfiguration("manus_gripper_config")
     high_camera_name_value = LaunchConfiguration("high_camera_name").perform(context)
     cameras_config_path = LaunchConfiguration("cameras_config").perform(context)
     config_file = LaunchConfiguration("config_file").perform(context)
@@ -803,6 +818,11 @@ def launch_setup(context):
         xacro_cmd.append(" use_gripper_L:=true")
     if grip_R:
         xacro_cmd.append(" use_gripper_R:=true")
+    if start_manus_gripper_bridge_value and not (grip_L or grip_R):
+        raise RuntimeError(
+            "start_manus_gripper_bridge:=true requires at least one enabled gripper "
+            "(use_gripper_L or use_gripper_R)."
+        )
 
     robot_description = {
         "robot_description": ParameterValue(Command(xacro_cmd), value_type=str)
@@ -1058,11 +1078,24 @@ def launch_setup(context):
             )
         )
 
+    manus_gripper_actions = []
+    if start_manus_gripper_bridge_value:
+        manus_gripper_actions.append(
+            Node(
+                package="manus_system",
+                executable="manus_gripper_node",
+                name="manus_gripper_node",
+                output="screen",
+                parameters=[manus_gripper_config],
+            )
+        )
+
     return [
         ros2_control_node,
         robot_state_publisher_node,
         *tracker_publisher_actions,
         *camera_actions,
+        *manus_gripper_actions,
         rviz_node,
         joint_state_broadcaster_spawner,
         start_teleop_controllers_after_feedback_ready,

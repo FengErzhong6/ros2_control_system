@@ -11,7 +11,6 @@ import time
 
 from ament_index_python.packages import get_package_share_directory
 from rclpy.qos import qos_profile_sensor_data
-from rclpy.wait_for_message import wait_for_message
 from sensor_msgs.msg import Image
 import yaml
 
@@ -30,6 +29,9 @@ class CameraAdapter(AdapterBase):
         self._log_handle = None
         self._log_path: Path | None = None
         self._launch_command: list[str] = []
+        self._last_image_monotonic = 0.0
+        self._image_subscription = None
+        self._subscribed_image_topic = ""
 
     def precheck(self) -> AdapterResult:
         if shutil.which("ros2") is None:
@@ -99,6 +101,7 @@ class CameraAdapter(AdapterBase):
         cameras_config = self._cameras_config_path()
         camera_cfg = self._camera_cfg(cameras_config)
         image_topic = self._image_topic(camera_cfg)
+        self._ensure_image_subscription(image_topic)
         deadline = time.monotonic() + self._ready_timeout_sec(timeout_sec)
 
         while time.monotonic() < deadline:
@@ -108,7 +111,7 @@ class CameraAdapter(AdapterBase):
                     f"{self._diagnostic_summary()}"
                 )
 
-            if self._topic_has_message(image_topic, timeout_sec=2):
+            if self._has_recent_image(max(1.0, self._diagnose_timeout_sec())):
                 return AdapterResult.ok(
                     f"{self.device.device_id}: image topic READY at {image_topic}.",
                     metadata={
@@ -117,7 +120,7 @@ class CameraAdapter(AdapterBase):
                         "log_path": None if self._log_path is None else str(self._log_path),
                     },
                 )
-            time.sleep(0.3)
+            time.sleep(0.1)
 
         return AdapterResult.failed(
             f"{self.device.device_id}: camera READY timeout after "
@@ -156,7 +159,8 @@ class CameraAdapter(AdapterBase):
         cameras_config = self._cameras_config_path()
         camera_cfg = self._camera_cfg(cameras_config)
         image_topic = self._image_topic(camera_cfg)
-        if not self._topic_has_message(image_topic, timeout_sec=self._diagnose_timeout_sec()):
+        self._ensure_image_subscription(image_topic)
+        if not self._has_recent_image(self._diagnose_timeout_sec()):
             return AdapterResult.degraded(
                 f"{self.device.device_id}: no recent image received on {image_topic}.",
                 metadata={
@@ -296,46 +300,33 @@ class CameraAdapter(AdapterBase):
             return 20.0
 
     def _diagnose_timeout_sec(self) -> float:
-        configured = self.device.config.get("diagnose_timeout_sec", 0.75)
+        configured = self.device.config.get("diagnose_timeout_sec", 1.5)
         try:
             return max(0.1, float(configured))
         except (TypeError, ValueError):
-            return 0.75
+            return 1.5
 
-    def _topic_has_message(self, topic_name: str, timeout_sec: float) -> bool:
-        if self.node is not None:
-            try:
-                received, _ = wait_for_message(
-                    Image,
-                    self.node,
-                    topic_name,
-                    qos_profile=qos_profile_sensor_data,
-                    time_to_wait=timeout_sec,
-                )
-                return bool(received)
-            except Exception:
-                return False
+    def _ensure_image_subscription(self, image_topic: str) -> None:
+        if self.node is None:
+            return
+        if self._subscribed_image_topic == image_topic and self._image_subscription is not None:
+            return
+        self._image_subscription = self.node.create_subscription(
+            Image,
+            image_topic,
+            self._on_image,
+            qos_profile_sensor_data,
+        )
+        self._subscribed_image_topic = image_topic
 
-        try:
-            completed = subprocess.run(
-                [
-                    "ros2",
-                    "topic",
-                    "echo",
-                    "--once",
-                    "--timeout",
-                    str(int(timeout_sec)),
-                    "--field",
-                    "header.stamp",
-                    topic_name,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=timeout_sec + 1.0,
-            )
-        except (OSError, subprocess.TimeoutExpired):
+    def _on_image(self, msg: Image) -> None:
+        del msg
+        self._last_image_monotonic = time.monotonic()
+
+    def _has_recent_image(self, freshness_timeout_sec: float) -> bool:
+        if self._last_image_monotonic <= 0.0:
             return False
-        return completed.returncode == 0 and bool(completed.stdout.strip())
+        return time.monotonic() - self._last_image_monotonic <= freshness_timeout_sec
 
     def _raw_launch_arguments(self) -> dict[str, object]:
         raw_arguments = self.device.config.get("launch_arguments", {})

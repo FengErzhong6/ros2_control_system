@@ -131,9 +131,10 @@ class CameraTileWidget(QFrame):
 
     def _set_waiting_text(self) -> None:
         self._stats_label.setText(
-            f"Topic: {self._stream_config.preview_topic}\n"
-            "Stream FPS: 0.0\n"
-            "Display FPS: 0.0\n"
+            f"Preview Topic: {self._stream_config.preview_topic}\n"
+            "Preview RX FPS: 0.0\n"
+            "UI Display FPS: 0.0\n"
+            f"Preview Cap: {self._preview_cap_text()}\n"
             "Frame Age: n/a\n"
             "Resolution: waiting"
         )
@@ -149,12 +150,19 @@ class CameraTileWidget(QFrame):
             frame_age_text = f"{frame_age_sec * 1000.0:.1f} ms"
 
         self._stats_label.setText(
-            f"Topic: {snapshot.preview_topic}\n"
-            f"Stream FPS: {snapshot.rx_fps:.1f}\n"
-            f"Display FPS: {self._display_fps:.1f}\n"
+            f"Preview Topic: {snapshot.preview_topic}\n"
+            f"Preview RX FPS: {snapshot.rx_fps:.1f}\n"
+            f"UI Display FPS: {self._display_fps:.1f}\n"
+            f"Preview Cap: {self._preview_cap_text()}\n"
             f"Frame Age: {frame_age_text}\n"
             f"Resolution: {snapshot.image_msg.width}x{snapshot.image_msg.height}"
         )
+
+    def _preview_cap_text(self) -> str:
+        preview_fps_limit = self._stream_config.preview_fps_limit
+        if preview_fps_limit is None:
+            return "auto"
+        return f"{preview_fps_limit:.1f} Hz"
 
 
 class CameraPanel(QWidget):

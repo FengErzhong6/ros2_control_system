@@ -51,6 +51,8 @@ private:
     int joint_acc_ratio_{30};
     int gripper_velocity_{255};
     int gripper_acceleration_{255};
+    double gripper_command_rate_hz_{50.0};
+    double gripper_command_epsilon_{1.0e-3};
     int connect_timeout_ms_{1500};
     int state_timeout_ms_{5000};
     int no_frame_timeout_ms_{800};
@@ -79,6 +81,10 @@ private:
         omnipicker::ArmSide arm_side = omnipicker::ArmSide::kB;
         uint32_t can_node_id = 0x01;
         size_t joint_index = 0;
+        bool has_sent_command = false;
+        double last_command_percent = 0.0;
+        std::chrono::steady_clock::time_point last_command_time{};
+        int consecutive_send_failures = 0;
     };
     size_t gripper_count_{0};
     std::array<GripperSlot, kMaxGrippers> grippers_{};

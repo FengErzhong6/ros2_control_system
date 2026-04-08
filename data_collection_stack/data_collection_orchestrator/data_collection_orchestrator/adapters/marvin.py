@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import math
 import os
 from pathlib import Path
-import re
 import shlex
 import shutil
 import signal
@@ -10,12 +10,21 @@ import subprocess
 import tempfile
 import time
 
+from ament_index_python.packages import get_package_share_directory
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+from sensor_msgs.msg import JointState
+from std_msgs.msg import String
+from std_srvs.srv import SetBool, Trigger
+import yaml
+
 from .base import AdapterBase, AdapterResult
 
 
 class MarvinAdapter(AdapterBase):
     DEFAULT_LAUNCH_PACKAGE = "marvin_system"
     DEFAULT_LAUNCH_FILE = "marvin_tracker_teleop.launch.py"
+    DEFAULT_CONTROLLER_CONFIG_RELATIVE_PATH = "bringup/config/marvin_tracker_teleop_controllers.yaml"
     REQUIRED_CONTROLLERS = {
         "joint_state_broadcaster": "active",
         "tracker_teleop_controller": "active",
@@ -32,6 +41,50 @@ class MarvinAdapter(AdapterBase):
         self._log_handle = None
         self._log_path: Path | None = None
         self._launch_command: list[str] = []
+        self._latest_teleop_state = ""
+        self._teleop_state_subscription = None
+        self._joint_state_subscription = None
+        self._service_callback_group = None
+        self._set_armed_client = None
+        self._set_enabled_client = None
+        self._go_home_client = None
+        self._joint_positions: dict[str, float] = {}
+        self._last_joint_state_monotonic = 0.0
+        self._home_joint_targets, self._home_tolerance_rad = self._load_home_targets()
+        if self.node is not None:
+            teleop_state_qos = QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            )
+            self._service_callback_group = ReentrantCallbackGroup()
+            self._teleop_state_subscription = self.node.create_subscription(
+                String,
+                "/tracker_teleop_controller/teleop_state",
+                self._on_teleop_state,
+                teleop_state_qos,
+            )
+            self._joint_state_subscription = self.node.create_subscription(
+                JointState,
+                "/joint_states",
+                self._on_joint_state,
+                qos_profile_sensor_data,
+            )
+            self._set_armed_client = self.node.create_client(
+                SetBool,
+                "/tracker_teleop_controller/set_armed",
+                callback_group=self._service_callback_group,
+            )
+            self._set_enabled_client = self.node.create_client(
+                SetBool,
+                "/tracker_teleop_controller/set_enabled",
+                callback_group=self._service_callback_group,
+            )
+            self._go_home_client = self.node.create_client(
+                Trigger,
+                "/tracker_teleop_controller/go_home",
+                callback_group=self._service_callback_group,
+            )
 
     def precheck(self) -> AdapterResult:
         if shutil.which("ros2") is None:
@@ -152,42 +205,26 @@ class MarvinAdapter(AdapterBase):
                 f"{self.device.device_id}: Marvin launch exited with code {self._process.returncode}."
             )
 
-        controllers = self._list_controllers()
-        if controllers is None:
-            return AdapterResult.degraded(
-                f"{self.device.device_id}: unable to query controller_manager.",
-                metadata={
-                    "log_path": None if self._log_path is None else str(self._log_path),
-                    "command": self._launch_command,
-                },
-            )
-
-        missing_controllers = [
-            controller_name
-            for controller_name, required_state in self.REQUIRED_CONTROLLERS.items()
-            if controllers.get(controller_name) != required_state
-        ]
-        if missing_controllers:
-            return AdapterResult.failed(
-                f"{self.device.device_id}: required controllers not active: {missing_controllers}",
-                metadata={"controllers": controllers},
-            )
-
         missing_services = [
             service_name
             for service_name, service_type in self.REQUIRED_SERVICES.items()
             if not self._service_available(service_name, service_type)
         ]
         if missing_services:
-            return AdapterResult.failed(
+            return AdapterResult.degraded(
                 f"{self.device.device_id}: required teleop services unavailable: {missing_services}",
-                metadata={"controllers": controllers},
+                metadata={
+                    "teleop_state": self._latest_teleop_state,
+                    "log_path": None if self._log_path is None else str(self._log_path),
+                    "command": self._launch_command,
+                },
             )
 
+        teleop_state = self._latest_teleop_state or "unknown"
         return AdapterResult.ok(
-            f"{self.device.device_id}: controller_manager and teleop services healthy.",
+            f"{self.device.device_id}: teleop services healthy (state={teleop_state}).",
             metadata={
-                "controllers": controllers,
+                "teleop_state": teleop_state,
                 "log_path": None if self._log_path is None else str(self._log_path),
                 "command": self._launch_command,
             },
@@ -215,42 +252,62 @@ class MarvinAdapter(AdapterBase):
         return self._call_set_bool_service(
             "/tracker_teleop_controller/set_armed",
             True,
-            timeout_sec=5.0,
+            timeout_sec=10.0,
         )
 
     def disarm(self) -> AdapterResult:
         disable_result = self._call_set_bool_service(
             "/tracker_teleop_controller/set_enabled",
             False,
-            timeout_sec=5.0,
+            timeout_sec=10.0,
         )
         if disable_result.is_failure():
             return disable_result
         return self._call_set_bool_service(
             "/tracker_teleop_controller/set_armed",
             False,
-            timeout_sec=5.0,
+            timeout_sec=10.0,
         )
 
     def home(self) -> AdapterResult:
-        return self._call_trigger_service(
+        command_result = self._call_trigger_service(
             "/tracker_teleop_controller/go_home",
-            timeout_sec=5.0,
+            timeout_sec=10.0,
         )
+        if command_result.is_failure():
+            return command_result
+        completion_result = self._wait_for_home_completion(timeout_sec=self._home_timeout_sec())
+        if completion_result.is_failure():
+            return completion_result
+        if command_result.summary:
+            return AdapterResult.ok(
+                f"{command_result.summary} {completion_result.summary}".strip()
+            )
+        return completion_result
 
     def before_session(self) -> AdapterResult:
         return self._call_set_bool_service(
             "/tracker_teleop_controller/set_enabled",
             True,
-            timeout_sec=5.0,
+            timeout_sec=10.0,
         )
 
     def after_session(self) -> AdapterResult:
         return self._call_set_bool_service(
             "/tracker_teleop_controller/set_enabled",
             False,
-            timeout_sec=5.0,
+            timeout_sec=10.0,
         )
+
+    def _on_teleop_state(self, msg: String) -> None:
+        self._latest_teleop_state = str(msg.data).strip()
+
+    def _on_joint_state(self, msg: JointState) -> None:
+        self._joint_positions = {
+            str(name): float(position)
+            for name, position in zip(msg.name, msg.position)
+        }
+        self._last_joint_state_monotonic = time.monotonic()
 
     def _launch_package(self) -> str:
         return str(self.device.config.get("launch_package", self.DEFAULT_LAUNCH_PACKAGE))
@@ -334,19 +391,33 @@ class MarvinAdapter(AdapterBase):
         return controllers
 
     def _controllers_ready(self, controllers: dict[str, str]) -> bool:
-        for controller_name, required_state in self.REQUIRED_CONTROLLERS.items():
+        for controller_name, required_state in self._required_controllers().items():
             if controllers.get(controller_name) != required_state:
                 return False
         return True
 
+    def _required_controllers(self) -> dict[str, str]:
+        required = dict(self.REQUIRED_CONTROLLERS)
+        launch_arguments = self._launch_arguments()
+        if self._launch_arg_enabled(launch_arguments.get("use_gripper_L", False)):
+            required["gripper_L_controller"] = "active"
+        if self._launch_arg_enabled(launch_arguments.get("use_gripper_R", False)):
+            required["gripper_R_controller"] = "active"
+        return required
+
+    def _launch_arg_enabled(self, value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() == "true"
+        return bool(value)
+
     def _service_available(self, service_name: str, expected_type: str) -> bool:
-        completed = self._run_ros2_command(
-            ["ros2", "service", "type", service_name],
-            timeout_sec=2.0,
-        )
-        if completed is None or completed.returncode != 0:
-            return False
-        return completed.stdout.strip() == expected_type
+        del expected_type
+        client = self._client_for_service(service_name)
+        if client is not None:
+            return client.service_is_ready()
+        return False
 
     def _call_set_bool_service(
         self, service_name: str, value: bool, timeout_sec: float
@@ -356,22 +427,18 @@ class MarvinAdapter(AdapterBase):
                 f"{self.device.device_id}: Marvin launch is not running for {service_name}."
             )
 
-        completed = self._run_ros2_command(
-            [
-                "ros2",
-                "service",
-                "call",
-                service_name,
-                "std_srvs/srv/SetBool",
-                f"{{data: {'true' if value else 'false'}}}",
-            ],
+        client = self._client_for_service(service_name)
+        if client is None:
+            return AdapterResult.failed(
+                f"{self.device.device_id}: no native client for {service_name}."
+            )
+        request = SetBool.Request()
+        request.data = value
+        return self._call_service(
+            client=client,
+            request=request,
             timeout_sec=timeout_sec,
-        )
-        return self._parse_service_response(
-            completed,
-            success_summary=(
-                f"{self.device.device_id}: {service_name} accepted data={value}."
-            ),
+            success_summary=f"{self.device.device_id}: {service_name} accepted data={value}.",
             failure_prefix=f"{self.device.device_id}: {service_name} failed",
         )
 
@@ -381,51 +448,147 @@ class MarvinAdapter(AdapterBase):
                 f"{self.device.device_id}: Marvin launch is not running for {service_name}."
             )
 
-        completed = self._run_ros2_command(
-            [
-                "ros2",
-                "service",
-                "call",
-                service_name,
-                "std_srvs/srv/Trigger",
-                "{}",
-            ],
+        client = self._client_for_service(service_name)
+        if client is None:
+            return AdapterResult.failed(
+                f"{self.device.device_id}: no native client for {service_name}."
+            )
+        request = Trigger.Request()
+        return self._call_service(
+            client=client,
+            request=request,
             timeout_sec=timeout_sec,
-        )
-        return self._parse_service_response(
-            completed,
             success_summary=f"{self.device.device_id}: {service_name} accepted.",
             failure_prefix=f"{self.device.device_id}: {service_name} failed",
         )
 
-    def _parse_service_response(
+    def _call_service(
         self,
-        completed: subprocess.CompletedProcess | None,
         *,
+        client,
+        request,
+        timeout_sec: float,
         success_summary: str,
         failure_prefix: str,
     ) -> AdapterResult:
-        if completed is None:
+        if not client.wait_for_service(timeout_sec=timeout_sec):
+            return AdapterResult.failed(f"{failure_prefix}: service unavailable.")
+
+        future = client.call_async(request)
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            if future.done():
+                break
+            time.sleep(0.01)
+
+        if not future.done():
             return AdapterResult.failed(f"{failure_prefix}: command timeout or spawn failure.")
-        if completed.returncode != 0:
-            message = completed.stderr.strip() or completed.stdout.strip()
-            return AdapterResult.failed(f"{failure_prefix}: {message}")
 
-        output = completed.stdout.strip()
-        success_match = re.search(r"success=(True|False)", output)
-        message_match = re.search(r"message='([^']*)'", output)
-        message = "" if message_match is None else message_match.group(1)
+        if future.exception() is not None:
+            return AdapterResult.failed(f"{failure_prefix}: {future.exception()}")
 
-        if success_match is None:
-            return AdapterResult.failed(f"{failure_prefix}: unable to parse response: {output}")
-        if success_match.group(1) != "True":
-            if message:
-                return AdapterResult.failed(f"{failure_prefix}: {message}")
-            return AdapterResult.failed(f"{failure_prefix}: {output}")
-
+        response = future.result()
+        success = bool(getattr(response, "success", False))
+        message = str(getattr(response, "message", "")).strip()
+        if not success:
+            return AdapterResult.failed(f"{failure_prefix}: {message or 'request rejected'}")
         if message:
             return AdapterResult.ok(f"{success_summary} message={message}")
         return AdapterResult.ok(success_summary)
+
+    def _client_for_service(self, service_name: str):
+        if service_name == "/tracker_teleop_controller/set_armed":
+            return self._set_armed_client
+        if service_name == "/tracker_teleop_controller/set_enabled":
+            return self._set_enabled_client
+        if service_name == "/tracker_teleop_controller/go_home":
+            return self._go_home_client
+        return None
+
+    def _controller_config_path(self) -> Path:
+        raw_value = self.device.config.get("controller_config")
+        if raw_value:
+            return Path(str(raw_value)).expanduser()
+
+        package_share = Path(get_package_share_directory("marvin_system"))
+        return package_share / self.DEFAULT_CONTROLLER_CONFIG_RELATIVE_PATH
+
+    def _load_home_targets(self) -> tuple[dict[str, float], float]:
+        config_path = self._controller_config_path()
+        try:
+            with config_path.open("r", encoding="utf-8") as handle:
+                data = yaml.safe_load(handle) or {}
+        except OSError:
+            return {}, math.radians(0.5)
+        except yaml.YAMLError:
+            return {}, math.radians(0.5)
+
+        params = data.get("tracker_teleop_controller", {}).get("ros__parameters", {})
+        joint_names = params.get("joints", [])
+        if not isinstance(joint_names, list):
+            return {}, math.radians(0.5)
+
+        home_left = params.get("home_joint_positions", {}).get("left", [])
+        home_right = params.get("home_joint_positions", {}).get("right", [])
+        if not isinstance(home_left, list) or not isinstance(home_right, list):
+            return {}, math.radians(0.5)
+
+        left_names = [str(name) for name in joint_names[: len(home_left)]]
+        right_names = [str(name) for name in joint_names[len(home_left): len(home_left) + len(home_right)]]
+
+        home_targets = {
+            name: float(value)
+            for name, value in zip(left_names + right_names, home_left + home_right)
+        }
+        tolerance_deg = params.get("home_tolerance_deg", 0.5)
+        try:
+            tolerance_rad = math.radians(float(tolerance_deg))
+        except (TypeError, ValueError):
+            tolerance_rad = math.radians(0.5)
+        return home_targets, max(tolerance_rad, 1.0e-4)
+
+    def _home_timeout_sec(self) -> float:
+        configured = self.device.config.get("home_timeout_sec", 20.0)
+        try:
+            return max(1.0, float(configured))
+        except (TypeError, ValueError):
+            return 20.0
+
+    def _wait_for_home_completion(self, timeout_sec: float) -> AdapterResult:
+        if not self._home_joint_targets:
+            return AdapterResult.ok(
+                f"{self.device.device_id}: go_home accepted; home verification unavailable."
+            )
+
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            if self._process is None or self._process.poll() is not None:
+                return AdapterResult.failed(
+                    f"{self.device.device_id}: Marvin launch exited while waiting for home."
+                )
+            if self._is_home_reached():
+                return AdapterResult.ok(
+                    f"{self.device.device_id}: home pose reached."
+                )
+            time.sleep(0.05)
+
+        return AdapterResult.failed(
+            f"{self.device.device_id}: home pose not reached within {timeout_sec:.1f}s."
+        )
+
+    def _is_home_reached(self) -> bool:
+        if self._last_joint_state_monotonic <= 0.0:
+            return False
+        if time.monotonic() - self._last_joint_state_monotonic > 1.0:
+            return False
+
+        for joint_name, target_position in self._home_joint_targets.items():
+            current_position = self._joint_positions.get(joint_name)
+            if current_position is None:
+                return False
+            if abs(current_position - target_position) > self._home_tolerance_rad:
+                return False
+        return True
 
     def _signal_process_group(self, sig: signal.Signals, timeout_sec: float) -> bool:
         if self._process is None:

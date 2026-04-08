@@ -29,6 +29,10 @@ devices:
     depends_on:
       - htc_tracker
       - manus_glove
+    launch_arguments:
+      use_gripper_L: true
+      use_gripper_R: true
+      start_manus_gripper_bridge: true
 record_topics:
   - /cam_high/cam_high/color/image_raw
   - /cam_high/cam_high/color/camera_info

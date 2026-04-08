@@ -3,5 +3,9 @@ manus_gripper_node:
     input_topic: "/manus_raw_publisher_node/gloves_raw"
     left_output_topic: "/gripper_L_controller/commands"
     right_output_topic: "/gripper_R_controller/commands"
+    teleop_state_topic: "/tracker_teleop_controller/teleop_state"
+    require_enabled_state: true
+    publish_rate_hz: 50.0
+    command_epsilon: 0.01
     lower_threshold_distance: 0.03
     upper_threshold_distance: 0.10

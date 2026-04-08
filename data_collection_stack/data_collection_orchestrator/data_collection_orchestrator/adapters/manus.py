@@ -10,6 +10,7 @@ import tempfile
 import time
 
 from ament_index_python.packages import get_package_share_directory
+from manus_system.msg import ManusGloveRawArray
 
 from .base import AdapterBase, AdapterResult
 
@@ -26,6 +27,15 @@ class ManusAdapter(AdapterBase):
         self._log_handle = None
         self._log_path: Path | None = None
         self._launch_command: list[str] = []
+        self._last_message_monotonic = 0.0
+        self._ready_subscription = None
+        if self.node is not None:
+            self._ready_subscription = self.node.create_subscription(
+                ManusGloveRawArray,
+                self._ready_topic(),
+                self._on_ready_message,
+                10,
+            )
 
     def precheck(self) -> AdapterResult:
         if shutil.which("ros2") is None:
@@ -113,7 +123,7 @@ class ManusAdapter(AdapterBase):
                     f"{self._diagnostic_summary()}"
                 )
 
-            if self._topic_has_message(ready_topic, timeout_sec=2.0):
+            if self._has_fresh_message():
                 return AdapterResult.ok(
                     f"{self.device.device_id}: MANUS READY at {ready_topic}.",
                     metadata={
@@ -124,7 +134,7 @@ class ManusAdapter(AdapterBase):
                     },
                 )
 
-            time.sleep(0.3)
+            time.sleep(0.1)
 
         return AdapterResult.failed(
             f"{self.device.device_id}: MANUS READY timeout after "
@@ -161,7 +171,7 @@ class ManusAdapter(AdapterBase):
             )
 
         ready_topic = self._ready_topic()
-        if not self._topic_has_message(ready_topic, timeout_sec=self._diagnose_timeout_sec()):
+        if not self._has_fresh_message():
             return AdapterResult.degraded(
                 f"{self.device.device_id}: no recent MANUS sample on {ready_topic}.",
                 metadata={
@@ -262,11 +272,20 @@ class ManusAdapter(AdapterBase):
             return 20.0
 
     def _diagnose_timeout_sec(self) -> float:
-        configured = self.device.config.get("diagnose_timeout_sec", 0.75)
+        configured = self.device.config.get("diagnose_timeout_sec", 2.0)
         try:
             return max(0.1, float(configured))
         except (TypeError, ValueError):
-            return 0.75
+            return 2.0
+
+    def _on_ready_message(self, msg: ManusGloveRawArray) -> None:
+        del msg
+        self._last_message_monotonic = time.monotonic()
+
+    def _has_fresh_message(self) -> bool:
+        if self._last_message_monotonic <= 0.0:
+            return False
+        return time.monotonic() - self._last_message_monotonic <= self._diagnose_timeout_sec()
 
     def _topic_has_message(self, topic_name: str, timeout_sec: float) -> bool:
         timeout_arg = str(max(1, int(timeout_sec)))

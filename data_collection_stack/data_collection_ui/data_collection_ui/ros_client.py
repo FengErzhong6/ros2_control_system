@@ -400,6 +400,7 @@ class RosClient:
                     camera_id=camera_id,
                     title=str(camera_cfg.get("title", camera_id)),
                     preview_topic=preview_topic,
+                    preview_fps_limit=self._preview_fps_limit(camera_cfg),
                 )
             )
         return stream_configs
@@ -425,6 +426,18 @@ class RosClient:
                 if isinstance(topic, str) and topic.strip():
                     return topic.strip()
         return ""
+
+    def _preview_fps_limit(self, camera_cfg: dict) -> float | None:
+        raw_value = camera_cfg.get("preview_fps")
+        if raw_value is None:
+            return None
+        try:
+            preview_fps = float(raw_value)
+        except (TypeError, ValueError):
+            return None
+        if preview_fps <= 0.0:
+            return None
+        return preview_fps
 
     def _on_system_state(self, msg: SystemState) -> None:
         previous_snapshot = self.system_state_snapshot()

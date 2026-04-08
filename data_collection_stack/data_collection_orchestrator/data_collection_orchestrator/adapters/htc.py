@@ -10,6 +10,7 @@ import tempfile
 import time
 
 from ament_index_python.packages import get_package_share_directory
+from tf2_msgs.msg import TFMessage
 import yaml
 
 from .base import AdapterBase, AdapterResult
@@ -26,6 +27,15 @@ class HtcAdapter(AdapterBase):
         self._log_handle = None
         self._log_path: Path | None = None
         self._launch_command: list[str] = []
+        self._frame_last_seen_monotonic: dict[str, float] = {}
+        self._tf_subscription = None
+        if self.node is not None:
+            self._tf_subscription = self.node.create_subscription(
+                TFMessage,
+                "/tf",
+                self._on_tf_message,
+                10,
+            )
 
     def precheck(self) -> AdapterResult:
         if shutil.which("ros2") is None:
@@ -103,24 +113,18 @@ class HtcAdapter(AdapterBase):
                     f"{self._diagnostic_summary()}"
                 )
 
-            output = self._read_tf_message(timeout_sec=2.0)
-            if output:
-                published_frames = [
-                    frame
-                    for frame in expected_frames
-                    if f"child_frame_id: {frame}" in output
-                ]
-                if len(published_frames) == len(expected_frames):
-                    return AdapterResult.ok(
-                        f"{self.device.device_id}: tracker TF READY with frames {expected_frames}.",
-                        metadata={
-                            "expected_frames": expected_frames,
-                            "published_frames": published_frames,
-                            "trackers_config": str(trackers_config),
-                        },
-                    )
+            published_frames = self._fresh_frames(expected_frames)
+            if len(published_frames) == len(expected_frames):
+                return AdapterResult.ok(
+                    f"{self.device.device_id}: tracker TF READY with frames {expected_frames}.",
+                    metadata={
+                        "expected_frames": expected_frames,
+                        "published_frames": published_frames,
+                        "trackers_config": str(trackers_config),
+                    },
+                )
 
-            time.sleep(0.3)
+            time.sleep(0.1)
 
         return AdapterResult.failed(
             f"{self.device.device_id}: HTC READY timeout after "
@@ -158,10 +162,7 @@ class HtcAdapter(AdapterBase):
 
         trackers_config = self._trackers_config_path()
         expected_frames = self._expected_frames(trackers_config)
-        output = self._read_tf_message(timeout_sec=self._diagnose_timeout_sec())
-        published_frames = [
-            frame for frame in expected_frames if output and f"child_frame_id: {frame}" in output
-        ]
+        published_frames = self._fresh_frames(expected_frames)
         if len(published_frames) != len(expected_frames):
             return AdapterResult.degraded(
                 f"{self.device.device_id}: missing tracker TF frames. "
@@ -269,11 +270,28 @@ class HtcAdapter(AdapterBase):
             return 15.0
 
     def _diagnose_timeout_sec(self) -> float:
-        configured = self.device.config.get("diagnose_timeout_sec", 1.0)
+        configured = self.device.config.get("diagnose_timeout_sec", 2.0)
         try:
             return max(0.2, float(configured))
         except (TypeError, ValueError):
-            return 1.0
+            return 2.0
+
+    def _on_tf_message(self, msg: TFMessage) -> None:
+        now = time.monotonic()
+        for transform in msg.transforms:
+            child_frame_id = str(transform.child_frame_id).strip()
+            if child_frame_id:
+                self._frame_last_seen_monotonic[child_frame_id] = now
+
+    def _fresh_frames(self, expected_frames: list[str]) -> list[str]:
+        freshness_timeout_sec = self._diagnose_timeout_sec()
+        now = time.monotonic()
+        published_frames = []
+        for frame in expected_frames:
+            last_seen = self._frame_last_seen_monotonic.get(frame)
+            if last_seen is not None and now - last_seen <= freshness_timeout_sec:
+                published_frames.append(frame)
+        return published_frames
 
     def _read_tf_message(self, timeout_sec: float) -> str:
         try:

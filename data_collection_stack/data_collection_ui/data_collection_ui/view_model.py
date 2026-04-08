@@ -8,6 +8,7 @@ class CameraStreamConfig:
     camera_id: str
     title: str
     preview_topic: str
+    preview_fps_limit: float | None = None
 
 
 @dataclass(frozen=True)

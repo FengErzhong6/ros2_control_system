@@ -8,6 +8,7 @@ from PyQt5.QtGui import QKeySequence
 from PyQt5.QtWidgets import (
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QMainWindow,
     QShortcut,
     QVBoxLayout,
@@ -178,6 +179,31 @@ class MainWindow(QMainWindow):
 
     def _on_acknowledge_fault(self) -> None:
         self._ros_client.acknowledge_fault()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        system_state = self._ros_client.system_state_snapshot()
+        if system_state.system_state == "IDLE":
+            super().closeEvent(event)
+            return
+
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Warning)
+        dialog.setWindowTitle("Confirm Close")
+        dialog.setText("The system is not idle.")
+        dialog.setInformativeText(
+            "Closing this window will only close the UI. "
+            "The supervisor and hardware processes may continue running.\n\n"
+            "Use Disconnect first if you want a clean shutdown."
+        )
+        dialog.setStandardButtons(QMessageBox.Cancel | QMessageBox.Close)
+        dialog.setDefaultButton(QMessageBox.Cancel)
+        dialog.button(QMessageBox.Close).setText("Close UI Only")
+        result = dialog.exec()
+        if result == QMessageBox.Close:
+            event.accept()
+            return
+
+        event.ignore()
 
     def _refresh(self) -> None:
         system_state = self._ros_client.system_state_snapshot()

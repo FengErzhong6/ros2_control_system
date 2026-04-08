@@ -45,6 +45,18 @@ int param_int(const std::unordered_map<std::string, std::string> &m,
     return std::clamp(std::atoi(it->second.c_str()), lo, hi);
 }
 
+double param_double(const std::unordered_map<std::string, std::string> &m,
+                    const std::string &key, double def, double lo, double hi)
+{
+    const auto it = m.find(key);
+    if (it == m.end()) return def;
+    try {
+        return std::clamp(std::stod(it->second), lo, hi);
+    } catch (...) {
+        return def;
+    }
+}
+
 std::string param_str(const std::unordered_map<std::string, std::string> &m,
                       const std::string &key, const std::string &def = {})
 {
@@ -248,6 +260,10 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
     joint_acc_ratio_     = param_int(p, "joint_acc_ratio",     30,   1, 100);
     gripper_velocity_    = param_int(p, "gripper_velocity",    255,  0, 255);
     gripper_acceleration_= param_int(p, "gripper_acceleration",255,  0, 255);
+    gripper_command_rate_hz_ = param_double(
+        p, "gripper_command_rate_hz", 50.0, 1.0, 1000.0);
+    gripper_command_epsilon_ = param_double(
+        p, "gripper_command_epsilon", 1.0e-3, 0.0, 1.0);
     connect_timeout_ms_  = param_int(p, "connect_timeout_ms",  1500, 100, 30000);
     state_timeout_ms_    = param_int(p, "state_timeout_ms",    5000, 100, 30000);
     no_frame_timeout_ms_ = param_int(p, "no_frame_timeout_ms", 800,  50, 10000);
@@ -664,6 +680,10 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
         }
         set_state(pos_if(jn), init_pos);
         set_command(pos_if(jn), init_pos);
+        slot.has_sent_command = false;
+        slot.last_command_percent = init_pos;
+        slot.last_command_time = Clock::now();
+        slot.consecutive_send_failures = 0;
         RCLCPP_INFO(get_logger(), "Gripper '%s' ready (pos=%.1f%%).",
                      jn.c_str(), init_pos * 100.0);
     }
@@ -685,8 +705,13 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
 
     activated_ = true;
 
-    RCLCPP_INFO(get_logger(), "System activated (position mode, grippers=%zu).",
-                gripper_count_);
+    RCLCPP_INFO(
+        get_logger(),
+        "System activated (position mode, grippers=%zu, gripper_command_rate=%.1f Hz, "
+        "gripper_command_epsilon=%.4f).",
+        gripper_count_,
+        gripper_command_rate_hz_,
+        gripper_command_epsilon_);
     return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -810,6 +835,9 @@ hardware_interface::return_type MarvinHardware::write(
     const rclcpp::Time &, const rclcpp::Duration &)
 {
     if (!activated_) return hardware_interface::return_type::OK;
+    const auto gripper_write_time = Clock::now();
+    const auto min_gripper_send_interval =
+        std::chrono::duration<double>(1.0 / gripper_command_rate_hz_);
 
     double cmd_a[kJointsPerArm];
     double cmd_b[kJointsPerArm];
@@ -863,15 +891,44 @@ hardware_interface::return_type MarvinHardware::write(
 
     // Send gripper commands (independent ChData channel, no conflict with arm commands)
     for (size_t g = 0; g < gripper_count_; ++g) {
-        const auto &slot = grippers_[g];
+        auto &slot = grippers_[g];
         const auto &jn = info_.joints[slot.joint_index].name;
         const double cmd = get_command<double>(pos_if(jn));
         if (!std::isfinite(cmd)) {
             RCLCPP_ERROR(get_logger(), "Non-finite command on gripper '%s'.", jn.c_str());
             return hardware_interface::return_type::ERROR;
         }
-        slot.device->set_position_percent(
-            static_cast<float>(std::clamp(cmd, 0.0, 1.0)));
+
+        const double clamped_cmd = std::clamp(cmd, 0.0, 1.0);
+        const bool command_changed =
+            !slot.has_sent_command ||
+            std::abs(clamped_cmd - slot.last_command_percent) >= gripper_command_epsilon_;
+        const bool interval_elapsed =
+            !slot.has_sent_command ||
+            (gripper_write_time - slot.last_command_time) >= min_gripper_send_interval;
+        if (!command_changed && !interval_elapsed) {
+            continue;
+        }
+
+        const auto err = slot.device->set_position_percent(static_cast<float>(clamped_cmd));
+        if (err != omnipicker::ErrorCode::kOK) {
+            ++slot.consecutive_send_failures;
+            if (slot.consecutive_send_failures == 1 ||
+                slot.consecutive_send_failures % 50 == 0) {
+                RCLCPP_WARN(
+                    get_logger(),
+                    "Gripper '%s' command send failed (%d consecutive): %s",
+                    jn.c_str(),
+                    slot.consecutive_send_failures,
+                    omnipicker::error_to_string(err));
+            }
+            continue;
+        }
+
+        slot.has_sent_command = true;
+        slot.last_command_percent = clamped_cmd;
+        slot.last_command_time = gripper_write_time;
+        slot.consecutive_send_failures = 0;
     }
 
     return hardware_interface::return_type::OK;
