@@ -193,12 +193,15 @@ bool WorkspaceGuard::filter(size_t arm, double cmd_deg[kJointsPerArm],
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// checkArmSafe – FK all joint origins + tool tip, verify z >= threshold
-// ---------------------------------------------------------------------------
-bool WorkspaceGuard::checkArmSafe(
+WorkspaceGuard::Evaluation WorkspaceGuard::evaluate_arm(
     size_t arm, const double cmd_deg[kJointsPerArm]) const
 {
+    Evaluation result;
+    result.arm_index = arm;
+    if (!enabled_) {
+        return result;
+    }
+
     // Marvin M6-S joint origin transforms (from URDF, identical for L/R arms).
     static const M4 jt[kJointsPerArm] = {
         m4_from_rpy_xyz(0,        0,        0,      0,     0,      0.1745),
@@ -235,18 +238,51 @@ bool WorkspaceGuard::checkArmSafe(
             T[i][3] = r0*J[0][3] + r1*J[1][3] + r2*J[2][3] + r3;
         }
 
-        if (__builtin_expect(T[2][3] < z_threshold_, 0))
-            return false;
+        if (T[2][3] < result.min_z) {
+            result.min_z = T[2][3];
+            result.point_index = static_cast<int>(j);
+        }
     }
 
     if (has_tool_) {
         const double z = T[2][0]*tool_tf_.d[0][3] + T[2][1]*tool_tf_.d[1][3]
                        + T[2][2]*tool_tf_.d[2][3] + T[2][3];
-        if (__builtin_expect(z < z_threshold_, 0))
-            return false;
+        if (z < result.min_z) {
+            result.min_z = z;
+            result.point_index = static_cast<int>(kJointsPerArm);
+        }
     }
 
-    return true;
+    result.safe = result.min_z >= z_threshold_;
+    return result;
+}
+
+WorkspaceGuard::Evaluation WorkspaceGuard::evaluate(
+    const std::array<std::array<double, kJointsPerArm>, kArmCount> &cmd_deg) const
+{
+    Evaluation best;
+    if (!enabled_) {
+        return best;
+    }
+
+    best = evaluate_arm(0, cmd_deg[0].data());
+    for (size_t arm = 1; arm < kArmCount; ++arm) {
+        const auto candidate = evaluate_arm(arm, cmd_deg[arm].data());
+        if (candidate.min_z < best.min_z) {
+            best = candidate;
+        }
+        best.safe = best.safe && candidate.safe;
+    }
+    return best;
+}
+
+// ---------------------------------------------------------------------------
+// checkArmSafe – FK all joint origins + tool tip, verify z >= threshold
+// ---------------------------------------------------------------------------
+bool WorkspaceGuard::checkArmSafe(
+    size_t arm, const double cmd_deg[kJointsPerArm]) const
+{
+    return evaluate_arm(arm, cmd_deg).safe;
 }
 
 }  // namespace marvin_system

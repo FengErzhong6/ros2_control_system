@@ -17,6 +17,7 @@ from rclpy.node import Node
 from rclpy.serialization import deserialize_message
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray
+from std_srvs.srv import Trigger
 
 
 DEFAULT_JOINT_NAMES = [
@@ -46,10 +47,24 @@ def load_home_positions(path: Path) -> dict[str, float]:
     with path.open("r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
 
+    motion_params = data.get("marvin_motion_server", {}).get("ros__parameters", {})
+    named_home = motion_params.get("named_poses", {}).get("home", {})
+    if isinstance(named_home, dict):
+        left = named_home.get("left", [])
+        right = named_home.get("right", [])
+        if isinstance(left, list) and isinstance(right, list):
+            joint_names = [f"Joint{i}_L" for i in range(1, 8)] + [f"Joint{i}_R" for i in range(1, 8)]
+            values = list(left) + list(right)
+            if len(values) == len(joint_names):
+                return {
+                    joint_name: float(value)
+                    for joint_name, value in zip(joint_names, values)
+                }
+
     params = data.get("joint_gui_publisher", {}).get("ros__parameters", {})
     initial_positions = params.get("initial_positions", {})
     if not isinstance(initial_positions, dict):
-        raise RuntimeError(f"Invalid initial_positions in {path}")
+        raise RuntimeError(f"Invalid home position schema in {path}")
     return {
         str(name): float(value)
         for name, value in initial_positions.items()
@@ -114,6 +129,18 @@ class JointTrajectoryBagReplay(Node):
                 "list_controllers_service", "/controller_manager/list_controllers"
             ).value
         )
+        self._go_home_service = str(
+            self.declare_parameter("go_home_service", "/marvin_motion/go_home").value
+        ).strip()
+        self._use_motion_go_home = bool(
+            self.declare_parameter("use_motion_go_home", True).value
+        )
+        self._fallback_local_home = bool(
+            self.declare_parameter("fallback_local_home", False).value
+        )
+        self._go_home_timeout_sec = float(
+            self.declare_parameter("go_home_timeout_sec", 20.0).value
+        )
         home_positions_file_value = str(
             self.declare_parameter("home_positions_file", "").value
         ).strip()
@@ -137,6 +164,9 @@ class JointTrajectoryBagReplay(Node):
         self._list_controllers_client = self.create_client(
             ListControllers, self._list_controllers_service
         )
+        self._go_home_client = None
+        if self._use_motion_go_home and self._go_home_service:
+            self._go_home_client = self.create_client(Trigger, self._go_home_service)
         self.create_subscription(JointState, "joint_states", self._on_joint_state, 10)
         atexit.register(self._restore_terminal)
 
@@ -371,6 +401,15 @@ class JointTrajectoryBagReplay(Node):
         return stages
 
     def _run_go_home_sequence(self) -> None:
+        if self._use_motion_go_home and self._go_home_client is not None:
+            if self._request_motion_go_home():
+                return
+            if not self._fallback_local_home:
+                self.get_logger().error(
+                    "Motion-layer go_home failed and local fallback is disabled."
+                )
+                return
+
         stages = self._build_home_stages()
         if not stages:
             self.get_logger().warn("No home positions available for replay joints; exiting in place.")
@@ -411,6 +450,49 @@ class JointTrajectoryBagReplay(Node):
             self._publish_command(current_command)
             time.sleep(0.02)
         self.get_logger().info("Home position sequence finished.")
+
+    def _request_motion_go_home(self) -> bool:
+        if self._go_home_client is None:
+            return False
+
+        deadline = time.monotonic() + max(1.0, self._go_home_timeout_sec)
+        while not self._stop_event.is_set() and rclpy.ok() and time.monotonic() < deadline:
+            if self._go_home_client.service_is_ready():
+                break
+            if self._go_home_client.wait_for_service(timeout_sec=0.2):
+                break
+        else:
+            self.get_logger().error(
+                f"Motion-layer go_home service unavailable: {self._go_home_service}"
+            )
+            return False
+
+        future = self._go_home_client.call_async(Trigger.Request())
+        while not future.done() and not self._stop_event.is_set() and rclpy.ok():
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.01)
+
+        if not future.done():
+            self.get_logger().error("Motion-layer go_home request timed out.")
+            return False
+        if future.exception() is not None:
+            self.get_logger().error(
+                f"Motion-layer go_home request failed: {future.exception()}"
+            )
+            return False
+
+        response = future.result()
+        if not response.success:
+            self.get_logger().error(
+                f"Motion-layer go_home rejected: {response.message}"
+            )
+            return False
+
+        self.get_logger().info(
+            f"Motion-layer go_home succeeded: {response.message}"
+        )
+        return True
 
     def _run_playback(self) -> None:
         try:

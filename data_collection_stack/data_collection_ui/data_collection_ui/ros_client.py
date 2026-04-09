@@ -16,6 +16,7 @@ from data_collection_interfaces.action import (
 )
 from data_collection_interfaces.msg import DeviceState, FaultEvent, SystemState
 from data_collection_interfaces.srv import AcknowledgeFault
+from marvin_system.srv import GetMotionStatus
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
@@ -82,6 +83,20 @@ class CameraStreamSnapshot:
 
 
 @dataclass(frozen=True)
+class MotionStatusSnapshot:
+    available: bool = False
+    mode: str = "UNKNOWN"
+    teleop_state: str = "UNKNOWN"
+    teleop_armed: bool = False
+    teleop_enabled: bool = False
+    primary_controller_state: str = "-"
+    trajectory_controller_state: str = "-"
+    motion_busy: bool = False
+    controller_interlock_ok: bool = True
+    message: str = ""
+
+
+@dataclass(frozen=True)
 class UiEventEntry:
     stamp_sec: float
     level: str
@@ -107,8 +122,10 @@ class RosClient:
         self._config = self._load_runtime_config()
         self._lock = threading.Lock()
         self._system_state = SystemStateSnapshot(recipe_id=self._config.recipe_id)
+        self._motion_status = MotionStatusSnapshot()
         self._event_entries: deque[UiEventEntry] = deque(maxlen=200)
         self._pending_commands: set[str] = set()
+        self._motion_status_request_pending = False
         self._camera_runtimes = {
             stream.camera_id: _CameraStreamRuntime(config=stream, rx_window_start=time.monotonic())
             for stream in self._config.camera_streams
@@ -126,8 +143,15 @@ class RosClient:
             AcknowledgeFault,
             "acknowledge_fault",
         )
+        self._motion_status_client = self._node.create_client(
+            GetMotionStatus,
+            "/marvin_motion/get_status",
+        )
         self._subscriptions = [
             self._node.create_subscription(SystemState, "system_state", self._on_system_state, 10)
+        ]
+        self._timers = [
+            self._node.create_timer(0.5, self._poll_motion_status)
         ]
         for stream in self._config.camera_streams:
             self._subscriptions.append(
@@ -184,6 +208,10 @@ class RosClient:
     def event_entries(self) -> tuple[UiEventEntry, ...]:
         with self._lock:
             return tuple(self._event_entries)
+
+    def motion_status_snapshot(self) -> MotionStatusSnapshot:
+        with self._lock:
+            return self._motion_status
 
     def pending_commands(self) -> tuple[str, ...]:
         with self._lock:
@@ -483,6 +511,96 @@ class RosClient:
                     f"First preview frame received for {camera_id} on "
                     f"{runtime.config.preview_topic}: {msg.width}x{msg.height} {msg.encoding}"
                 )
+
+    def _poll_motion_status(self) -> None:
+        with self._lock:
+            if self._motion_status_request_pending:
+                return
+
+        client = self._motion_status_client
+        if not client.service_is_ready() and not client.wait_for_service(timeout_sec=0.0):
+            previous = self.motion_status_snapshot()
+            if previous.available:
+                self._set_motion_status_snapshot(
+                    MotionStatusSnapshot(
+                        available=False,
+                        message="marvin_motion status service unavailable.",
+                    )
+                )
+            return
+
+        with self._lock:
+            self._motion_status_request_pending = True
+
+        future = client.call_async(GetMotionStatus.Request())
+        future.add_done_callback(self._handle_motion_status_result)
+
+    def _handle_motion_status_result(self, future) -> None:
+        try:
+            response = future.result()
+        except Exception as exc:  # pragma: no cover - defensive callback path
+            self._set_motion_status_snapshot(
+                MotionStatusSnapshot(
+                    available=False,
+                    message=f"Failed to query marvin_motion status: {exc}",
+                )
+            )
+            return
+
+        snapshot = MotionStatusSnapshot(
+            available=bool(getattr(response, "success", False)),
+            mode=str(getattr(response, "mode", "")).strip() or "UNKNOWN",
+            teleop_state=str(getattr(response, "teleop_state", "")).strip() or "UNKNOWN",
+            teleop_armed=bool(getattr(response, "teleop_armed", False)),
+            teleop_enabled=bool(getattr(response, "teleop_enabled", False)),
+            primary_controller_state=(
+                str(getattr(response, "primary_controller_state", "")).strip() or "-"
+            ),
+            trajectory_controller_state=(
+                str(getattr(response, "trajectory_controller_state", "")).strip() or "-"
+            ),
+            motion_busy=bool(getattr(response, "motion_busy", False)),
+            controller_interlock_ok=bool(getattr(response, "controller_interlock_ok", True)),
+            message=str(getattr(response, "message", "")).strip(),
+        )
+        self._set_motion_status_snapshot(snapshot)
+
+    def _set_motion_status_snapshot(self, snapshot: MotionStatusSnapshot) -> None:
+        event_messages: list[tuple[str, str]] = []
+        with self._lock:
+            previous = self._motion_status
+            self._motion_status = snapshot
+            self._motion_status_request_pending = False
+
+            if snapshot.available != previous.available:
+                if snapshot.available:
+                    event_messages.append(
+                        ("INFO", f"marvin_motion online: mode={snapshot.mode}, teleop={snapshot.teleop_state}.")
+                    )
+                else:
+                    event_messages.append(
+                        ("WARN", snapshot.message or "marvin_motion status unavailable.")
+                    )
+
+            if snapshot.available and (
+                snapshot.mode != previous.mode or snapshot.teleop_state != previous.teleop_state
+            ):
+                event_messages.append(
+                    (
+                        "DEVICE",
+                        "marvin_motion "
+                        f"mode={snapshot.mode} teleop={snapshot.teleop_state} "
+                        f"busy={'ON' if snapshot.motion_busy else 'OFF'}",
+                    )
+                )
+
+            if previous.controller_interlock_ok and not snapshot.controller_interlock_ok:
+                event_messages.append(
+                    ("ERROR", "marvin_motion controller interlock violation detected.")
+                )
+
+        for level, message in event_messages:
+            self._record_event(level, message)
 
     def _spin_executor(self) -> None:
         try:

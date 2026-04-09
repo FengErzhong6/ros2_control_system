@@ -11,6 +11,7 @@
 
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "std_srvs/srv/set_bool.hpp"
 
 namespace {
 
@@ -195,6 +196,31 @@ hardware_interface::CallbackReturn MarvinHardware::on_init(
         RCLCPP_WARN(get_logger(), "Velocity state declared on some joints only; disabled.");
     if (any_eff && !all_eff)
         RCLCPP_WARN(get_logger(), "Effort state declared on some joints only; disabled.");
+
+    if (const auto node = get_node()) {
+        workspace_guard_service_ = node->create_service<std_srvs::srv::SetBool>(
+            "~/set_workspace_guard_enabled",
+            [this](
+                const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
+                std::shared_ptr<std_srvs::srv::SetBool::Response> response) {
+                workspace_guard_runtime_enabled_.store(
+                    request->data, std::memory_order_relaxed);
+                response->success = true;
+                if (!workspace_guard_.enabled()) {
+                    response->message =
+                        "Workspace guard is not configured on this hardware instance.";
+                    RCLCPP_INFO(
+                        get_logger(),
+                        "Workspace guard runtime request ignored because the guard is not configured.");
+                    return;
+                }
+
+                response->message = request->data
+                                        ? "Workspace guard runtime enforcement enabled."
+                                        : "Workspace guard runtime enforcement disabled.";
+                RCLCPP_INFO(get_logger(), "%s", response->message.c_str());
+            });
+    }
 
     // Detect optional OmniPicker gripper joints (indices kTotalJoints+)
     gripper_count_ = 0;
@@ -638,9 +664,15 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
                 fb[j] = static_cast<double>(dcss.m_Out[arm].m_FB_Joint_PosE[j]);
             workspace_guard_.seed(arm, fb);
         }
-        workspace_guard_.arm();
-        RCLCPP_INFO(get_logger(),
-                    "Workspace z-floor check armed for runtime commands.");
+        if (workspace_guard_runtime_enabled_.load(std::memory_order_relaxed)) {
+            workspace_guard_.arm();
+            RCLCPP_INFO(get_logger(),
+                        "Workspace z-floor check armed for runtime commands.");
+        } else {
+            RCLCPP_INFO(
+                get_logger(),
+                "Workspace z-floor check is configured but runtime enforcement is disabled.");
+        }
     }
 
     activated_ = true;
@@ -801,7 +833,8 @@ hardware_interface::return_type MarvinHardware::write(
         cmd_b[j] = std::clamp(vb, joint_min_[idx_b], joint_max_[idx_b]) * kRad2Deg;
     }
 
-    if (workspace_guard_.enabled()) {
+    if (workspace_guard_.enabled() &&
+        workspace_guard_runtime_enabled_.load(std::memory_order_relaxed)) {
         workspace_guard_.filter(0, cmd_a, get_logger());
         workspace_guard_.filter(1, cmd_b, get_logger());
     }

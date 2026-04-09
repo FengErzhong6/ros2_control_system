@@ -372,6 +372,12 @@ void TrackerTeleopController::resetRuntimeState()
 void TrackerTeleopController::createRosInterfaces()
 {
     auto node = get_node();
+    auto get_or_declare_string = [&node](const std::string &name, const std::string &default_value) {
+        if (node->has_parameter(name)) {
+            return node->get_parameter(name).as_string();
+        }
+        return node->declare_parameter<std::string>(name, default_value);
+    };
 
     pub_viz_markers_ = node->create_publisher<visualization_msgs::msg::MarkerArray>(
         "~/viz_markers", rclcpp::SystemDefaultsQoS());
@@ -397,21 +403,35 @@ void TrackerTeleopController::createRosInterfaces()
     diagnostics_timer_ = node->create_wall_timer(
         std::chrono::milliseconds(20),
         std::bind(&TrackerTeleopController::diagnosticsTimerCallback, this));
+
+    const auto set_armed_service_name =
+        get_or_declare_string("set_armed_service_name", "~/set_armed");
+    const auto set_enabled_service_name =
+        get_or_declare_string("set_enabled_service_name", "~/set_enabled");
+    const auto go_home_service_name =
+        get_or_declare_string("go_home_service_name", "~/go_home");
+
     srv_set_armed_ = node->create_service<std_srvs::srv::SetBool>(
-        "~/set_armed",
+        set_armed_service_name,
         std::bind(
             &TrackerTeleopController::handleSetArmed, this,
             std::placeholders::_1, std::placeholders::_2));
     srv_set_enabled_ = node->create_service<std_srvs::srv::SetBool>(
-        "~/set_enabled",
+        set_enabled_service_name,
         std::bind(
             &TrackerTeleopController::handleSetEnabled, this,
             std::placeholders::_1, std::placeholders::_2));
-    srv_go_home_ = node->create_service<std_srvs::srv::Trigger>(
-        "~/go_home",
-        std::bind(
-            &TrackerTeleopController::handleGoHome, this,
-            std::placeholders::_1, std::placeholders::_2));
+    if (!go_home_service_name.empty()) {
+        srv_go_home_ = node->create_service<std_srvs::srv::Trigger>(
+            go_home_service_name,
+            std::bind(
+                &TrackerTeleopController::handleGoHome, this,
+                std::placeholders::_1, std::placeholders::_2));
+    } else {
+        RCLCPP_WARN(
+            node->get_logger(),
+            "Tracker teleop legacy go_home service is disabled by configuration.");
+    }
 }
 
 }  // namespace marvin_system

@@ -34,17 +34,17 @@ dual_arm_trajectory_controller:
     constraints:
       goal_time: 1.0
       stopped_velocity_tolerance: 0.05
-      Joint1_L: {trajectory: 0.1, goal: 0.05}
-      Joint2_L: {trajectory: 0.1, goal: 0.05}
-      Joint3_L: {trajectory: 0.1, goal: 0.05}
-      Joint4_L: {trajectory: 0.1, goal: 0.05}
-      Joint5_L: {trajectory: 0.1, goal: 0.05}
-      Joint6_L: {trajectory: 0.1, goal: 0.05}
-      Joint7_L: {trajectory: 0.1, goal: 0.05}
-      Joint1_R: {trajectory: 0.1, goal: 0.05}
-      Joint2_R: {trajectory: 0.1, goal: 0.05}
-      Joint3_R: {trajectory: 0.1, goal: 0.05}
-      Joint4_R: {trajectory: 0.1, goal: 0.05}
-      Joint5_R: {trajectory: 0.1, goal: 0.05}
-      Joint6_R: {trajectory: 0.1, goal: 0.05}
-      Joint7_R: {trajectory: 0.1, goal: 0.05}
+      Joint1_L: {trajectory: 0.15, goal: 0.05}
+      Joint2_L: {trajectory: 0.15, goal: 0.05}
+      Joint3_L: {trajectory: 0.15, goal: 0.05}
+      Joint4_L: {trajectory: 0.15, goal: 0.05}
+      Joint5_L: {trajectory: 0.15, goal: 0.05}
+      Joint6_L: {trajectory: 0.15, goal: 0.05}
+      Joint7_L: {trajectory: 0.15, goal: 0.05}
+      Joint1_R: {trajectory: 0.15, goal: 0.05}
+      Joint2_R: {trajectory: 0.15, goal: 0.05}
+      Joint3_R: {trajectory: 0.15, goal: 0.05}
+      Joint4_R: {trajectory: 0.15, goal: 0.05}
+      Joint5_R: {trajectory: 0.15, goal: 0.05}
+      Joint6_R: {trajectory: 0.15, goal: 0.05}
+      Joint7_R: {trajectory: 0.15, goal: 0.05}

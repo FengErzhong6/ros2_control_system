@@ -1,6 +1,7 @@
 #ifndef ROS2_CONTROL_MARVIN__HARDWARE__MARVIN_HPP_
 #define ROS2_CONTROL_MARVIN__HARDWARE__MARVIN_HPP_
 
+#include <atomic>
 #include <array>
 #include <chrono>
 
@@ -12,6 +13,7 @@
 #include "hardware_interface/system_interface.hpp"
 #include "hardware_interface/types/hardware_interface_return_values.hpp"
 #include "rclcpp/macros.hpp"
+#include "std_srvs/srv/set_bool.hpp"
 #include "rclcpp_lifecycle/node_interfaces/lifecycle_node_interface.hpp"
 #include "rclcpp_lifecycle/state.hpp"
 
@@ -91,6 +93,8 @@ private:
 
     // ---- Workspace z-floor safety check (optional) ----
     WorkspaceGuard workspace_guard_;
+    std::atomic<bool> workspace_guard_runtime_enabled_{true};
+    rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr workspace_guard_service_;
 
     // ---- Control loop frequency monitoring ----
     int loop_stats_interval_cycles_{5000};

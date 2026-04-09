@@ -1,4 +1,7 @@
 import os
+from pathlib import Path
+
+import yaml
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, EmitEvent, OpaqueFunction, RegisterEventHandler
@@ -10,6 +13,18 @@ from launch.substitutions import Command, FindExecutable, LaunchConfiguration, P
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
+
+from ament_index_python.packages import get_package_share_directory
+
+
+def load_yaml_file(path: str | Path):
+    with open(path, "r", encoding="utf-8") as handle:
+        return yaml.safe_load(handle) or {}
+
+
+def load_text_file(path: str | Path) -> str:
+    with open(path, "r", encoding="utf-8") as handle:
+        return handle.read()
 
 
 def generate_launch_description():
@@ -58,7 +73,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "home_positions_file",
             default_value=PathJoinSubstitution(
-                [FindPackageShare("marvin_system"), "description", "config", "home_joint_positions.yaml"]
+                [FindPackageShare("marvin_system"), "motion", "config", "home_poses.yaml"]
             ),
             description="YAML file containing the target home joint positions.",
         ),
@@ -86,6 +101,9 @@ def launch_setup(context):
     gui = LaunchConfiguration("gui")
     use_mock_hardware_value = (
         LaunchConfiguration("use_mock_hardware").perform(context).lower() == "true"
+    )
+    workspace_guard_service_name = (
+        "" if use_mock_hardware_value else "/marvin_dual/set_workspace_guard_enabled"
     )
 
     trajectory_bag = LaunchConfiguration("trajectory_bag").perform(context).strip()
@@ -129,6 +147,9 @@ def launch_setup(context):
         ctrl_file = "bringup/config/marvin_dual_controllers.yaml"
 
     controllers_yaml = PathJoinSubstitution([FindPackageShare("marvin_system"), ctrl_file])
+    trajectory_controllers_yaml = PathJoinSubstitution(
+        [FindPackageShare("marvin_system"), "bringup", "config", "marvin_dual_trajectory_controllers.yaml"]
+    )
 
     joint_names = [
         "Joint1_L", "Joint2_L", "Joint3_L", "Joint4_L",
@@ -145,7 +166,7 @@ def launch_setup(context):
         package="controller_manager",
         executable="ros2_control_node",
         output="both",
-        parameters=[robot_description, controllers_yaml],
+        parameters=[robot_description, controllers_yaml, trajectory_controllers_yaml],
     )
 
     robot_state_publisher_node = Node(
@@ -153,6 +174,107 @@ def launch_setup(context):
         executable="robot_state_publisher",
         output="both",
         parameters=[robot_description],
+    )
+
+    pkg_share = get_package_share_directory("marvin_system")
+    home_poses_file = PathJoinSubstitution(
+        [FindPackageShare("marvin_system"), "motion", "config", "home_poses.yaml"]
+    )
+    cell_scene_file = PathJoinSubstitution(
+        [FindPackageShare("marvin_system"), "motion", "config", "cell_scene.yaml"]
+    )
+    srdf_path = Path(pkg_share) / "description" / "srdf" / "marvin_dual.srdf"
+    kinematics_path = Path(pkg_share) / "motion" / "config" / "kinematics.yaml"
+    joint_limits_path = Path(pkg_share) / "motion" / "config" / "joint_limits.yaml"
+    planning_pipelines_path = Path(pkg_share) / "motion" / "config" / "planning_pipelines.yaml"
+    ompl_planning_path = Path(pkg_share) / "motion" / "config" / "ompl_planning.yaml"
+    moveit_controllers_path = Path(pkg_share) / "motion" / "config" / "moveit_controllers.yaml"
+
+    move_group_params = [
+        robot_description,
+        {"robot_description_semantic": load_text_file(srdf_path)},
+        {"robot_description_kinematics": load_yaml_file(kinematics_path)},
+        {"robot_description_planning": load_yaml_file(joint_limits_path)},
+        load_yaml_file(planning_pipelines_path),
+        {"ompl": load_yaml_file(ompl_planning_path)},
+        load_yaml_file(moveit_controllers_path),
+        {
+            "moveit_manage_controllers": False,
+            "publish_robot_description": True,
+            "publish_robot_description_semantic": True,
+            "publish_planning_scene": True,
+            "publish_geometry_updates": True,
+            "publish_state_updates": True,
+            "publish_transforms_updates": True,
+            "allow_trajectory_execution": True,
+            "monitor_dynamics": False,
+        },
+    ]
+
+    move_group_node = Node(
+        package="marvin_system",
+        executable="move_group_wrapper.py",
+        output="screen",
+        parameters=move_group_params,
+        sigterm_timeout="15.0",
+    )
+
+    motion_server_node = Node(
+        package="marvin_system",
+        executable="motion_server",
+        name="marvin_motion_server",
+        output="screen",
+        parameters=[
+            robot_description,
+            home_poses_file,
+            cell_scene_file,
+            {"robot_description_semantic": load_text_file(srdf_path)},
+            {"robot_description_kinematics": load_yaml_file(kinematics_path)},
+            {"robot_description_planning": load_yaml_file(joint_limits_path)},
+            {
+                "backend": "moveit",
+                "go_home_service_name": "/marvin_motion/go_home",
+                "set_mode_service_name": "/marvin_motion/set_mode",
+                "get_mode_service_name": "/marvin_motion/get_mode",
+                "get_status_service_name": "/marvin_motion/get_status",
+                "set_enabled_service_name": "/marvin_motion/set_enabled",
+                "legacy_go_home_service": "/tracker_teleop_controller/go_home",
+                "tracker_set_armed_service": "",
+                "tracker_set_enabled_service": "",
+                "teleop_state_topic": "",
+                "planning_group": "dual_arm",
+                "home_pose_id": "home",
+                "initial_mode": "TELEOP",
+                "go_home_return_mode": "TELEOP",
+                "planning_time_sec": 5.0,
+                "move_group_wait_sec": 10.0,
+                "num_planning_attempts": 3,
+                "max_velocity_scaling": 0.2,
+                "max_acceleration_scaling": 0.2,
+                "execute_trajectory": True,
+                "planning_pipeline_id": "ompl",
+                "planner_id": "RRTConnect",
+                "scene_frame_id": "world",
+                "teleop_service_timeout_sec": 5.0,
+                "legacy_go_home_timeout_sec": 10.0,
+                "controller_switch_timeout_sec": 5.0,
+                "controller_manager_switch_service": "/controller_manager/switch_controller",
+                "controller_manager_list_service": "/controller_manager/list_controllers",
+                "trajectory_controller_name": "dual_arm_trajectory_controller",
+                "primary_controller_name": "forward_position_controller",
+                "workspace_guard_service_name": workspace_guard_service_name,
+                "workspace_z_min": "0.0",
+                "workspace_safety_margin": "0.06",
+                "mount_xyz_L": LaunchConfiguration("left_xyz"),
+                "mount_rpy_L": LaunchConfiguration("left_rpy"),
+                "mount_xyz_R": LaunchConfiguration("right_xyz"),
+                "mount_rpy_R": LaunchConfiguration("right_rpy"),
+                "tool_offset": "0 -0.245 0" if (grip_L or grip_R) else "",
+                "recovery_enabled": True,
+                "recovery_command_topic": "/forward_position_controller/commands",
+                "allow_legacy_go_home_fallback": False,
+            },
+        ],
     )
 
     rviz_config_file = PathJoinSubstitution(
@@ -193,6 +315,20 @@ def launch_setup(context):
         output="screen",
     )
 
+    dual_arm_trajectory_controller_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=[
+            "dual_arm_trajectory_controller",
+            "--param-file", trajectory_controllers_yaml,
+            "--inactive",
+            "--controller-manager-timeout", "30.0",
+            "--service-call-timeout", "30.0",
+            "--switch-timeout", "30.0",
+        ],
+        output="screen",
+    )
+
     replay_node = Node(
         package="marvin_system",
         executable="joint_trajectory_bag_replay.py",
@@ -204,6 +340,9 @@ def launch_setup(context):
             "rate_scale": LaunchConfiguration("rate_scale"),
             "start_delay_sec": LaunchConfiguration("start_delay_sec"),
             "command_topic": "/forward_position_controller/commands",
+            "go_home_service": "/marvin_motion/go_home",
+            "use_motion_go_home": True,
+            "fallback_local_home": False,
             "home_positions_file": home_positions_file,
         }],
     )
@@ -225,13 +364,15 @@ def launch_setup(context):
     start_forward_controller_after_feedback_ready = RegisterEventHandler(
         OnProcessExit(
             target_action=joint_state_broadcaster_spawner,
-            on_exit=[forward_position_controller_spawner],
+            on_exit=[forward_position_controller_spawner, dual_arm_trajectory_controller_spawner],
         ),
     )
 
     return [
         ros2_control_node,
         robot_state_publisher_node,
+        move_group_node,
+        motion_server_node,
         rviz_node,
         joint_state_broadcaster_spawner,
         start_forward_controller_after_feedback_ready,

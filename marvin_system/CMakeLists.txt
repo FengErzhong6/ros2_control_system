@@ -7,6 +7,7 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
 
 find_package(ros2_control_cmake REQUIRED)
 set_compiler_options()
@@ -35,6 +36,12 @@ foreach(Dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
   find_package(${Dependency} REQUIRED)
 endforeach()
 
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "srv/GetMotionMode.srv"
+  "srv/GetMotionStatus.srv"
+  "srv/SetMotionMode.srv"
+)
+
 set(MARVIN_SDK_LIBRARY
   "${PROJECT_SOURCE_DIR}/third_party/marvinSDK/libMarvinSDK.so"
 )
@@ -61,6 +68,7 @@ ament_target_dependencies(marvin_system_hardware PUBLIC
   pluginlib
   rclcpp
   rclcpp_lifecycle
+  std_srvs
 )
 target_link_libraries(marvin_system_hardware PUBLIC
   hardware_interface::hardware_interface
@@ -177,8 +185,12 @@ ament_target_dependencies(joy_to_pose
 
 add_executable(motion_server
   motion/src/motion_server.cpp
+  hardware/src/workspace_guard.cpp
 )
 target_compile_features(motion_server PUBLIC cxx_std_17)
+target_include_directories(motion_server PRIVATE
+  ${PROJECT_SOURCE_DIR}/hardware/include
+)
 ament_target_dependencies(motion_server
   controller_manager_msgs
   geometry_msgs
@@ -192,6 +204,8 @@ ament_target_dependencies(motion_server
   std_srvs
   tf2_ros
 )
+rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
+target_link_libraries(motion_server "${cpp_typesupport_target}")
 
 add_executable(ik_solution_explorer
   test/ik_solution_explorer.cpp
@@ -242,10 +256,11 @@ install(
   PROGRAMS
     bringup/scripts/joint_trajectory_bag_clean.py
     bringup/scripts/joint_trajectory_bag_replay.py
+    bringup/scripts/move_group_wrapper.py
+    bringup/scripts/ros_graph_waiter.py
     bringup/scripts/tracker_camera_startup_manager.py
     bringup/scripts/tracker_camera_dashboard.py
     bringup/scripts/tracker_teleop_keyboard.py
-    motion/scripts/motion_server.py
     description/scripts/joint_gui_publisher.py
     description/scripts/vector_marker_publisher.py
   DESTINATION lib/${PROJECT_NAME}
@@ -326,5 +341,6 @@ install(
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_include_directories(include)
 ament_export_dependencies(${THIS_PACKAGE_INCLUDE_DEPENDS})
+ament_export_dependencies(rosidl_default_runtime)
 
 ament_package()

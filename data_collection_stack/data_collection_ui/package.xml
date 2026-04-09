@@ -11,6 +11,7 @@
 
   <depend>data_collection_interfaces</depend>
   <depend>camera_system</depend>
+  <depend>marvin_system</depend>
 
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>python3-pyqt5</exec_depend>

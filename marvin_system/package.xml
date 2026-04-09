@@ -10,6 +10,7 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <build_depend>ros2_control_cmake</build_depend>
+  <build_depend>rosidl_default_generators</build_depend>
   <build_depend>controller_interface</build_depend>
   <build_depend>controller_manager_msgs</build_depend>
   <build_depend>geometry_msgs</build_depend>
@@ -31,6 +32,7 @@
   <exec_depend>controller_manager_msgs</exec_depend>
   <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>hardware_interface</exec_depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
   <exec_depend>moveit_configs_utils</exec_depend>
   <exec_depend>moveit_core</exec_depend>
   <exec_depend>moveit_msgs</exec_depend>
@@ -79,4 +81,6 @@
   <export>
     <build_type>ament_cmake</build_type>
   </export>
+
+  <member_of_group>rosidl_interface_packages</member_of_group>
 </package>

@@ -99,7 +99,16 @@ private:
     void on_real_js(const sensor_msgs::msg::JointState::SharedPtr msg)
     {
         extract_positions(msg, real_pos_);
-        if (seeded_) return;
+        if (seeded_) {
+            // Keep non-overridden joints aligned with hardware feedback so a later
+            // single-joint GUI edit does not replay stale commands on the others.
+            for (size_t i = 0; i < joint_order_.size(); ++i) {
+                if (!user_override_[i]) {
+                    last_cmd_[i] = real_pos_[i];
+                }
+            }
+            return;
+        }
         seeded_ = true;
         last_cmd_ = real_pos_;
         publish_cmd(last_cmd_);

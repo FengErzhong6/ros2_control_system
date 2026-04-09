@@ -57,6 +57,7 @@
   <disable_collisions link1="Link4_L" link2="Link5_L" reason="Adjacent"/>
   <disable_collisions link1="Link5_L" link2="Link6_L" reason="Adjacent"/>
   <disable_collisions link1="Link6_L" link2="Link7_L" reason="Adjacent"/>
+  <disable_collisions link1="left_finger_L_link" link2="right_finger_L_link" reason="Default"/>
 
   <disable_collisions link1="Base_R" link2="Link1_R" reason="Adjacent"/>
   <disable_collisions link1="Link1_R" link2="Link2_R" reason="Adjacent"/>
@@ -65,4 +66,5 @@
   <disable_collisions link1="Link4_R" link2="Link5_R" reason="Adjacent"/>
   <disable_collisions link1="Link5_R" link2="Link6_R" reason="Adjacent"/>
   <disable_collisions link1="Link6_R" link2="Link7_R" reason="Adjacent"/>
+  <disable_collisions link1="left_finger_R_link" link2="right_finger_R_link" reason="Default"/>
 </robot>

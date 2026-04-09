@@ -14,6 +14,7 @@ import time
 import tty
 
 import rclpy
+from marvin_system.srv import SetMotionMode
 from rclpy.node import Node
 from rosbag2_interfaces.srv import Pause, Resume, Stop
 from std_msgs.msg import String
@@ -246,12 +247,12 @@ class TrackerTeleopKeyboard(Node):
 
         self.state_topic = self.declare_parameter(
             "state_topic", "/tracker_teleop_controller/teleop_state").value
-        self.arm_service_name = self.declare_parameter(
-            "arm_service", "/tracker_teleop_controller/set_armed").value
+        self.mode_service_name = self.declare_parameter(
+            "mode_service", "/marvin_motion/set_mode").value
         self.enable_service_name = self.declare_parameter(
-            "enable_service", "/tracker_teleop_controller/set_enabled").value
+            "enable_service", "/marvin_motion/set_enabled").value
         self.home_service_name = self.declare_parameter(
-            "home_service", "/tracker_teleop_controller/go_home").value
+            "home_service", "/marvin_motion/go_home").value
         self.debounce_sec = float(self.declare_parameter("debounce_sec", 0.25).value)
         self.auto_enable_without_tty = bool(
             self.declare_parameter("auto_enable_without_tty", False).value)
@@ -270,7 +271,7 @@ class TrackerTeleopKeyboard(Node):
         self.input_file = None
         self.session_active = False
 
-        self.arm_client = self.create_client(SetBool, self.arm_service_name)
+        self.mode_client = self.create_client(SetMotionMode, self.mode_service_name)
         self.enable_client = self.create_client(SetBool, self.enable_service_name)
         self.home_client = self.create_client(Trigger, self.home_service_name)
         state_qos = rclpy.qos.QoSProfile(
@@ -421,6 +422,29 @@ class TrackerTeleopKeyboard(Node):
         self.get_logger().info(f"{label}: {response.message}")
         return True
 
+    def call_set_mode(self, mode: str, label: str) -> bool:
+        if not self.ensure_service(self.mode_client, label, self.mode_service_name):
+            return False
+
+        request = SetMotionMode.Request()
+        request.mode = mode
+        future = self.mode_client.call_async(request)
+        deadline = time.monotonic() + 2.0
+        while not future.done() and time.monotonic() < deadline and rclpy.ok():
+            time.sleep(0.01)
+
+        if not future.done() or future.result() is None:
+            self.get_logger().warn(f"{label} request timed out.")
+            return False
+
+        response = future.result()
+        if not response.success:
+            self.get_logger().warn(f"{label} rejected: {response.message}")
+            return False
+
+        self.get_logger().info(f"{label}: {response.message}")
+        return True
+
     def call_trigger(self, client, label: str, service_name: str) -> bool:
         if not self.ensure_service(client, label, service_name):
             return False
@@ -454,7 +478,7 @@ class TrackerTeleopKeyboard(Node):
         if self.recorder is not None and not self.recorder.begin_recording():
             self.get_logger().warn("Start aborted because ros2 bag is not ready.")
             return
-        if not self.call_set_bool(self.arm_client, "start-arm", self.arm_service_name, True):
+        if not self.call_set_mode("TELEOP", "start-mode"):
             if self.recorder is not None:
                 self.recorder.finish_session()
             return
@@ -472,7 +496,7 @@ class TrackerTeleopKeyboard(Node):
 
     def auto_enable_once(self) -> None:
         time.sleep(0.2)
-        if not self.wait_for_service(self.arm_client, "arm", self.arm_service_name, 10.0):
+        if not self.wait_for_service(self.mode_client, "mode", self.mode_service_name, 10.0):
             return
         if not self.wait_for_service(self.enable_client, "enable", self.enable_service_name, 10.0):
             return
@@ -482,7 +506,7 @@ class TrackerTeleopKeyboard(Node):
         if self.recorder is not None and not self.recorder.begin_recording():
             self.get_logger().warn("Auto-enable aborted because ros2 bag is not ready.")
             return
-        if not self.call_set_bool(self.arm_client, "start-arm", self.arm_service_name, True):
+        if not self.call_set_mode("TELEOP", "start-mode"):
             if self.recorder is not None:
                 self.recorder.finish_session()
             return

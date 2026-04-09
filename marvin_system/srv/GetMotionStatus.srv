@@ -1,0 +1,11 @@
+---
+bool success
+string mode
+string teleop_state
+bool teleop_armed
+bool teleop_enabled
+string primary_controller_state
+string trajectory_controller_state
+bool motion_busy
+bool controller_interlock_ok
+string message

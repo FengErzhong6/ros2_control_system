@@ -19,6 +19,7 @@ import tty
 import yaml
 
 from ament_index_python.packages import get_package_share_directory
+from marvin_system.srv import SetMotionMode
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, EmitEvent, OpaqueFunction, RegisterEventHandler, TimerAction
@@ -379,7 +380,7 @@ class TrackerTeleopTerminalGate:
         self._stop_event = threading.Event()
         self._thread = None
         self._node = None
-        self._arm_client = None
+        self._mode_client = None
         self._enable_client = None
         self._home_client = None
         self._recorder = None
@@ -410,9 +411,9 @@ class TrackerTeleopTerminalGate:
             rclpy.init(args=None)
 
         self._node = rclpy.create_node("tracker_teleop_terminal_gate")
-        self._arm_client = self._node.create_client(SetBool, "/tracker_teleop_controller/set_armed")
-        self._enable_client = self._node.create_client(SetBool, "/tracker_teleop_controller/set_enabled")
-        self._home_client = self._node.create_client(Trigger, "/tracker_teleop_controller/go_home")
+        self._mode_client = self._node.create_client(SetMotionMode, "/marvin_motion/set_mode")
+        self._enable_client = self._node.create_client(SetBool, "/marvin_motion/set_enabled")
+        self._home_client = self._node.create_client(Trigger, "/marvin_motion/go_home")
         self._recorder = TrackerTeleopRosbagRecorder(
             self._node,
             enabled=self._enable_joint_recording,
@@ -493,6 +494,29 @@ class TrackerTeleopTerminalGate:
         print(f"[tracker_teleop_gate] {label}: {response.message}", flush=True)
         return True
 
+    def _call_set_mode(self, mode: str, label: str) -> bool:
+        request = SetMotionMode.Request()
+        request.mode = mode
+        future = self._mode_client.call_async(request)
+
+        deadline = time.monotonic() + 2.0
+        while not future.done() and not self._stop_event.is_set() and rclpy.ok():
+            rclpy.spin_once(self._node, timeout_sec=0.05)
+            if time.monotonic() >= deadline:
+                break
+
+        if not future.done() or future.result() is None:
+            print(f"[tracker_teleop_gate] {label} request timed out", flush=True)
+            return False
+
+        response = future.result()
+        if not response.success:
+            print(f"[tracker_teleop_gate] {label} rejected: {response.message}", flush=True)
+            return False
+
+        print(f"[tracker_teleop_gate] {label}: {response.message}", flush=True)
+        return True
+
     def _call_trigger(self, client, label: str) -> bool:
         request = Trigger.Request()
         future = client.call_async(request)
@@ -516,7 +540,7 @@ class TrackerTeleopTerminalGate:
         return True
 
     def _handle_space(self) -> None:
-        if not self._wait_for_service(self._arm_client, "arm", 10.0):
+        if not self._wait_for_service(self._mode_client, "mode", 10.0):
             return
         if not self._wait_for_service(self._enable_client, "enable", 10.0):
             return
@@ -531,7 +555,7 @@ class TrackerTeleopTerminalGate:
         if self._recorder is not None and not self._recorder.begin_recording():
             print("[tracker_teleop_gate] Start aborted because ros2 bag is not ready", flush=True)
             return
-        if not self._call_set_bool(self._arm_client, "start-arm", True):
+        if not self._call_set_mode("TELEOP", "start-mode"):
             if self._recorder is not None:
                 self._recorder.finish_session()
             return
@@ -759,6 +783,9 @@ def launch_setup(context):
     gui = LaunchConfiguration("gui")
     use_mock_hardware = LaunchConfiguration("use_mock_hardware")
     use_mock_hardware_value = use_mock_hardware.perform(context).lower() == "true"
+    workspace_guard_service_name = (
+        "" if use_mock_hardware_value else "/marvin_dual/set_workspace_guard_enabled"
+    )
     use_keyboard_gate_value = LaunchConfiguration("use_keyboard_gate").perform(context).lower() == "true"
     start_tracker_publisher_value = (
         LaunchConfiguration("start_tracker_publisher").perform(context).lower() == "true"
@@ -867,6 +894,9 @@ def launch_setup(context):
         f'  ros__parameters:\n'
         f'    kine_config_path: "{kine_config_path}"\n'
         f'    enable_ik_reference_logs: {"true" if enable_ik_reference_logs else "false"}\n'
+        f'    set_armed_service_name: "/marvin_motion/internal/tracker_set_armed"\n'
+        f'    set_enabled_service_name: "/marvin_motion/internal/tracker_set_enabled"\n'
+        f'    go_home_service_name: "/marvin_motion/internal/tracker_legacy_go_home"\n'
     )
     tracker_teleop_params_file = os.path.join(tempfile.mkdtemp(), "tracker_teleop_kine_params.yaml")
     with open(tracker_teleop_params_file, "w") as f:
@@ -1057,9 +1087,17 @@ def launch_setup(context):
                 {
                     "backend": "moveit",
                     "go_home_service_name": "/marvin_motion/go_home",
-                    "legacy_go_home_service": "/tracker_teleop_controller/go_home",
+                    "set_mode_service_name": "/marvin_motion/set_mode",
+                    "get_mode_service_name": "/marvin_motion/get_mode",
+                    "get_status_service_name": "/marvin_motion/get_status",
+                    "set_enabled_service_name": "/marvin_motion/set_enabled",
+                    "legacy_go_home_service": "/marvin_motion/internal/tracker_legacy_go_home",
+                    "tracker_set_armed_service": "/marvin_motion/internal/tracker_set_armed",
+                    "tracker_set_enabled_service": "/marvin_motion/internal/tracker_set_enabled",
+                    "teleop_state_topic": "/tracker_teleop_controller/teleop_state",
                     "planning_group": "dual_arm",
                     "home_pose_id": "home",
+                    "go_home_return_mode": "SAFE_HOLD",
                     "planning_time_sec": 5.0,
                     "move_group_wait_sec": 10.0,
                     "num_planning_attempts": 3,
@@ -1069,12 +1107,14 @@ def launch_setup(context):
                     "planning_pipeline_id": "ompl",
                     "planner_id": "RRTConnect",
                     "scene_frame_id": "world",
-                    "switch_to_trajectory_controller": True,
-                    "reactivate_controller_after_moveit": True,
+                    "teleop_service_timeout_sec": 5.0,
+                    "legacy_go_home_timeout_sec": 10.0,
                     "controller_switch_timeout_sec": 5.0,
                     "controller_manager_switch_service": "/controller_manager/switch_controller",
+                    "controller_manager_list_service": "/controller_manager/list_controllers",
                     "trajectory_controller_name": "dual_arm_trajectory_controller",
                     "primary_controller_name": "tracker_teleop_controller",
+                    "workspace_guard_service_name": workspace_guard_service_name,
                     "allow_legacy_go_home_fallback": ParameterValue(
                         LaunchConfiguration("motion_allow_legacy_home_fallback"),
                         value_type=bool,
@@ -1085,7 +1125,7 @@ def launch_setup(context):
     else:
         motion_server_node = Node(
             package="marvin_system",
-            executable="motion_server.py",
+            executable="motion_server",
             name="marvin_motion_server",
             output="screen",
             parameters=[
@@ -1094,7 +1134,23 @@ def launch_setup(context):
                 {
                     "backend": "legacy",
                     "go_home_service_name": "/marvin_motion/go_home",
-                    "legacy_go_home_service": "/tracker_teleop_controller/go_home",
+                    "set_mode_service_name": "/marvin_motion/set_mode",
+                    "get_mode_service_name": "/marvin_motion/get_mode",
+                    "get_status_service_name": "/marvin_motion/get_status",
+                    "set_enabled_service_name": "/marvin_motion/set_enabled",
+                    "legacy_go_home_service": "/marvin_motion/internal/tracker_legacy_go_home",
+                    "tracker_set_armed_service": "/marvin_motion/internal/tracker_set_armed",
+                    "tracker_set_enabled_service": "/marvin_motion/internal/tracker_set_enabled",
+                    "teleop_state_topic": "/tracker_teleop_controller/teleop_state",
+                    "go_home_return_mode": "SAFE_HOLD",
+                    "teleop_service_timeout_sec": 5.0,
+                    "legacy_go_home_timeout_sec": 10.0,
+                    "controller_switch_timeout_sec": 5.0,
+                    "controller_manager_switch_service": "/controller_manager/switch_controller",
+                    "controller_manager_list_service": "/controller_manager/list_controllers",
+                    "trajectory_controller_name": "dual_arm_trajectory_controller",
+                    "primary_controller_name": "tracker_teleop_controller",
+                    "workspace_guard_service_name": workspace_guard_service_name,
                     "allow_legacy_go_home_fallback": ParameterValue(
                         LaunchConfiguration("motion_allow_legacy_home_fallback"),
                         value_type=bool,
@@ -1125,10 +1181,11 @@ def launch_setup(context):
     ]
 
     move_group_node = Node(
-        package="moveit_ros_move_group",
-        executable="move_group",
+        package="marvin_system",
+        executable="move_group_wrapper.py",
         output="screen",
         parameters=move_group_params,
+        sigterm_timeout="15.0",
     )
 
     # ── Controller spawners ───────────────────────────────────────────────

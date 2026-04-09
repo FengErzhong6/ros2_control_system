@@ -2,6 +2,7 @@
 #define ROS2_CONTROL_MARVIN__HARDWARE__WORKSPACE_GUARD_HPP_
 
 #include <array>
+#include <limits>
 #include <string>
 #include <unordered_map>
 
@@ -15,6 +16,13 @@ class WorkspaceGuard {
 public:
     static constexpr size_t kJointsPerArm = 7;
     static constexpr size_t kArmCount = 2;
+
+    struct Evaluation {
+        bool safe{true};
+        double min_z{std::numeric_limits<double>::infinity()};
+        size_t arm_index{0};
+        int point_index{-1};
+    };
 
     /// Parse hardware parameters. Call in on_configure().
     /// Returns true if workspace checking is configured (workspace_z_min present).
@@ -43,6 +51,11 @@ public:
     bool enabled() const { return enabled_; }
     bool armed() const { return armed_; }
     bool active() const { return enabled_ && armed_; }
+    double z_threshold() const { return z_threshold_; }
+
+    Evaluation evaluate_arm(size_t arm, const double cmd_deg[kJointsPerArm]) const;
+    Evaluation evaluate(
+        const std::array<std::array<double, kJointsPerArm>, kArmCount> &cmd_deg) const;
 
 private:
     bool enabled_{false};

@@ -75,6 +75,13 @@ class MainWindow(QMainWindow):
         self._commands_label.setWordWrap(True)
         layout.addWidget(self._commands_label)
 
+        self._motion_status_label = QLabel(self)
+        self._motion_status_label.setWordWrap(True)
+        self._motion_status_label.setStyleSheet(
+            "font-size: 14px; padding: 8px 12px; border-radius: 8px;"
+        )
+        layout.addWidget(self._motion_status_label)
+
         content_layout = QHBoxLayout()
         content_layout.setSpacing(12)
 
@@ -231,6 +238,38 @@ class MainWindow(QMainWindow):
         self._summary_label.setText(system_state.summary or "Waiting for system state...")
         allowed_commands = ", ".join(system_state.allowed_commands) if system_state.allowed_commands else "-"
         self._commands_label.setText(f"Allowed Commands: {allowed_commands}")
+        motion_status = self._ros_client.motion_status_snapshot()
+        if motion_status.available and motion_status.controller_interlock_ok:
+            motion_fg = "#0f5132"
+            motion_bg = "#d1e7dd"
+        elif motion_status.available:
+            motion_fg = "#842029"
+            motion_bg = "#f8d7da"
+        else:
+            motion_fg = "#664d03"
+            motion_bg = "#fff3cd"
+        self._motion_status_label.setStyleSheet(
+            "font-size: 14px; "
+            "padding: 8px 12px; "
+            "border-radius: 8px; "
+            f"color: {motion_fg}; "
+            f"background: {motion_bg};"
+        )
+        if motion_status.available:
+            self._motion_status_label.setText(
+                "Marvin Motion: "
+                f"mode={motion_status.mode} | "
+                f"teleop={motion_status.teleop_state} | "
+                f"busy={'ON' if motion_status.motion_busy else 'OFF'} | "
+                f"interlock={'OK' if motion_status.controller_interlock_ok else 'FAULT'} | "
+                f"primary={motion_status.primary_controller_state} | "
+                f"trajectory={motion_status.trajectory_controller_state}"
+            )
+        else:
+            self._motion_status_label.setText(
+                "Marvin Motion: unavailable"
+                + (f" | {motion_status.message}" if motion_status.message else "")
+            )
         self._session_panel.refresh(system_state, self._view_model.config.recipe_id)
         self._command_panel.refresh(
             allowed_commands=system_state.allowed_commands,

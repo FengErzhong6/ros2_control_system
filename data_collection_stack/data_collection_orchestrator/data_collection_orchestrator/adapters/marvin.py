@@ -11,6 +11,7 @@ import tempfile
 import time
 
 from ament_index_python.packages import get_package_share_directory
+from marvin_system.srv import GetMotionMode, GetMotionStatus, SetMotionMode
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import JointState
@@ -24,15 +25,18 @@ from .base import AdapterBase, AdapterResult
 class MarvinAdapter(AdapterBase):
     DEFAULT_LAUNCH_PACKAGE = "marvin_system"
     DEFAULT_LAUNCH_FILE = "marvin_tracker_teleop.launch.py"
+    DEFAULT_HOME_POSES_RELATIVE_PATH = "motion/config/home_poses.yaml"
     DEFAULT_CONTROLLER_CONFIG_RELATIVE_PATH = "bringup/config/marvin_tracker_teleop_controllers.yaml"
     REQUIRED_CONTROLLERS = {
         "joint_state_broadcaster": "active",
         "tracker_teleop_controller": "active",
     }
     REQUIRED_SERVICES = {
-        "/tracker_teleop_controller/set_armed": "std_srvs/srv/SetBool",
-        "/tracker_teleop_controller/set_enabled": "std_srvs/srv/SetBool",
         "/marvin_motion/go_home": "std_srvs/srv/Trigger",
+        "/marvin_motion/set_mode": "marvin_system/srv/SetMotionMode",
+        "/marvin_motion/get_mode": "marvin_system/srv/GetMotionMode",
+        "/marvin_motion/get_status": "marvin_system/srv/GetMotionStatus",
+        "/marvin_motion/set_enabled": "std_srvs/srv/SetBool",
     }
 
     def __init__(self, device, node=None) -> None:
@@ -45,9 +49,11 @@ class MarvinAdapter(AdapterBase):
         self._teleop_state_subscription = None
         self._joint_state_subscription = None
         self._service_callback_group = None
-        self._set_armed_client = None
-        self._set_enabled_client = None
         self._motion_go_home_client = None
+        self._motion_set_mode_client = None
+        self._motion_get_mode_client = None
+        self._motion_get_status_client = None
+        self._motion_set_enabled_client = None
         self._joint_positions: dict[str, float] = {}
         self._last_joint_state_monotonic = 0.0
         self._home_joint_targets, self._home_tolerance_rad = self._load_home_targets()
@@ -70,19 +76,29 @@ class MarvinAdapter(AdapterBase):
                 self._on_joint_state,
                 qos_profile_sensor_data,
             )
-            self._set_armed_client = self.node.create_client(
-                SetBool,
-                "/tracker_teleop_controller/set_armed",
-                callback_group=self._service_callback_group,
-            )
-            self._set_enabled_client = self.node.create_client(
-                SetBool,
-                "/tracker_teleop_controller/set_enabled",
-                callback_group=self._service_callback_group,
-            )
             self._motion_go_home_client = self.node.create_client(
                 Trigger,
                 "/marvin_motion/go_home",
+                callback_group=self._service_callback_group,
+            )
+            self._motion_set_mode_client = self.node.create_client(
+                SetMotionMode,
+                "/marvin_motion/set_mode",
+                callback_group=self._service_callback_group,
+            )
+            self._motion_get_mode_client = self.node.create_client(
+                GetMotionMode,
+                "/marvin_motion/get_mode",
+                callback_group=self._service_callback_group,
+            )
+            self._motion_get_status_client = self.node.create_client(
+                GetMotionStatus,
+                "/marvin_motion/get_status",
+                callback_group=self._service_callback_group,
+            )
+            self._motion_set_enabled_client = self.node.create_client(
+                SetBool,
+                "/marvin_motion/set_enabled",
                 callback_group=self._service_callback_group,
             )
 
@@ -175,8 +191,8 @@ class MarvinAdapter(AdapterBase):
         )
 
     def shutdown(self) -> AdapterResult:
-        self._call_set_bool_service("/tracker_teleop_controller/set_enabled", False, timeout_sec=3.0)
-        self._call_set_bool_service("/tracker_teleop_controller/set_armed", False, timeout_sec=3.0)
+        self._call_set_bool_service("/marvin_motion/set_enabled", False, timeout_sec=3.0)
+        self._call_set_mode_service("SAFE_HOLD", timeout_sec=3.0)
 
         if self._process is None:
             self._cleanup_process_state()
@@ -205,14 +221,14 @@ class MarvinAdapter(AdapterBase):
                 f"{self.device.device_id}: Marvin launch exited with code {self._process.returncode}."
             )
 
-        missing_services = [
-            service_name
-            for service_name, service_type in self.REQUIRED_SERVICES.items()
-            if not self._service_available(service_name, service_type)
-        ]
-        if missing_services:
+        status_response, status_error = self._call_service_response(
+            client=self._motion_get_status_client,
+            request=GetMotionStatus.Request(),
+            timeout_sec=2.0,
+        )
+        if status_response is None:
             return AdapterResult.degraded(
-                f"{self.device.device_id}: required teleop services unavailable: {missing_services}",
+                f"{self.device.device_id}: motion status unavailable: {status_error}",
                 metadata={
                     "teleop_state": self._latest_teleop_state,
                     "log_path": None if self._log_path is None else str(self._log_path),
@@ -220,10 +236,26 @@ class MarvinAdapter(AdapterBase):
                 },
             )
 
-        teleop_state = self._latest_teleop_state or "unknown"
+        if not bool(getattr(status_response, "success", False)):
+            return AdapterResult.degraded(
+                f"{self.device.device_id}: motion layer reported unhealthy status: "
+                f"{getattr(status_response, 'message', '')}",
+                metadata={
+                    "mode": getattr(status_response, "mode", ""),
+                    "teleop_state": getattr(status_response, "teleop_state", self._latest_teleop_state),
+                    "primary_controller_state": getattr(status_response, "primary_controller_state", ""),
+                    "trajectory_controller_state": getattr(status_response, "trajectory_controller_state", ""),
+                    "log_path": None if self._log_path is None else str(self._log_path),
+                    "command": self._launch_command,
+                },
+            )
+
+        teleop_state = str(getattr(status_response, "teleop_state", "")).strip() or "unknown"
+        mode = str(getattr(status_response, "mode", "")).strip() or "unknown"
         return AdapterResult.ok(
-            f"{self.device.device_id}: teleop services healthy (state={teleop_state}).",
+            f"{self.device.device_id}: motion layer healthy (mode={mode}, teleop_state={teleop_state}).",
             metadata={
+                "mode": mode,
                 "teleop_state": teleop_state,
                 "log_path": None if self._log_path is None else str(self._log_path),
                 "command": self._launch_command,
@@ -249,25 +281,10 @@ class MarvinAdapter(AdapterBase):
         return ["/joint_states", "/tf", "/tf_static"]
 
     def arm(self) -> AdapterResult:
-        return self._call_set_bool_service(
-            "/tracker_teleop_controller/set_armed",
-            True,
-            timeout_sec=10.0,
-        )
+        return self._call_set_mode_service("TELEOP", timeout_sec=10.0)
 
     def disarm(self) -> AdapterResult:
-        disable_result = self._call_set_bool_service(
-            "/tracker_teleop_controller/set_enabled",
-            False,
-            timeout_sec=10.0,
-        )
-        if disable_result.is_failure():
-            return disable_result
-        return self._call_set_bool_service(
-            "/tracker_teleop_controller/set_armed",
-            False,
-            timeout_sec=10.0,
-        )
+        return self._call_set_mode_service("SAFE_HOLD", timeout_sec=10.0)
 
     def home(self) -> AdapterResult:
         command_result = self._call_trigger_service(
@@ -287,14 +304,14 @@ class MarvinAdapter(AdapterBase):
 
     def before_session(self) -> AdapterResult:
         return self._call_set_bool_service(
-            "/tracker_teleop_controller/set_enabled",
+            "/marvin_motion/set_enabled",
             True,
             timeout_sec=10.0,
         )
 
     def after_session(self) -> AdapterResult:
         return self._call_set_bool_service(
-            "/tracker_teleop_controller/set_enabled",
+            "/marvin_motion/set_enabled",
             False,
             timeout_sec=10.0,
         )
@@ -496,13 +513,64 @@ class MarvinAdapter(AdapterBase):
             return AdapterResult.ok(f"{success_summary} message={message}")
         return AdapterResult.ok(success_summary)
 
+    def _call_service_response(self, *, client, request, timeout_sec: float):
+        if client is None:
+            return None, "native client unavailable"
+        if not client.wait_for_service(timeout_sec=timeout_sec):
+            return None, "service unavailable"
+
+        future = client.call_async(request)
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            if future.done():
+                break
+            time.sleep(0.01)
+
+        if not future.done():
+            return None, "request timeout or spawn failure"
+        if future.exception() is not None:
+            return None, str(future.exception())
+        return future.result(), ""
+
+    def _call_set_mode_service(self, mode: str, timeout_sec: float) -> AdapterResult:
+        if self._process is None or self._process.poll() is not None:
+            return AdapterResult.failed(
+                f"{self.device.device_id}: Marvin launch is not running for /marvin_motion/set_mode."
+            )
+
+        response, error_message = self._call_service_response(
+            client=self._motion_set_mode_client,
+            request=SetMotionMode.Request(mode=mode),
+            timeout_sec=timeout_sec,
+        )
+        if response is None:
+            return AdapterResult.failed(
+                f"{self.device.device_id}: /marvin_motion/set_mode failed: {error_message}"
+            )
+        if not bool(getattr(response, "success", False)):
+            return AdapterResult.failed(
+                f"{self.device.device_id}: /marvin_motion/set_mode rejected: "
+                f"{getattr(response, 'message', '')}"
+            )
+
+        active_mode = str(getattr(response, "active_mode", "")).strip() or mode
+        message = str(getattr(response, "message", "")).strip()
+        summary = f"{self.device.device_id}: /marvin_motion/set_mode accepted mode={active_mode}."
+        if message:
+            summary = f"{summary} message={message}"
+        return AdapterResult.ok(summary)
+
     def _client_for_service(self, service_name: str):
-        if service_name == "/tracker_teleop_controller/set_armed":
-            return self._set_armed_client
-        if service_name == "/tracker_teleop_controller/set_enabled":
-            return self._set_enabled_client
         if service_name == "/marvin_motion/go_home":
             return self._motion_go_home_client
+        if service_name == "/marvin_motion/set_mode":
+            return self._motion_set_mode_client
+        if service_name == "/marvin_motion/get_mode":
+            return self._motion_get_mode_client
+        if service_name == "/marvin_motion/get_status":
+            return self._motion_get_status_client
+        if service_name == "/marvin_motion/set_enabled":
+            return self._motion_set_enabled_client
         return None
 
     def _controller_config_path(self) -> Path:
@@ -513,7 +581,53 @@ class MarvinAdapter(AdapterBase):
         package_share = Path(get_package_share_directory("marvin_system"))
         return package_share / self.DEFAULT_CONTROLLER_CONFIG_RELATIVE_PATH
 
+    def _home_pose_config_path(self) -> Path:
+        raw_value = self.device.config.get("home_pose_config")
+        if raw_value:
+            return Path(str(raw_value)).expanduser()
+
+        package_share = Path(get_package_share_directory("marvin_system"))
+        return package_share / self.DEFAULT_HOME_POSES_RELATIVE_PATH
+
     def _load_home_targets(self) -> tuple[dict[str, float], float]:
+        motion_config_path = self._home_pose_config_path()
+        try:
+            with motion_config_path.open("r", encoding="utf-8") as handle:
+                motion_data = yaml.safe_load(handle) or {}
+        except (OSError, yaml.YAMLError):
+            motion_data = {}
+
+        motion_params = motion_data.get("marvin_motion_server", {}).get("ros__parameters", {})
+        named_home = motion_params.get("named_poses", {}).get("home", {})
+        home_left = named_home.get("left", [])
+        home_right = named_home.get("right", [])
+        if isinstance(home_left, list) and isinstance(home_right, list):
+            joint_names = [
+                "Joint1_L",
+                "Joint2_L",
+                "Joint3_L",
+                "Joint4_L",
+                "Joint5_L",
+                "Joint6_L",
+                "Joint7_L",
+                "Joint1_R",
+                "Joint2_R",
+                "Joint3_R",
+                "Joint4_R",
+                "Joint5_R",
+                "Joint6_R",
+                "Joint7_R",
+            ]
+            home_values = list(home_left) + list(home_right)
+            if len(home_values) == len(joint_names):
+                return (
+                    {
+                        joint_name: float(value)
+                        for joint_name, value in zip(joint_names, home_values)
+                    },
+                    math.radians(0.5),
+                )
+
         config_path = self._controller_config_path()
         try:
             with config_path.open("r", encoding="utf-8") as handle:

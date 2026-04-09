@@ -78,6 +78,9 @@ def launch_setup(context):
     use_mock_hardware_value = (
         LaunchConfiguration("use_mock_hardware").perform(context).lower() == "true"
     )
+    workspace_guard_service_name = (
+        "" if use_mock_hardware_value else "/marvin_dual/set_workspace_guard_enabled"
+    )
 
     pkg = LaunchConfiguration("description_package").perform(context)
     desc_file = LaunchConfiguration("description_file").perform(context)
@@ -161,10 +164,11 @@ def launch_setup(context):
     )
 
     move_group_node = Node(
-        package="moveit_ros_move_group",
-        executable="move_group",
+        package="marvin_system",
+        executable="move_group_wrapper.py",
         output="screen",
         parameters=move_group_params,
+        sigterm_timeout="15.0",
     )
 
     motion_server_node = Node(
@@ -181,9 +185,14 @@ def launch_setup(context):
             {
                 "backend": "moveit",
                 "go_home_service_name": "/marvin_motion/go_home",
+                "set_mode_service_name": "/marvin_motion/set_mode",
+                "get_mode_service_name": "/marvin_motion/get_mode",
+                "get_status_service_name": "/marvin_motion/get_status",
+                "set_enabled_service_name": "/marvin_motion/set_enabled",
                 "legacy_go_home_service": "/tracker_teleop_controller/go_home",
                 "planning_group": "dual_arm",
                 "home_pose_id": "home",
+                "go_home_return_mode": "MOTION",
                 "planning_time_sec": 5.0,
                 "move_group_wait_sec": 10.0,
                 "num_planning_attempts": 3,
@@ -193,8 +202,14 @@ def launch_setup(context):
                 "planning_pipeline_id": "ompl",
                 "planner_id": "RRTConnect",
                 "scene_frame_id": "world",
-                "switch_to_trajectory_controller": False,
-                "reactivate_controller_after_moveit": False,
+                "teleop_service_timeout_sec": 5.0,
+                "legacy_go_home_timeout_sec": 10.0,
+                "controller_switch_timeout_sec": 5.0,
+                "controller_manager_switch_service": "/controller_manager/switch_controller",
+                "controller_manager_list_service": "/controller_manager/list_controllers",
+                "trajectory_controller_name": "dual_arm_trajectory_controller",
+                "primary_controller_name": "",
+                "workspace_guard_service_name": workspace_guard_service_name,
                 "allow_legacy_go_home_fallback": ParameterValue(
                     LaunchConfiguration("motion_allow_legacy_home_fallback"),
                     value_type=bool,
