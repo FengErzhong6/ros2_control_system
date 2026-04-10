@@ -27,7 +27,9 @@
           <param name="gripper_command_rate_hz">${gripper_command_rate_hz}</param>
           <param name="gripper_command_epsilon">${gripper_command_epsilon}</param>
           <param name="connect_timeout_ms">1500</param>
-          <param name="state_timeout_ms">5000</param>
+          <param name="state_timeout_ms">8000</param>
+          <param name="activation_retry_settle_ms">1500</param>
+          <param name="activation_max_attempts">2</param>
           <param name="no_frame_timeout_ms">800</param>
           <param name="sdk_log_enabled">0</param>
           <param name="home_position_L">1.16 -1.28 -1.5707963 -1.25 0 0 0</param>

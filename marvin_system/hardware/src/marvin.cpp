@@ -58,6 +58,11 @@ double param_double(const std::unordered_map<std::string, std::string> &m,
     }
 }
 
+double clamp_unit(double value)
+{
+    return std::clamp(value, 0.0, 1.0);
+}
+
 std::string param_str(const std::unordered_map<std::string, std::string> &m,
                       const std::string &key, const std::string &def = {})
 {
@@ -118,6 +123,7 @@ namespace marvin_system {
 
 MarvinHardware::~MarvinHardware()
 {
+    stop_gripper_worker();
     for (size_t g = 0; g < gripper_count_; ++g) {
         if (grippers_[g].device) {
             if (grippers_[g].device->is_connected())
@@ -129,6 +135,99 @@ MarvinHardware::~MarvinHardware()
     if (connected_) {
         OnRelease();
         connected_ = false;
+    }
+}
+
+void MarvinHardware::start_gripper_worker()
+{
+    stop_gripper_worker();
+    if (gripper_count_ == 0) {
+        return;
+    }
+
+    gripper_worker_stop_.store(false, std::memory_order_relaxed);
+    gripper_worker_thread_ = std::thread([this]() { gripper_worker_loop(); });
+    RCLCPP_INFO(
+        get_logger(),
+        "Started gripper worker thread (%zu gripper(s), max_send_rate=%.1f Hz).",
+        gripper_count_,
+        gripper_command_rate_hz_);
+}
+
+void MarvinHardware::stop_gripper_worker()
+{
+    gripper_worker_stop_.store(true, std::memory_order_relaxed);
+    if (gripper_worker_thread_.joinable()) {
+        gripper_worker_thread_.join();
+        RCLCPP_INFO(get_logger(), "Stopped gripper worker thread.");
+    }
+}
+
+void MarvinHardware::gripper_worker_loop()
+{
+    const auto send_interval = std::chrono::duration_cast<Clock::duration>(
+        std::chrono::duration<double>(1.0 / std::max(1.0, gripper_command_rate_hz_)));
+    auto next_wake = Clock::now();
+
+    while (!gripper_worker_stop_.load(std::memory_order_relaxed)) {
+        const auto now = Clock::now();
+        for (size_t g = 0; g < gripper_count_; ++g) {
+            auto &slot = grippers_[g];
+            if (!slot.device) {
+                continue;
+            }
+
+            const double desired =
+                clamp_unit(slot.command_target_percent.load(std::memory_order_relaxed));
+            const double observed =
+                clamp_unit(static_cast<double>(slot.device->get_position_percent()));
+            slot.state_percent.store(observed, std::memory_order_relaxed);
+            slot.state_valid.store(true, std::memory_order_relaxed);
+
+            const bool command_changed =
+                !slot.has_sent_command ||
+                std::abs(desired - slot.last_command_percent) >= gripper_command_epsilon_;
+            const bool state_needs_progress =
+                std::abs(desired - observed) >= gripper_command_epsilon_;
+            const bool interval_elapsed =
+                !slot.has_sent_command ||
+                (now - slot.last_command_time) >= send_interval;
+            if (!interval_elapsed || (!command_changed && !state_needs_progress)) {
+                continue;
+            }
+
+            const auto err = slot.device->set_position_percent(static_cast<float>(desired));
+            const double refreshed =
+                clamp_unit(static_cast<double>(slot.device->get_position_percent()));
+            slot.state_percent.store(refreshed, std::memory_order_relaxed);
+            slot.state_valid.store(true, std::memory_order_relaxed);
+            if (err != omnipicker::ErrorCode::kOK) {
+                ++slot.consecutive_send_failures;
+                if (slot.consecutive_send_failures == 1 ||
+                    slot.consecutive_send_failures % 50 == 0) {
+                    const auto &jn = info_.joints[slot.joint_index].name;
+                    RCLCPP_WARN(
+                        get_logger(),
+                        "Gripper '%s' worker send failed (%d consecutive): %s",
+                        jn.c_str(),
+                        slot.consecutive_send_failures,
+                        omnipicker::error_to_string(err));
+                }
+                continue;
+            }
+
+            slot.has_sent_command = true;
+            slot.last_command_percent = desired;
+            slot.last_command_time = now;
+            slot.consecutive_send_failures = 0;
+        }
+
+        next_wake += send_interval;
+        const auto current_time = Clock::now();
+        if (next_wake <= current_time) {
+            next_wake = current_time + send_interval;
+        }
+        std::this_thread::sleep_until(next_wake);
     }
 }
 
@@ -278,6 +377,7 @@ hardware_interface::CallbackReturn MarvinHardware::on_init(
 hardware_interface::CallbackReturn MarvinHardware::on_configure(
     const rclcpp_lifecycle::State &)
 {
+    stop_gripper_worker();
     activated_ = false;
     workspace_guard_.disarm();
     const auto &p = info_.hardware_parameters;
@@ -290,9 +390,13 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
         p, "gripper_command_rate_hz", 50.0, 1.0, 1000.0);
     gripper_command_epsilon_ = param_double(
         p, "gripper_command_epsilon", 1.0e-3, 0.0, 1.0);
-    connect_timeout_ms_  = param_int(p, "connect_timeout_ms",  1500, 100, 30000);
-    state_timeout_ms_    = param_int(p, "state_timeout_ms",    5000, 100, 30000);
-    no_frame_timeout_ms_ = param_int(p, "no_frame_timeout_ms", 800,  50, 10000);
+    connect_timeout_ms_ = param_int(p, "connect_timeout_ms", 1500, 100, 30000);
+    state_timeout_ms_ = param_int(p, "state_timeout_ms", 8000, 100, 30000);
+    activation_retry_settle_ms_ = param_int(
+        p, "activation_retry_settle_ms", 1500, 0, 10000);
+    activation_max_attempts_ = param_int(
+        p, "activation_max_attempts", 2, 1, 5);
+    no_frame_timeout_ms_ = param_int(p, "no_frame_timeout_ms", 800, 50, 10000);
 
     Ip4 ip{};
     const auto ip_str = param_str(p, "ip", "192.168.1.190");
@@ -452,17 +556,13 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
 hardware_interface::CallbackReturn MarvinHardware::on_activate(
     const rclcpp_lifecycle::State &)
 {
-    // Snapshot current joint positions (degrees) for hold commands.
+    stop_gripper_worker();
     DCSS dcss{};
     if (!OnGetBuf(&dcss)) {
         RCLCPP_ERROR(get_logger(), "OnGetBuf failed before activation.");
         return hardware_interface::CallbackReturn::ERROR;
     }
     double hold_a[kJointsPerArm], hold_b[kJointsPerArm];
-    for (size_t j = 0; j < kJointsPerArm; ++j) {
-        hold_a[j] = static_cast<double>(dcss.m_Out[0].m_FB_Joint_PosE[j]);
-        hold_b[j] = static_cast<double>(dcss.m_Out[1].m_FB_Joint_PosE[j]);
-    }
 
     auto log_mode_switch_status =
         [this](size_t arm, const StateCtr &state, const char *phase) {
@@ -478,127 +578,231 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
                 state.m_ERRCode);
         };
 
-    for (size_t arm = 0; arm < kArmCount; ++arm) {
-        log_mode_switch_status(arm, dcss.m_State[arm], "pre-activate state");
-    }
+    auto refresh_hold_positions = [&]() {
+        for (size_t j = 0; j < kJointsPerArm; ++j) {
+            hold_a[j] = static_cast<double>(dcss.m_Out[0].m_FB_Joint_PosE[j]);
+            hold_b[j] = static_cast<double>(dcss.m_Out[1].m_FB_Joint_PosE[j]);
+        }
+    };
 
-    // Request position mode for both arms, including initial hold positions
-    // so the controller already has valid commands when it enters position mode.
-    OnClearSet();
-    bool ok = OnSetTargetState_A(1)
-           && OnSetJointLmt_A(joint_vel_ratio_, joint_acc_ratio_)
-           && OnSetTargetState_B(1)
-           && OnSetJointLmt_B(joint_vel_ratio_, joint_acc_ratio_)
-           && OnSetJointCmdPos_A(hold_a)
-           && OnSetJointCmdPos_B(hold_b);
-    ok = ok && OnSetSend();
-    if (!ok) {
-        RCLCPP_ERROR(get_logger(), "Failed to request position mode on dual-arm.");
-        return hardware_interface::CallbackReturn::ERROR;
-    }
+    auto request_position_mode = [&](bool arm_a_pending, bool arm_b_pending) {
+        OnClearSet();
+        bool ok = true;
+        if (arm_a_pending) {
+            ok = ok && OnSetTargetState_A(1);
+            ok = ok && OnSetJointLmt_A(joint_vel_ratio_, joint_acc_ratio_);
+        }
+        if (arm_b_pending) {
+            ok = ok && OnSetTargetState_B(1);
+            ok = ok && OnSetJointLmt_B(joint_vel_ratio_, joint_acc_ratio_);
+        }
+        ok = ok && OnSetJointCmdPos_A(hold_a);
+        ok = ok && OnSetJointCmdPos_B(hold_b);
+        return ok && OnSetSend();
+    };
 
-    // Poll until BOTH arms enter position mode.
-    // Continuously send hold-position commands (~250 Hz) to prevent starvation:
-    // the arms may enter position mode at different times, so the first one
-    // would starve if we only polled without sending.
-    bool arm_a_ready = false, arm_b_ready = false;
-    const auto deadline = Clock::now() + std::chrono::milliseconds(state_timeout_ms_);
-    std::array<bool, kArmCount> has_status_snapshot{{false, false}};
-    std::array<int, kArmCount> last_cur_state{};
-    std::array<int, kArmCount> last_cmd_state{};
-    std::array<int, kArmCount> last_err_code{};
+    auto request_idle_mode = [&]() {
+        OnClearSet();
+        const bool ok = OnSetTargetState_A(0)
+                     && OnSetTargetState_B(0)
+                     && OnSetSend();
+        if (!ok) {
+            RCLCPP_WARN(get_logger(),
+                        "Failed to request idle mode during activation recovery.");
+        }
+    };
 
-    while (!arm_a_ready || !arm_b_ready) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    refresh_hold_positions();
 
-        if (OnGetBuf(&dcss)) {
-            for (size_t arm = 0; arm < kArmCount; ++arm) {
-                const auto &state = dcss.m_State[arm];
-                if (!has_status_snapshot[arm] ||
-                    state.m_CurState != last_cur_state[arm] ||
-                    state.m_CmdState != last_cmd_state[arm] ||
-                    state.m_ERRCode != last_err_code[arm]) {
-                    log_mode_switch_status(
-                        arm, state, has_status_snapshot[arm]
-                        ? "mode-switch update"
-                        : "mode-switch feedback");
-                    has_status_snapshot[arm] = true;
-                    last_cur_state[arm] = state.m_CurState;
-                    last_cmd_state[arm] = state.m_CmdState;
-                    last_err_code[arm] = state.m_ERRCode;
-                }
-            }
+    bool mode_switch_succeeded = false;
+    std::array<bool, kArmCount> timeout_has_status{{false, false}};
+    std::array<int, kArmCount> timeout_cur_state{};
+    std::array<int, kArmCount> timeout_cmd_state{};
+    std::array<int, kArmCount> timeout_err_code{};
+    bool timeout_arm_ready_a = false;
+    bool timeout_arm_ready_b = false;
 
-            for (size_t j = 0; j < kJointsPerArm; ++j) {
-                hold_a[j] = static_cast<double>(dcss.m_Out[0].m_FB_Joint_PosE[j]);
-                hold_b[j] = static_cast<double>(dcss.m_Out[1].m_FB_Joint_PosE[j]);
-            }
-
-            if (!arm_a_ready) {
-                const auto st = static_cast<ArmState>(dcss.m_State[0].m_CurState);
-                if (st == ARM_STATE_ERROR) {
-                    RCLCPP_ERROR(get_logger(), "Arm A error during mode switch (err=%d).",
-                                 dcss.m_State[0].m_ERRCode);
-                    return hardware_interface::CallbackReturn::ERROR;
-                }
-                if (st == ARM_STATE_POSITION) {
-                    arm_a_ready = true;
-                    RCLCPP_INFO(get_logger(), "Arm A (left) entered position mode.");
-                }
-            }
-            if (!arm_b_ready) {
-                const auto st = static_cast<ArmState>(dcss.m_State[1].m_CurState);
-                if (st == ARM_STATE_ERROR) {
-                    RCLCPP_ERROR(get_logger(), "Arm B error during mode switch (err=%d).",
-                                 dcss.m_State[1].m_ERRCode);
-                    return hardware_interface::CallbackReturn::ERROR;
-                }
-                if (st == ARM_STATE_POSITION) {
-                    arm_b_ready = true;
-                    RCLCPP_INFO(get_logger(), "Arm B (right) entered position mode.");
-                }
-            }
+    for (int attempt = 1; attempt <= activation_max_attempts_; ++attempt) {
+        const char *pre_activate_phase =
+            attempt == 1 ? "pre-activate state" : "pre-activate retry state";
+        for (size_t arm = 0; arm < kArmCount; ++arm) {
+            log_mode_switch_status(arm, dcss.m_State[arm], pre_activate_phase);
         }
 
-        if (Clock::now() > deadline) {
-            const auto a_state = has_status_snapshot[0]
-                               ? static_cast<ArmState>(last_cur_state[0])
-                               : static_cast<ArmState>(dcss.m_State[0].m_CurState);
-            const auto b_state = has_status_snapshot[1]
-                               ? static_cast<ArmState>(last_cur_state[1])
-                               : static_cast<ArmState>(dcss.m_State[1].m_CurState);
+        if (!request_position_mode(true, true)) {
+            if (attempt == activation_max_attempts_) {
+                RCLCPP_ERROR(
+                    get_logger(),
+                    "Failed to request position mode on dual-arm (attempt %d/%d).",
+                    attempt,
+                    activation_max_attempts_);
+                return hardware_interface::CallbackReturn::ERROR;
+            }
+
+            RCLCPP_WARN(
+                get_logger(),
+                "Failed to request position mode on dual-arm (attempt %d/%d). "
+                "Waiting %d ms and retrying for cold-start recovery.",
+                attempt,
+                activation_max_attempts_,
+                activation_retry_settle_ms_);
+            request_idle_mode();
+            if (activation_retry_settle_ms_ > 0) {
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(activation_retry_settle_ms_));
+            }
+            if (!OnGetBuf(&dcss)) {
+                RCLCPP_ERROR(get_logger(), "OnGetBuf failed before activation retry.");
+                return hardware_interface::CallbackReturn::ERROR;
+            }
+            refresh_hold_positions();
+            continue;
+        }
+
+        bool arm_a_ready = false;
+        bool arm_b_ready = false;
+        const auto deadline = Clock::now() + std::chrono::milliseconds(state_timeout_ms_);
+        std::array<bool, kArmCount> has_status_snapshot{{false, false}};
+        std::array<int, kArmCount> last_cur_state{};
+        std::array<int, kArmCount> last_cmd_state{};
+        std::array<int, kArmCount> last_err_code{};
+
+        while (!arm_a_ready || !arm_b_ready) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+            if (OnGetBuf(&dcss)) {
+                for (size_t arm = 0; arm < kArmCount; ++arm) {
+                    const auto &state = dcss.m_State[arm];
+                    if (!has_status_snapshot[arm] ||
+                        state.m_CurState != last_cur_state[arm] ||
+                        state.m_CmdState != last_cmd_state[arm] ||
+                        state.m_ERRCode != last_err_code[arm]) {
+                        log_mode_switch_status(
+                            arm, state, has_status_snapshot[arm]
+                            ? "mode-switch update"
+                            : "mode-switch feedback");
+                        has_status_snapshot[arm] = true;
+                        last_cur_state[arm] = state.m_CurState;
+                        last_cmd_state[arm] = state.m_CmdState;
+                        last_err_code[arm] = state.m_ERRCode;
+                    }
+                }
+
+                refresh_hold_positions();
+
+                if (!arm_a_ready) {
+                    const auto st = static_cast<ArmState>(dcss.m_State[0].m_CurState);
+                    if (st == ARM_STATE_ERROR) {
+                        RCLCPP_ERROR(get_logger(), "Arm A error during mode switch (err=%d).",
+                                     dcss.m_State[0].m_ERRCode);
+                        return hardware_interface::CallbackReturn::ERROR;
+                    }
+                    if (st == ARM_STATE_POSITION) {
+                        arm_a_ready = true;
+                        RCLCPP_INFO(get_logger(), "Arm A (left) entered position mode.");
+                    }
+                }
+                if (!arm_b_ready) {
+                    const auto st = static_cast<ArmState>(dcss.m_State[1].m_CurState);
+                    if (st == ARM_STATE_ERROR) {
+                        RCLCPP_ERROR(get_logger(), "Arm B error during mode switch (err=%d).",
+                                     dcss.m_State[1].m_ERRCode);
+                        return hardware_interface::CallbackReturn::ERROR;
+                    }
+                    if (st == ARM_STATE_POSITION) {
+                        arm_b_ready = true;
+                        RCLCPP_INFO(get_logger(), "Arm B (right) entered position mode.");
+                    }
+                }
+            }
+
+            if (arm_a_ready && arm_b_ready) {
+                mode_switch_succeeded = true;
+                break;
+            }
+
+            if (Clock::now() > deadline) {
+                timeout_has_status = has_status_snapshot;
+                timeout_cur_state = last_cur_state;
+                timeout_cmd_state = last_cmd_state;
+                timeout_err_code = last_err_code;
+                timeout_arm_ready_a = arm_a_ready;
+                timeout_arm_ready_b = arm_b_ready;
+                break;
+            }
+
+            // Keep feeding both arms; re-request state for arms still transitioning.
+            request_position_mode(!arm_a_ready, !arm_b_ready);
+        }
+
+        if (mode_switch_succeeded) {
+            break;
+        }
+
+        const auto a_state = timeout_has_status[0]
+                           ? static_cast<ArmState>(timeout_cur_state[0])
+                           : static_cast<ArmState>(dcss.m_State[0].m_CurState);
+        const auto b_state = timeout_has_status[1]
+                           ? static_cast<ArmState>(timeout_cur_state[1])
+                           : static_cast<ArmState>(dcss.m_State[1].m_CurState);
+
+        if (attempt == activation_max_attempts_) {
             RCLCPP_ERROR(
                 get_logger(),
-                "Timeout waiting for position mode after %d ms "
+                "Timeout waiting for position mode after %d ms on attempt %d/%d "
                 "(A: ready=%s, cur_state=%s(%d), cmd_state=%d, err=%d; "
                 "B: ready=%s, cur_state=%s(%d), cmd_state=%d, err=%d).",
                 state_timeout_ms_,
-                arm_a_ready ? "OK" : "PENDING",
+                attempt,
+                activation_max_attempts_,
+                timeout_arm_ready_a ? "OK" : "PENDING",
                 arm_state_name(a_state),
-                has_status_snapshot[0] ? last_cur_state[0] : dcss.m_State[0].m_CurState,
-                has_status_snapshot[0] ? last_cmd_state[0] : dcss.m_State[0].m_CmdState,
-                has_status_snapshot[0] ? last_err_code[0] : dcss.m_State[0].m_ERRCode,
-                arm_b_ready ? "OK" : "PENDING",
+                timeout_has_status[0] ? timeout_cur_state[0] : dcss.m_State[0].m_CurState,
+                timeout_has_status[0] ? timeout_cmd_state[0] : dcss.m_State[0].m_CmdState,
+                timeout_has_status[0] ? timeout_err_code[0] : dcss.m_State[0].m_ERRCode,
+                timeout_arm_ready_b ? "OK" : "PENDING",
                 arm_state_name(b_state),
-                has_status_snapshot[1] ? last_cur_state[1] : dcss.m_State[1].m_CurState,
-                has_status_snapshot[1] ? last_cmd_state[1] : dcss.m_State[1].m_CmdState,
-                has_status_snapshot[1] ? last_err_code[1] : dcss.m_State[1].m_ERRCode);
+                timeout_has_status[1] ? timeout_cur_state[1] : dcss.m_State[1].m_CurState,
+                timeout_has_status[1] ? timeout_cmd_state[1] : dcss.m_State[1].m_CmdState,
+                timeout_has_status[1] ? timeout_err_code[1] : dcss.m_State[1].m_ERRCode);
             return hardware_interface::CallbackReturn::ERROR;
         }
 
-        // Keep feeding both arms; re-request state for arms still transitioning.
-        OnClearSet();
-        if (!arm_a_ready) {
-            OnSetTargetState_A(1);
-            OnSetJointLmt_A(joint_vel_ratio_, joint_acc_ratio_);
+        RCLCPP_WARN(
+            get_logger(),
+            "Position-mode activation attempt %d/%d timed out after %d ms "
+            "(A: ready=%s, cur_state=%s(%d), cmd_state=%d, err=%d; "
+            "B: ready=%s, cur_state=%s(%d), cmd_state=%d, err=%d). "
+            "Waiting %d ms and retrying for cold-start recovery.",
+            attempt,
+            activation_max_attempts_,
+            state_timeout_ms_,
+            timeout_arm_ready_a ? "OK" : "PENDING",
+            arm_state_name(a_state),
+            timeout_has_status[0] ? timeout_cur_state[0] : dcss.m_State[0].m_CurState,
+            timeout_has_status[0] ? timeout_cmd_state[0] : dcss.m_State[0].m_CmdState,
+            timeout_has_status[0] ? timeout_err_code[0] : dcss.m_State[0].m_ERRCode,
+            timeout_arm_ready_b ? "OK" : "PENDING",
+            arm_state_name(b_state),
+            timeout_has_status[1] ? timeout_cur_state[1] : dcss.m_State[1].m_CurState,
+            timeout_has_status[1] ? timeout_cmd_state[1] : dcss.m_State[1].m_CmdState,
+            timeout_has_status[1] ? timeout_err_code[1] : dcss.m_State[1].m_ERRCode,
+            activation_retry_settle_ms_);
+        request_idle_mode();
+        if (activation_retry_settle_ms_ > 0) {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(activation_retry_settle_ms_));
         }
-        if (!arm_b_ready) {
-            OnSetTargetState_B(1);
-            OnSetJointLmt_B(joint_vel_ratio_, joint_acc_ratio_);
+        if (!OnGetBuf(&dcss)) {
+            RCLCPP_ERROR(get_logger(), "OnGetBuf failed before activation retry.");
+            return hardware_interface::CallbackReturn::ERROR;
         }
-        OnSetJointCmdPos_A(hold_a);
-        OnSetJointCmdPos_B(hold_b);
-        OnSetSend();
+        refresh_hold_positions();
+    }
+
+    if (!mode_switch_succeeded) {
+        RCLCPP_ERROR(get_logger(), "Failed to activate dual-arm position mode.");
+        return hardware_interface::CallbackReturn::ERROR;
     }
 
     if (has_home_position_) {
@@ -646,6 +850,9 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
         }
         set_state(pos_if(jn), init_pos);
         set_command(pos_if(jn), init_pos);
+        slot.command_target_percent.store(init_pos, std::memory_order_relaxed);
+        slot.state_percent.store(init_pos, std::memory_order_relaxed);
+        slot.state_valid.store(true, std::memory_order_relaxed);
         slot.has_sent_command = false;
         slot.last_command_percent = init_pos;
         slot.last_command_time = Clock::now();
@@ -675,6 +882,7 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
         }
     }
 
+    start_gripper_worker();
     activated_ = true;
 
     RCLCPP_INFO(
@@ -694,6 +902,7 @@ hardware_interface::CallbackReturn MarvinHardware::on_deactivate(
     const rclcpp_lifecycle::State &)
 {
     activated_ = false;
+    stop_gripper_worker();
     workspace_guard_.disarm();
 
     if (connected_) {
@@ -717,6 +926,7 @@ hardware_interface::CallbackReturn MarvinHardware::on_cleanup(
     const rclcpp_lifecycle::State &)
 {
     activated_ = false;
+    stop_gripper_worker();
     workspace_guard_.disarm();
 
     // Disconnect grippers BEFORE releasing Marvin link (they need it to send close cmd)
@@ -789,12 +999,12 @@ hardware_interface::return_type MarvinHardware::read(
         }
     }
 
-    // Read gripper cached states (updated asynchronously via write→move→try_read_response)
+    // Read gripper state cache maintained by the background worker.
     for (size_t g = 0; g < gripper_count_; ++g) {
         const auto &slot = grippers_[g];
         const auto &jn = info_.joints[slot.joint_index].name;
-        set_state(pos_if(jn),
-                  static_cast<double>(slot.device->get_position_percent()));
+        const double pos = slot.state_percent.load(std::memory_order_relaxed);
+        set_state(pos_if(jn), pos);
     }
 
     return hardware_interface::return_type::OK;
@@ -807,9 +1017,6 @@ hardware_interface::return_type MarvinHardware::write(
     const rclcpp::Time &, const rclcpp::Duration &)
 {
     if (!activated_) return hardware_interface::return_type::OK;
-    const auto gripper_write_time = Clock::now();
-    const auto min_gripper_send_interval =
-        std::chrono::duration<double>(1.0 / gripper_command_rate_hz_);
 
     double cmd_a[kJointsPerArm];
     double cmd_b[kJointsPerArm];
@@ -862,7 +1069,7 @@ hardware_interface::return_type MarvinHardware::write(
     }
     consecutive_write_failures_ = 0;
 
-    // Send gripper commands (independent ChData channel, no conflict with arm commands)
+    // Hand gripper targets to the non-realtime worker to keep SDK I/O out of the control loop.
     for (size_t g = 0; g < gripper_count_; ++g) {
         auto &slot = grippers_[g];
         const auto &jn = info_.joints[slot.joint_index].name;
@@ -872,36 +1079,8 @@ hardware_interface::return_type MarvinHardware::write(
             return hardware_interface::return_type::ERROR;
         }
 
-        const double clamped_cmd = std::clamp(cmd, 0.0, 1.0);
-        const bool command_changed =
-            !slot.has_sent_command ||
-            std::abs(clamped_cmd - slot.last_command_percent) >= gripper_command_epsilon_;
-        const bool interval_elapsed =
-            !slot.has_sent_command ||
-            (gripper_write_time - slot.last_command_time) >= min_gripper_send_interval;
-        if (!command_changed && !interval_elapsed) {
-            continue;
-        }
-
-        const auto err = slot.device->set_position_percent(static_cast<float>(clamped_cmd));
-        if (err != omnipicker::ErrorCode::kOK) {
-            ++slot.consecutive_send_failures;
-            if (slot.consecutive_send_failures == 1 ||
-                slot.consecutive_send_failures % 50 == 0) {
-                RCLCPP_WARN(
-                    get_logger(),
-                    "Gripper '%s' command send failed (%d consecutive): %s",
-                    jn.c_str(),
-                    slot.consecutive_send_failures,
-                    omnipicker::error_to_string(err));
-            }
-            continue;
-        }
-
-        slot.has_sent_command = true;
-        slot.last_command_percent = clamped_cmd;
-        slot.last_command_time = gripper_write_time;
-        slot.consecutive_send_failures = 0;
+        slot.command_target_percent.store(
+            std::clamp(cmd, 0.0, 1.0), std::memory_order_relaxed);
     }
 
     return hardware_interface::return_type::OK;

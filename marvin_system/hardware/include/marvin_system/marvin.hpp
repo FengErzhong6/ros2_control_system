@@ -4,6 +4,7 @@
 #include <atomic>
 #include <array>
 #include <chrono>
+#include <thread>
 
 #include "marvin_system/omnipicker.hpp"
 #include "marvin_system/workspace_guard.hpp"
@@ -42,6 +43,10 @@ public:
         const rclcpp::Time &time, const rclcpp::Duration &period) override;
 
 private:
+    void start_gripper_worker();
+    void stop_gripper_worker();
+    void gripper_worker_loop();
+
     static constexpr size_t kJointsPerArm = 7;
     static constexpr size_t kArmCount = 2;
     static constexpr size_t kTotalJoints = kJointsPerArm * kArmCount;
@@ -56,7 +61,9 @@ private:
     double gripper_command_rate_hz_{50.0};
     double gripper_command_epsilon_{1.0e-3};
     int connect_timeout_ms_{1500};
-    int state_timeout_ms_{5000};
+    int state_timeout_ms_{8000};
+    int activation_retry_settle_ms_{1500};
+    int activation_max_attempts_{2};
     int no_frame_timeout_ms_{800};
     int home_timeout_ms_{30000};
 
@@ -83,6 +90,9 @@ private:
         omnipicker::ArmSide arm_side = omnipicker::ArmSide::kB;
         uint32_t can_node_id = 0x01;
         size_t joint_index = 0;
+        std::atomic<double> command_target_percent{0.0};
+        std::atomic<double> state_percent{0.0};
+        std::atomic<bool> state_valid{false};
         bool has_sent_command = false;
         double last_command_percent = 0.0;
         std::chrono::steady_clock::time_point last_command_time{};
@@ -90,6 +100,8 @@ private:
     };
     size_t gripper_count_{0};
     std::array<GripperSlot, kMaxGrippers> grippers_{};
+    std::thread gripper_worker_thread_{};
+    std::atomic<bool> gripper_worker_stop_{false};
 
     // ---- Workspace z-floor safety check (optional) ----
     WorkspaceGuard workspace_guard_;
