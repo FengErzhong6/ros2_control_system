@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <cmath>
@@ -25,6 +26,7 @@
 #include "moveit/move_group_interface/move_group_interface.hpp"
 #include "moveit/planning_scene_interface/planning_scene_interface.hpp"
 #include "moveit/utils/moveit_error_code.hpp"
+#include "moveit_msgs/msg/attached_collision_object.hpp"
 #include "moveit_msgs/msg/collision_object.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
@@ -33,11 +35,13 @@
 #include "std_msgs/msg/string.hpp"
 #include "std_srvs/srv/set_bool.hpp"
 #include "std_srvs/srv/trigger.hpp"
+#include "visualization_msgs/msg/marker_array.hpp"
 
 namespace {
 
 constexpr size_t kJointsPerArm = 7;
 constexpr size_t kTotalTrackedJoints = kJointsPerArm * 2;
+constexpr size_t kTrackedGripperCount = 2;
 
 constexpr char kModeSafeHold[] = "SAFE_HOLD";
 constexpr char kModeTeleop[] = "TELEOP";
@@ -58,10 +62,30 @@ const std::array<const char *, kJointsPerArm> kLeftJointNames{
     {"Joint1_L", "Joint2_L", "Joint3_L", "Joint4_L", "Joint5_L", "Joint6_L", "Joint7_L"}};
 const std::array<const char *, kJointsPerArm> kRightJointNames{
     {"Joint1_R", "Joint2_R", "Joint3_R", "Joint4_R", "Joint5_R", "Joint6_R", "Joint7_R"}};
+const std::array<const char *, kTrackedGripperCount> kGripperJointNames{
+    {"gripper_L", "gripper_R"}};
+const std::array<const char *, kTrackedGripperCount> kGripperAttachFrames{
+    {"ee_L", "ee_R"}};
+const std::array<const char *, kTrackedGripperCount> kGripperCollisionObjectIds{
+    {"gripper_L_collision", "gripper_R_collision"}};
+const std::array<int32_t, kTrackedGripperCount> kGripperMarkerIds{{0, 1}};
 const std::array<double, kJointsPerArm> kJointLowerLimits{
     {-3.1067, -2.0944, -3.1067, -2.5307, -3.1067, -1.0472, -1.5708}};
 const std::array<double, kJointsPerArm> kJointUpperLimits{
     {3.1067, 2.0944, 3.1067, 1.0472, 3.1067, 1.0472, 1.5708}};
+const std::array<std::array<const char *, 5>, kTrackedGripperCount> kGripperTouchLinks{{
+    {{"Link7_L", "ee_L", "gripper_L_link", "left_finger_L_link", "right_finger_L_link"}},
+    {{"Link7_R", "ee_R", "gripper_R_link", "left_finger_R_link", "right_finger_R_link"}},
+}};
+
+constexpr char kGripperCollisionMarkerTopic[] = "/gripper_collision_markers";
+constexpr double kGripperHeightInterceptM = 0.15;
+constexpr double kGripperHeightSlopeM = -0.03;
+constexpr double kGripperRadiusInterceptM = 0.0425;
+constexpr double kGripperRadiusSlopeM = 0.0575;
+constexpr double kGripperCollisionSyncEpsilon = 1.0e-3;
+constexpr std::chrono::milliseconds kGripperCollisionSyncPeriod(100);
+constexpr std::chrono::seconds kMoveitBootstrapRetryPeriod(1);
 
 template <typename T>
 T get_param_or_declare(
@@ -160,6 +184,21 @@ bool teleop_state_is_enabled(const std::string &state)
     return state == kTeleopStateEnabled;
 }
 
+double clamp_gripper_percent(double value)
+{
+    return std::clamp(value, 0.0, 1.0);
+}
+
+double gripper_height_m(double percent)
+{
+    return kGripperHeightInterceptM + kGripperHeightSlopeM * percent;
+}
+
+double gripper_radius_m(double percent)
+{
+    return kGripperRadiusInterceptM + kGripperRadiusSlopeM * percent;
+}
+
 }  // namespace
 
 namespace marvin_system {
@@ -248,6 +287,7 @@ public:
             this, "primary_controller_name", "tracker_teleop_controller");
         workspace_guard_service_name_ = get_param_or_declare<std::string>(
             this, "workspace_guard_service_name", "");
+        use_mock_hardware_ = get_param_or_declare<bool>(this, "use_mock_hardware", false);
         go_home_pose_sequence_ = get_string_array_param(this, "go_home_pose_sequence");
         if (go_home_pose_sequence_.empty()) {
             go_home_pose_sequence_ = {home_pose_id_};
@@ -349,6 +389,11 @@ public:
                 this->create_publisher<std_msgs::msg::Float64MultiArray>(
                     recovery_command_topic_, rclcpp::SystemDefaultsQoS());
         }
+        if (use_mock_hardware_) {
+            gripper_collision_marker_publisher_ =
+                this->create_publisher<visualization_msgs::msg::MarkerArray>(
+                    kGripperCollisionMarkerTopic, rclcpp::QoS(10).reliable());
+        }
 
         if (teleop_state_feedback_configured_) {
             auto teleop_state_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
@@ -361,6 +406,10 @@ public:
             "/joint_states",
             rclcpp::SensorDataQoS(),
             std::bind(&MarvinMotionServer::handle_joint_state, this, std::placeholders::_1));
+        gripper_collision_timer_ = this->create_wall_timer(
+            kGripperCollisionSyncPeriod,
+            std::bind(&MarvinMotionServer::handle_gripper_collision_timer, this),
+            callback_group_);
 
         if (!workspace_z_min_param_.empty()) {
             std::unordered_map<std::string, std::string> workspace_params;
@@ -458,6 +507,9 @@ public:
         std::lock_guard<std::mutex> lock(moveit_mutex_);
         move_group_.reset();
         planning_scene_interface_.reset();
+        static_scene_applied_.store(false, std::memory_order_relaxed);
+        gripper_collision_objects_active_.fill(false);
+        last_synced_gripper_percent_.fill(-1.0);
     }
 
 private:
@@ -1383,6 +1435,12 @@ private:
 
     bool apply_scene(std::string &error_message)
     {
+        std::lock_guard<std::mutex> lock(moveit_mutex_);
+        if (!planning_scene_interface_) {
+            error_message = "Planning scene interface is not initialized.";
+            return false;
+        }
+
         std::vector<moveit_msgs::msg::CollisionObject> collision_objects;
         std::set<std::string> object_names;
         const auto params = this->list_parameters({"scene"}, 4).names;
@@ -1449,6 +1507,195 @@ private:
             "Applied %zu collision object(s) to planning scene.",
             collision_objects.size());
         return true;
+    }
+
+    std::optional<double> get_gripper_percent(const char *joint_name) const
+    {
+        std::lock_guard<std::mutex> lock(joint_state_mutex_);
+        const auto it = recovery_aux_joint_positions_rad_.find(joint_name);
+        if (it == recovery_aux_joint_positions_rad_.end()) {
+            return std::nullopt;
+        }
+        if (!std::isfinite(it->second)) {
+            return std::nullopt;
+        }
+        return clamp_gripper_percent(it->second);
+    }
+
+    geometry_msgs::msg::Pose make_gripper_collision_pose(double height_m) const
+    {
+        geometry_msgs::msg::Pose pose;
+        pose.orientation.w = 1.0;
+        pose.position.z = 0.5 * height_m;
+        return pose;
+    }
+
+    moveit_msgs::msg::AttachedCollisionObject make_gripper_collision_object(
+        size_t index,
+        double percent) const
+    {
+        const double height_m = gripper_height_m(percent);
+        const double radius_m = gripper_radius_m(percent);
+
+        moveit_msgs::msg::AttachedCollisionObject attached;
+        attached.link_name = kGripperAttachFrames[index];
+        attached.object.id = kGripperCollisionObjectIds[index];
+        attached.object.header.frame_id = kGripperAttachFrames[index];
+        attached.object.operation = moveit_msgs::msg::CollisionObject::ADD;
+
+        shape_msgs::msg::SolidPrimitive primitive;
+        primitive.type = shape_msgs::msg::SolidPrimitive::CYLINDER;
+        primitive.dimensions = {height_m, radius_m};
+
+        attached.object.primitives.push_back(primitive);
+        attached.object.primitive_poses.push_back(make_gripper_collision_pose(height_m));
+        for (const auto *touch_link : kGripperTouchLinks[index]) {
+            attached.touch_links.emplace_back(touch_link);
+        }
+        return attached;
+    }
+
+    void maybe_initialize_moveit_scene()
+    {
+        if (backend_ != "moveit") {
+            return;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(moveit_mutex_);
+            if (move_group_ &&
+                planning_scene_interface_ &&
+                static_scene_applied_.load(std::memory_order_relaxed)) {
+                return;
+            }
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_moveit_bootstrap_attempt_ < kMoveitBootstrapRetryPeriod) {
+            return;
+        }
+        last_moveit_bootstrap_attempt_ = now;
+
+        std::string error_message;
+        if (!ensure_moveit_interfaces(error_message)) {
+            RCLCPP_WARN_THROTTLE(
+                get_logger(),
+                *get_clock(),
+                5000,
+                "Dynamic gripper collision bootstrap skipped: %s",
+                error_message.c_str());
+            return;
+        }
+        if (!static_scene_applied_.load(std::memory_order_relaxed) &&
+            !apply_scene(error_message)) {
+            RCLCPP_WARN_THROTTLE(
+                get_logger(),
+                *get_clock(),
+                5000,
+                "Failed to apply static planning scene before gripper collision sync: %s",
+                error_message.c_str());
+            return;
+        }
+        static_scene_applied_.store(true, std::memory_order_relaxed);
+    }
+
+    void sync_gripper_collision_objects()
+    {
+        if (backend_ != "moveit") {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(moveit_mutex_);
+        if (!planning_scene_interface_) {
+            return;
+        }
+
+        for (size_t index = 0; index < kTrackedGripperCount; ++index) {
+            const auto percent = get_gripper_percent(kGripperJointNames[index]);
+            if (!percent.has_value()) {
+                continue;
+            }
+
+            if (gripper_collision_objects_active_[index] &&
+                std::abs(*percent - last_synced_gripper_percent_[index]) <
+                    kGripperCollisionSyncEpsilon) {
+                continue;
+            }
+
+            if (!planning_scene_interface_->applyAttachedCollisionObject(
+                    make_gripper_collision_object(index, *percent))) {
+                RCLCPP_WARN_THROTTLE(
+                    get_logger(),
+                    *get_clock(),
+                    5000,
+                    "Failed to sync attached gripper collision object '%s'.",
+                    kGripperCollisionObjectIds[index]);
+                continue;
+            }
+
+            gripper_collision_objects_active_[index] = true;
+            last_synced_gripper_percent_[index] = *percent;
+        }
+    }
+
+    visualization_msgs::msg::Marker make_gripper_collision_marker(
+        size_t index,
+        double percent) const
+    {
+        const double height_m = gripper_height_m(percent);
+        const double radius_m = gripper_radius_m(percent);
+
+        visualization_msgs::msg::Marker marker;
+        marker.header.frame_id = kGripperAttachFrames[index];
+        marker.header.stamp = rclcpp::Time(0, 0, get_clock()->get_clock_type());
+        marker.ns = "gripper_collision";
+        marker.id = kGripperMarkerIds[index];
+        marker.type = visualization_msgs::msg::Marker::CYLINDER;
+        marker.action = visualization_msgs::msg::Marker::ADD;
+        marker.frame_locked = true;
+        marker.pose = make_gripper_collision_pose(height_m);
+        marker.scale.x = radius_m * 2.0;
+        marker.scale.y = radius_m * 2.0;
+        marker.scale.z = height_m;
+        marker.color.a = 0.28f;
+        if (index == 0) {
+            marker.color.r = 0.10f;
+            marker.color.g = 0.80f;
+            marker.color.b = 0.35f;
+        } else {
+            marker.color.r = 0.95f;
+            marker.color.g = 0.45f;
+            marker.color.b = 0.15f;
+        }
+        return marker;
+    }
+
+    void publish_gripper_collision_markers()
+    {
+        if (!use_mock_hardware_ || !gripper_collision_marker_publisher_) {
+            return;
+        }
+
+        visualization_msgs::msg::MarkerArray marker_array;
+        for (size_t index = 0; index < kTrackedGripperCount; ++index) {
+            const auto percent = get_gripper_percent(kGripperJointNames[index]);
+            if (percent.has_value()) {
+                marker_array.markers.push_back(
+                    make_gripper_collision_marker(index, *percent));
+                gripper_collision_markers_active_[index] = true;
+            }
+        }
+
+        if (!marker_array.markers.empty()) {
+            gripper_collision_marker_publisher_->publish(marker_array);
+        }
+    }
+
+    void handle_gripper_collision_timer()
+    {
+        publish_gripper_collision_markers();
+        maybe_initialize_moveit_scene();
+        sync_gripper_collision_objects();
     }
 
     static std::vector<std::string> split_param_name(const std::string &name)
@@ -1588,6 +1835,8 @@ private:
         if (!build_named_target(pose_id, target, error_message)) {
             return false;
         }
+
+        sync_gripper_collision_objects();
 
         moveit::planning_interface::MoveGroupInterface::Plan plan;
         moveit::core::MoveItErrorCode result;
@@ -2070,6 +2319,9 @@ private:
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr teleop_state_subscription_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_subscription_;
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr recovery_command_publisher_;
+    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
+        gripper_collision_marker_publisher_;
+    rclcpp::TimerBase::SharedPtr gripper_collision_timer_;
 
     std::string backend_;
     std::string go_home_service_name_;
@@ -2105,6 +2357,7 @@ private:
     std::string trajectory_controller_name_;
     std::string primary_controller_name_;
     std::string workspace_guard_service_name_;
+    bool use_mock_hardware_{false};
     std::vector<std::string> go_home_pose_sequence_;
     bool recovery_enabled_{true};
     std::string recovery_command_topic_;
@@ -2143,6 +2396,11 @@ private:
     std::mutex moveit_mutex_;
     std::unique_ptr<moveit::planning_interface::MoveGroupInterface> move_group_;
     std::unique_ptr<moveit::planning_interface::PlanningSceneInterface> planning_scene_interface_;
+    std::atomic<bool> static_scene_applied_{false};
+    std::array<double, kTrackedGripperCount> last_synced_gripper_percent_{{-1.0, -1.0}};
+    std::array<bool, kTrackedGripperCount> gripper_collision_objects_active_{{false, false}};
+    std::array<bool, kTrackedGripperCount> gripper_collision_markers_active_{{false, false}};
+    std::chrono::steady_clock::time_point last_moveit_bootstrap_attempt_{};
 };
 
 }  // namespace marvin_system

@@ -188,6 +188,7 @@
           <command_interface name="position">
             <param name="min">0.0</param>
             <param name="max">1.0</param>
+            <param name="initial_value">0.0</param>
           </command_interface>
           <state_interface name="position"/>
         </joint>
@@ -202,6 +203,7 @@
           <command_interface name="position">
             <param name="min">0.0</param>
             <param name="max">1.0</param>
+            <param name="initial_value">0.0</param>
           </command_interface>
           <state_interface name="position"/>
         </joint>

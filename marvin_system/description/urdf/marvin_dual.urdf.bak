@@ -74,8 +74,18 @@
       <limit lower="0.0" upper="1.0" effort="0" velocity="1.0"/>
     </joint>
 
-    <!-- Collision geometry is provided dynamically by motion_server. -->
-    <link name="left_finger_L_link"/>
+    <link name="left_finger_L_link">
+      <visual>
+        <origin xyz="0 0 0.075" rpy="0 0 0"/>
+        <geometry><box size="0.02 0.01 0.15"/></geometry>
+        <material name="gripper_gray"><color rgba="0.4 0.4 0.4 1"/></material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0.075" rpy="0 0 0"/>
+        <geometry><box size="0.02 0.01 0.15"/></geometry>
+      </collision>
+      <inertial><mass value="0.05"/><inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/></inertial>
+    </link>
     <joint name="left_finger_L" type="prismatic">
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <parent link="ee_L"/>
@@ -85,7 +95,18 @@
       <mimic joint="gripper_L" multiplier="-0.035" offset="0"/>
     </joint>
 
-    <link name="right_finger_L_link"/>
+    <link name="right_finger_L_link">
+      <visual>
+        <origin xyz="0 0 0.075" rpy="0 0 0"/>
+        <geometry><box size="0.02 0.01 0.15"/></geometry>
+        <material name="gripper_gray"><color rgba="0.4 0.4 0.4 1"/></material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0.075" rpy="0 0 0"/>
+        <geometry><box size="0.02 0.01 0.15"/></geometry>
+      </collision>
+      <inertial><mass value="0.05"/><inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/></inertial>
+    </link>
     <joint name="right_finger_L" type="prismatic">
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <parent link="ee_L"/>
@@ -113,7 +134,18 @@
       <limit lower="0.0" upper="1.0" effort="0" velocity="1.0"/>
     </joint>
 
-    <link name="left_finger_R_link"/>
+    <link name="left_finger_R_link">
+      <visual>
+        <origin xyz="0 0 0.075" rpy="0 0 0"/>
+        <geometry><box size="0.02 0.01 0.15"/></geometry>
+        <material name="gripper_gray"><color rgba="0.4 0.4 0.4 1"/></material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0.075" rpy="0 0 0"/>
+        <geometry><box size="0.02 0.01 0.15"/></geometry>
+      </collision>
+      <inertial><mass value="0.05"/><inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/></inertial>
+    </link>
     <joint name="left_finger_R" type="prismatic">
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <parent link="ee_R"/>
@@ -123,7 +155,18 @@
       <mimic joint="gripper_R" multiplier="-0.035" offset="0"/>
     </joint>
 
-    <link name="right_finger_R_link"/>
+    <link name="right_finger_R_link">
+      <visual>
+        <origin xyz="0 0 0.075" rpy="0 0 0"/>
+        <geometry><box size="0.02 0.01 0.15"/></geometry>
+        <material name="gripper_gray"><color rgba="0.4 0.4 0.4 1"/></material>
+      </visual>
+      <collision>
+        <origin xyz="0 0 0.075" rpy="0 0 0"/>
+        <geometry><box size="0.02 0.01 0.15"/></geometry>
+      </collision>
+      <inertial><mass value="0.05"/><inertia ixx="1e-5" ixy="0" ixz="0" iyy="1e-5" iyz="0" izz="1e-5"/></inertial>
+    </link>
     <joint name="right_finger_R" type="prismatic">
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <parent link="ee_R"/>

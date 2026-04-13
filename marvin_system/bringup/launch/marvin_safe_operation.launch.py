@@ -202,6 +202,7 @@ def launch_setup(context):
                 "planning_pipeline_id": "ompl",
                 "planner_id": "RRTConnect",
                 "scene_frame_id": "world",
+                "use_mock_hardware": use_mock_hardware_value,
                 "teleop_service_timeout_sec": 5.0,
                 "legacy_go_home_timeout_sec": 10.0,
                 "controller_switch_timeout_sec": 5.0,
