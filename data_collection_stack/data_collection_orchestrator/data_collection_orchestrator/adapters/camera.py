@@ -95,7 +95,8 @@ class CameraAdapter(AdapterBase):
         )
 
     def wait_ready(self, timeout_sec: float) -> AdapterResult:
-        if self._process is None:
+        process = self._process
+        if process is None:
             return AdapterResult.failed(f"{self.device.device_id}: camera launch was not started.")
 
         cameras_config = self._cameras_config_path()
@@ -105,7 +106,7 @@ class CameraAdapter(AdapterBase):
         deadline = time.monotonic() + self._ready_timeout_sec(timeout_sec)
 
         while time.monotonic() < deadline:
-            if self._process.poll() is not None:
+            if process.poll() is not None:
                 return AdapterResult.failed(
                     f"{self.device.device_id}: camera launch exited before READY.\n"
                     f"{self._diagnostic_summary()}"
@@ -129,21 +130,22 @@ class CameraAdapter(AdapterBase):
         )
 
     def shutdown(self) -> AdapterResult:
-        if self._process is None:
+        process = self._process
+        if process is None:
             self._cleanup_process_state()
             return AdapterResult.ok(f"{self.device.device_id}: camera launch already stopped.")
 
-        if self._process.poll() is not None:
-            exit_code = self._process.returncode
+        if process.poll() is not None:
+            exit_code = process.returncode
             self._cleanup_process_state()
             return AdapterResult.ok(
                 f"{self.device.device_id}: camera launch already exited with code {exit_code}."
             )
 
-        if not self._signal_process_group(signal.SIGINT, timeout_sec=8.0):
-            self._signal_process_group(signal.SIGTERM, timeout_sec=4.0)
-        if self._process is not None and self._process.poll() is None:
-            self._signal_process_group(signal.SIGKILL, timeout_sec=2.0)
+        if not self._signal_process_group(process, signal.SIGINT, timeout_sec=8.0):
+            self._signal_process_group(process, signal.SIGTERM, timeout_sec=4.0)
+        if process.poll() is None:
+            self._signal_process_group(process, signal.SIGKILL, timeout_sec=2.0)
 
         self._cleanup_process_state()
         return AdapterResult.ok(f"{self.device.device_id}: camera launch stopped.")
@@ -334,21 +336,26 @@ class CameraAdapter(AdapterBase):
             return dict(raw_arguments)
         return {}
 
-    def _signal_process_group(self, sig: signal.Signals, timeout_sec: float) -> bool:
-        if self._process is None:
+    def _signal_process_group(
+        self,
+        process: subprocess.Popen,
+        sig: signal.Signals,
+        timeout_sec: float,
+    ) -> bool:
+        if process.poll() is not None:
             return True
 
         try:
-            os.killpg(self._process.pid, sig)
+            os.killpg(process.pid, sig)
         except ProcessLookupError:
             return True
 
         deadline = time.monotonic() + timeout_sec
         while time.monotonic() < deadline:
-            if self._process.poll() is not None:
+            if process.poll() is not None:
                 return True
             time.sleep(0.2)
-        return self._process.poll() is not None
+        return process.poll() is not None
 
     def _cleanup_process_state(self) -> None:
         if self._log_handle is not None:

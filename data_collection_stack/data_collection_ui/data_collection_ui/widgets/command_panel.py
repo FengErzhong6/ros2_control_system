@@ -16,7 +16,7 @@ class CommandPanelModel:
 
 _BUTTON_DEFINITIONS = [
     ("StartSystem", "Connect"),
-    ("ShutdownSystem", "Disconnect"),
+    ("ShutdownSystem", "Shutdown System"),
     ("StartSession", "Start Collection"),
     ("StopSession", "Stop Collection"),
     ("GoHome", "Go Home"),

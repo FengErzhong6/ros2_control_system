@@ -48,6 +48,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._view_model = view_model
         self._ros_client = ros_client
+        self._close_after_shutdown_requested = False
+        self._close_after_shutdown_command_cleared_monotonic: float | None = None
 
         self.setWindowTitle(view_model.title)
         self.resize(1920, 1080)
@@ -127,7 +129,7 @@ class MainWindow(QMainWindow):
 
     def _bind_commands(self) -> None:
         self._command_panel.set_command_handler("StartSystem", self._on_connect)
-        self._command_panel.set_command_handler("ShutdownSystem", self._on_disconnect)
+        self._command_panel.set_command_handler("ShutdownSystem", self._on_shutdown_system)
         self._command_panel.set_command_handler("StartSession", self._on_start_collection)
         self._command_panel.set_command_handler("StopSession", self._on_stop_collection)
         self._command_panel.set_command_handler("GoHome", self._on_go_home)
@@ -147,7 +149,7 @@ class MainWindow(QMainWindow):
 
         command_handlers = {
             "StartSystem": self._on_connect,
-            "ShutdownSystem": self._on_disconnect,
+            "ShutdownSystem": self._on_shutdown_system,
             "StartSession": self._on_start_collection,
             "StopSession": self._on_stop_collection,
             "GoHome": self._on_go_home,
@@ -169,7 +171,7 @@ class MainWindow(QMainWindow):
             site_name=self._session_panel.site_name(),
         )
 
-    def _on_disconnect(self) -> None:
+    def _on_shutdown_system(self) -> None:
         self._ros_client.disconnect_system(force=False)
 
     def _on_start_collection(self) -> None:
@@ -189,8 +191,13 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         system_state = self._ros_client.system_state_snapshot()
+        pending_commands = set(self._ros_client.pending_commands())
         if system_state.system_state == "IDLE":
             super().closeEvent(event)
+            return
+
+        if self._close_after_shutdown_requested:
+            event.ignore()
             return
 
         dialog = QMessageBox(self)
@@ -198,17 +205,19 @@ class MainWindow(QMainWindow):
         dialog.setWindowTitle("Confirm Close")
         dialog.setText("The system is not idle.")
         dialog.setInformativeText(
-            "Closing this window will only close the UI. "
-            "The supervisor and hardware processes may continue running.\n\n"
-            "Use Disconnect first if you want a clean shutdown."
+            "Closing this window will first run Shutdown System.\n\n"
+            "The window will exit after the supervisor reports IDLE and "
+            "collection_app.launch.py will then stop because shutdown_on_ui_exit defaults to true."
         )
         dialog.setStandardButtons(QMessageBox.Cancel | QMessageBox.Close)
         dialog.setDefaultButton(QMessageBox.Cancel)
-        dialog.button(QMessageBox.Close).setText("Close UI Only")
+        dialog.button(QMessageBox.Close).setText("Shutdown And Exit")
         result = dialog.exec()
         if result == QMessageBox.Close:
-            event.accept()
-            return
+            self._close_after_shutdown_requested = True
+            self._close_after_shutdown_command_cleared_monotonic = None
+            if "ShutdownSystem" not in pending_commands:
+                self._ros_client.disconnect_system(force=False)
 
         event.ignore()
 
@@ -283,3 +292,36 @@ class MainWindow(QMainWindow):
         self._device_panel.refresh(system_state.devices, now_wall_time=now_wall_time)
         self._fault_panel.refresh(system_state.active_faults, now_wall_time=now_wall_time)
         self._event_panel.refresh(self._ros_client.event_entries())
+        self._maybe_finish_close_after_shutdown(system_state)
+
+    def _maybe_finish_close_after_shutdown(self, system_state) -> None:
+        if not self._close_after_shutdown_requested:
+            return
+
+        pending_commands = set(self._ros_client.pending_commands())
+        if "ShutdownSystem" in pending_commands:
+            self._close_after_shutdown_command_cleared_monotonic = None
+            return
+
+        if system_state.system_state == "IDLE":
+            self._close_after_shutdown_requested = False
+            self._close_after_shutdown_command_cleared_monotonic = None
+            self.close()
+            return
+
+        now = time.monotonic()
+        if self._close_after_shutdown_command_cleared_monotonic is None:
+            self._close_after_shutdown_command_cleared_monotonic = now
+            return
+
+        if now - self._close_after_shutdown_command_cleared_monotonic < 1.5:
+            return
+
+        self._close_after_shutdown_requested = False
+        self._close_after_shutdown_command_cleared_monotonic = None
+        QMessageBox.critical(
+            self,
+            "Shutdown Incomplete",
+            "Shutdown System did not return the supervisor to IDLE. "
+            "The window will remain open so you can inspect the fault state.",
+        )

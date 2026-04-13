@@ -556,6 +556,11 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
 hardware_interface::CallbackReturn MarvinHardware::on_activate(
     const rclcpp_lifecycle::State &)
 {
+    constexpr auto kPreClearSetDelay = std::chrono::milliseconds(10);
+    constexpr auto kClearErrCommandDelay = std::chrono::milliseconds(200);
+    constexpr auto kPostClearSendSettle = std::chrono::milliseconds(300);
+    constexpr auto kPostActivationStability = std::chrono::milliseconds(300);
+
     stop_gripper_worker();
     DCSS dcss{};
     if (!OnGetBuf(&dcss)) {
@@ -612,6 +617,36 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
         }
     };
 
+    auto clear_arm_error =
+        [this, kPreClearSetDelay, kClearErrCommandDelay, kPostClearSendSettle](
+            const char *arm_name, void (*clear_fn)()) {
+        std::this_thread::sleep_for(kPreClearSetDelay);
+        if (!OnClearSet()) {
+            RCLCPP_ERROR(get_logger(),
+                         "OnClearSet failed before clearing %s during activation recovery.",
+                         arm_name);
+            return false;
+        }
+        std::this_thread::sleep_for(kPreClearSetDelay);
+        clear_fn();
+        std::this_thread::sleep_for(kClearErrCommandDelay);
+        if (!OnSetSend()) {
+            RCLCPP_ERROR(get_logger(),
+                         "OnSetSend failed while clearing %s during activation recovery.",
+                         arm_name);
+            return false;
+        }
+        std::this_thread::sleep_for(kPostClearSendSettle);
+        return true;
+    };
+
+    auto clear_errors_for_retry = [&]() {
+        RCLCPP_INFO(get_logger(),
+                    "Clearing Arm A/B errors before activation retry.");
+        return clear_arm_error("Arm A", OnClearErr_A) &&
+               clear_arm_error("Arm B", OnClearErr_B);
+    };
+
     refresh_hold_positions();
 
     bool mode_switch_succeeded = false;
@@ -623,6 +658,22 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
     bool timeout_arm_ready_b = false;
 
     for (int attempt = 1; attempt <= activation_max_attempts_; ++attempt) {
+        bool attempt_faulted = false;
+        size_t fault_arm = 0;
+        int fault_cur_state = 0;
+        int fault_cmd_state = 0;
+        int fault_err_code = 0;
+        const char *fault_phase = "";
+
+        auto record_fault = [&](size_t arm, const StateCtr &state, const char *phase) {
+            attempt_faulted = true;
+            fault_arm = arm;
+            fault_cur_state = state.m_CurState;
+            fault_cmd_state = state.m_CmdState;
+            fault_err_code = state.m_ERRCode;
+            fault_phase = phase;
+        };
+
         const char *pre_activate_phase =
             attempt == 1 ? "pre-activate state" : "pre-activate retry state";
         for (size_t arm = 0; arm < kArmCount; ++arm) {
@@ -691,11 +742,15 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
                 refresh_hold_positions();
 
                 if (!arm_a_ready) {
-                    const auto st = static_cast<ArmState>(dcss.m_State[0].m_CurState);
+                    const auto &state = dcss.m_State[0];
+                    const auto st = static_cast<ArmState>(state.m_CurState);
                     if (st == ARM_STATE_ERROR) {
-                        RCLCPP_ERROR(get_logger(), "Arm A error during mode switch (err=%d).",
-                                     dcss.m_State[0].m_ERRCode);
-                        return hardware_interface::CallbackReturn::ERROR;
+                        record_fault(0, state, "mode switch");
+                        break;
+                    }
+                    if (state.m_ERRCode != 0) {
+                        record_fault(0, state, "mode switch");
+                        break;
                     }
                     if (st == ARM_STATE_POSITION) {
                         arm_a_ready = true;
@@ -703,17 +758,25 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
                     }
                 }
                 if (!arm_b_ready) {
-                    const auto st = static_cast<ArmState>(dcss.m_State[1].m_CurState);
+                    const auto &state = dcss.m_State[1];
+                    const auto st = static_cast<ArmState>(state.m_CurState);
                     if (st == ARM_STATE_ERROR) {
-                        RCLCPP_ERROR(get_logger(), "Arm B error during mode switch (err=%d).",
-                                     dcss.m_State[1].m_ERRCode);
-                        return hardware_interface::CallbackReturn::ERROR;
+                        record_fault(1, state, "mode switch");
+                        break;
+                    }
+                    if (state.m_ERRCode != 0) {
+                        record_fault(1, state, "mode switch");
+                        break;
                     }
                     if (st == ARM_STATE_POSITION) {
                         arm_b_ready = true;
                         RCLCPP_INFO(get_logger(), "Arm B (right) entered position mode.");
                     }
                 }
+            }
+
+            if (attempt_faulted) {
+                break;
             }
 
             if (arm_a_ready && arm_b_ready) {
@@ -736,7 +799,171 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
         }
 
         if (mode_switch_succeeded) {
+            const auto stability_deadline = Clock::now() + kPostActivationStability;
+            while (Clock::now() < stability_deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                if (!OnGetBuf(&dcss)) {
+                    RCLCPP_ERROR(get_logger(), "OnGetBuf failed during activation stability check.");
+                    return hardware_interface::CallbackReturn::ERROR;
+                }
+
+                bool stable = true;
+                for (size_t arm = 0; arm < kArmCount; ++arm) {
+                    const auto &state = dcss.m_State[arm];
+                    const auto arm_state = static_cast<ArmState>(state.m_CurState);
+                    if (arm_state != ARM_STATE_POSITION || state.m_ERRCode != 0) {
+                        record_fault(arm, state, "post-activation stability");
+                        stable = false;
+                        break;
+                    }
+                }
+
+                if (!stable) {
+                    mode_switch_succeeded = false;
+                    break;
+                }
+            }
+        }
+
+        if (mode_switch_succeeded) {
+            const int activation_frame_timeout_ms =
+                std::max(no_frame_timeout_ms_, activation_retry_settle_ms_);
+            std::array<int, kArmCount> initial_frame_serial{};
+            std::array<bool, kArmCount> frame_advanced{{false, false}};
+            for (size_t arm = 0; arm < kArmCount; ++arm) {
+                initial_frame_serial[arm] = dcss.m_Out[arm].m_OutFrameSerial;
+            }
+
+            const auto frame_deadline =
+                Clock::now() + std::chrono::milliseconds(activation_frame_timeout_ms);
+            while (!(frame_advanced[0] && frame_advanced[1])) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                if (!OnGetBuf(&dcss)) {
+                    RCLCPP_ERROR(
+                        get_logger(),
+                        "OnGetBuf failed during activation frame-progress check.");
+                    return hardware_interface::CallbackReturn::ERROR;
+                }
+
+                bool stable = true;
+                for (size_t arm = 0; arm < kArmCount; ++arm) {
+                    const auto &state = dcss.m_State[arm];
+                    const auto arm_state = static_cast<ArmState>(state.m_CurState);
+                    if (arm_state != ARM_STATE_POSITION || state.m_ERRCode != 0) {
+                        record_fault(arm, state, "post-activation frame check");
+                        stable = false;
+                        break;
+                    }
+                    if (dcss.m_Out[arm].m_OutFrameSerial != initial_frame_serial[arm]) {
+                        frame_advanced[arm] = true;
+                    }
+                }
+
+                if (!stable) {
+                    mode_switch_succeeded = false;
+                    break;
+                }
+
+                if (Clock::now() > frame_deadline) {
+                    break;
+                }
+            }
+
+            if (mode_switch_succeeded && !(frame_advanced[0] && frame_advanced[1])) {
+                if (attempt == activation_max_attempts_) {
+                    RCLCPP_ERROR(
+                        get_logger(),
+                        "Activation succeeded logically but feedback frames did not advance "
+                        "within %d ms on attempt %d/%d (A: start=%d, current=%d; "
+                        "B: start=%d, current=%d).",
+                        activation_frame_timeout_ms,
+                        attempt,
+                        activation_max_attempts_,
+                        initial_frame_serial[0],
+                        dcss.m_Out[0].m_OutFrameSerial,
+                        initial_frame_serial[1],
+                        dcss.m_Out[1].m_OutFrameSerial);
+                    return hardware_interface::CallbackReturn::ERROR;
+                }
+
+                RCLCPP_WARN(
+                    get_logger(),
+                    "Activation attempt %d/%d reached POSITION mode but feedback frames did "
+                    "not advance within %d ms (A: start=%d, current=%d; "
+                    "B: start=%d, current=%d). Waiting %d ms and retrying.",
+                    attempt,
+                    activation_max_attempts_,
+                    activation_frame_timeout_ms,
+                    initial_frame_serial[0],
+                    dcss.m_Out[0].m_OutFrameSerial,
+                    initial_frame_serial[1],
+                    dcss.m_Out[1].m_OutFrameSerial,
+                    activation_retry_settle_ms_);
+                mode_switch_succeeded = false;
+                request_idle_mode();
+                if (activation_retry_settle_ms_ > 0) {
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(activation_retry_settle_ms_));
+                }
+                if (!OnGetBuf(&dcss)) {
+                    RCLCPP_ERROR(get_logger(), "OnGetBuf failed before activation retry.");
+                    return hardware_interface::CallbackReturn::ERROR;
+                }
+                refresh_hold_positions();
+                continue;
+            }
+        }
+
+        if (mode_switch_succeeded) {
             break;
+        }
+
+        if (attempt_faulted) {
+            const auto state = static_cast<ArmState>(fault_cur_state);
+            if (attempt == activation_max_attempts_) {
+                RCLCPP_ERROR(
+                    get_logger(),
+                    "Activation attempt %d/%d failed during %s on arm %s "
+                    "(cur_state=%s(%d), cmd_state=%d, err=%d).",
+                    attempt,
+                    activation_max_attempts_,
+                    fault_phase,
+                    fault_arm == 0 ? "A" : "B",
+                    arm_state_name(state),
+                    fault_cur_state,
+                    fault_cmd_state,
+                    fault_err_code);
+                return hardware_interface::CallbackReturn::ERROR;
+            }
+
+            RCLCPP_WARN(
+                get_logger(),
+                "Activation attempt %d/%d failed during %s on arm %s "
+                "(cur_state=%s(%d), cmd_state=%d, err=%d). "
+                "Clearing errors, waiting %d ms, and retrying for cold-start recovery.",
+                attempt,
+                activation_max_attempts_,
+                fault_phase,
+                fault_arm == 0 ? "A" : "B",
+                arm_state_name(state),
+                fault_cur_state,
+                fault_cmd_state,
+                fault_err_code,
+                activation_retry_settle_ms_);
+            request_idle_mode();
+            if (!clear_errors_for_retry()) {
+                return hardware_interface::CallbackReturn::ERROR;
+            }
+            if (activation_retry_settle_ms_ > 0) {
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(activation_retry_settle_ms_));
+            }
+            if (!OnGetBuf(&dcss)) {
+                RCLCPP_ERROR(get_logger(), "OnGetBuf failed before activation retry.");
+                return hardware_interface::CallbackReturn::ERROR;
+            }
+            refresh_hold_positions();
+            continue;
         }
 
         const auto a_state = timeout_has_status[0]
@@ -789,6 +1016,9 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
             timeout_has_status[1] ? timeout_err_code[1] : dcss.m_State[1].m_ERRCode,
             activation_retry_settle_ms_);
         request_idle_mode();
+        if (!clear_errors_for_retry()) {
+            return hardware_interface::CallbackReturn::ERROR;
+        }
         if (activation_retry_settle_ms_ > 0) {
             std::this_thread::sleep_for(
                 std::chrono::milliseconds(activation_retry_settle_ms_));
@@ -905,17 +1135,49 @@ hardware_interface::CallbackReturn MarvinHardware::on_deactivate(
     stop_gripper_worker();
     workspace_guard_.disarm();
 
+    bool holding_position = false;
     if (connected_) {
-        OnClearSet();
-        OnSetTargetState_A(0);
-        OnSetTargetState_B(0);
-        OnSetSend();
+        DCSS dcss{};
+        if (OnGetBuf(&dcss)) {
+            double hold_a[kJointsPerArm], hold_b[kJointsPerArm];
+            for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+                hold_a[joint] = static_cast<double>(dcss.m_Out[0].m_FB_Joint_PosE[joint]);
+                hold_b[joint] = static_cast<double>(dcss.m_Out[1].m_FB_Joint_PosE[joint]);
+            }
+
+            OnClearSet();
+            holding_position =
+                OnSetTargetState_A(1) &&
+                OnSetJointLmt_A(joint_vel_ratio_, joint_acc_ratio_) &&
+                OnSetTargetState_B(1) &&
+                OnSetJointLmt_B(joint_vel_ratio_, joint_acc_ratio_) &&
+                OnSetJointCmdPos_A(hold_a) &&
+                OnSetJointCmdPos_B(hold_b) &&
+                OnSetSend();
+            if (!holding_position) {
+                RCLCPP_WARN(
+                    get_logger(),
+                    "Failed to request hold-position mode during deactivation; leaving current target state unchanged.");
+            }
+        } else {
+            RCLCPP_WARN(
+                get_logger(),
+                "OnGetBuf failed during deactivation; skipping any transition to idle for safety.");
+        }
     }
 
     if (gripper_count_ > 0)
         RCLCPP_INFO(get_logger(), "%zu gripper(s) holding last commanded position.",
                      gripper_count_);
-    RCLCPP_INFO(get_logger(), "Dual-arm system deactivated (arms set to idle).");
+    if (holding_position) {
+        RCLCPP_INFO(
+            get_logger(),
+            "Dual-arm system deactivated while holding the last measured joint position.");
+    } else {
+        RCLCPP_INFO(
+            get_logger(),
+            "Dual-arm system deactivated without requesting idle mode.");
+    }
     return hardware_interface::CallbackReturn::SUCCESS;
 }
 

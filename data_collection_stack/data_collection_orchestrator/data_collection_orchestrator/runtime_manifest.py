@@ -45,6 +45,11 @@ class RuntimeManifest:
         self.delete()
         return notes
 
+    def cleanup_known_orphans(self) -> list[str]:
+        notes: list[str] = []
+        notes.extend(self._cleanup_orphaned_marvin_robot_state_publishers())
+        return notes
+
     def set_context(self, *, recipe_id: str, system_state: str) -> None:
         self._recipe_id = recipe_id
         self._system_state = system_state
@@ -286,3 +291,115 @@ class RuntimeManifest:
         if isinstance(command, str):
             return command
         return "<unknown>"
+
+    def _cleanup_orphaned_marvin_robot_state_publishers(self) -> list[str]:
+        notes: list[str] = []
+        cleaned_pgids: set[int] = set()
+        cleaned_pids: set[int] = set()
+
+        for proc_entry in Path("/proc").iterdir():
+            if not proc_entry.name.isdigit():
+                continue
+
+            pid = int(proc_entry.name)
+            if pid in {0, self._supervisor_pid, os.getpid()}:
+                continue
+
+            command = self._read_proc_cmdline(pid)
+            if not command:
+                continue
+            if Path(command[0]).name != "robot_state_publisher":
+                continue
+
+            params_file = self._extract_params_file(command)
+            if params_file is None or not self._params_file_contains_marvin_dual(params_file):
+                continue
+
+            ppid = self._read_proc_ppid(pid)
+            if not self._process_looks_orphaned(ppid):
+                continue
+
+            pgid = self._safe_getpgid(pid)
+            if pgid is not None and pgid not in {os.getpid(), os.getpgrp()}:
+                if pgid in cleaned_pgids:
+                    continue
+                cleaned_pgids.add(pgid)
+                notes.extend(
+                    self._signal_process_group(
+                        pgid,
+                        device_id="orphaned_marvin_robot_state_publisher",
+                        command=command,
+                        pid=pid,
+                    )
+                )
+                continue
+
+            if pid in cleaned_pids:
+                continue
+            cleaned_pids.add(pid)
+            notes.extend(
+                self._signal_process(
+                    pid,
+                    device_id="orphaned_marvin_robot_state_publisher",
+                    command=command,
+                )
+            )
+
+        return notes
+
+    def _read_proc_cmdline(self, pid: int) -> list[str]:
+        cmdline_path = Path(f"/proc/{pid}/cmdline")
+        try:
+            raw_data = cmdline_path.read_bytes()
+        except OSError:
+            return []
+        return [chunk.decode("utf-8", errors="replace") for chunk in raw_data.split(b"\0") if chunk]
+
+    def _read_proc_ppid(self, pid: int) -> int | None:
+        status_path = Path(f"/proc/{pid}/status")
+        try:
+            status_text = status_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+
+        for line in status_text.splitlines():
+            if not line.startswith("PPid:"):
+                continue
+            _, _, raw_value = line.partition(":")
+            return self._coerce_positive_int(raw_value.strip())
+        return None
+
+    def _extract_params_file(self, command: list[str]) -> Path | None:
+        for index, item in enumerate(command):
+            if item != "--params-file":
+                continue
+            if index + 1 >= len(command):
+                return None
+            return Path(command[index + 1])
+        return None
+
+    def _params_file_contains_marvin_dual(self, path: Path) -> bool:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False
+        return "marvin_dual.urdf" in text
+
+    def _process_looks_orphaned(self, ppid: int | None) -> bool:
+        if ppid is None or ppid <= 1:
+            return True
+
+        parent_command = self._read_proc_cmdline(ppid)
+        if not parent_command:
+            return True
+
+        parent_executable = Path(parent_command[0]).name
+        return parent_executable == "systemd" and "--user" in parent_command
+
+    def _safe_getpgid(self, pid: int) -> int | None:
+        try:
+            return os.getpgid(pid)
+        except ProcessLookupError:
+            return None
+        except PermissionError:
+            return None

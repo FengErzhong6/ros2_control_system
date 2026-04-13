@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cmath>
 #include <future>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -217,6 +218,10 @@ public:
             this, "teleop_service_timeout_sec", 5.0);
         legacy_go_home_timeout_sec_ = get_param_or_declare<double>(
             this, "legacy_go_home_timeout_sec", 10.0);
+        legacy_go_home_settle_timeout_sec_ = get_param_or_declare<double>(
+            this, "legacy_go_home_settle_timeout_sec", 20.0);
+        legacy_home_tolerance_rad_ = get_param_or_declare<double>(
+            this, "legacy_home_tolerance_rad", 0.5 * M_PI / 180.0);
         num_planning_attempts_ = get_param_or_declare<int64_t>(
             this, "num_planning_attempts", 3);
         max_velocity_scaling_ = get_param_or_declare<double>(
@@ -754,6 +759,68 @@ private:
                 it == recovery_aux_joint_positions_rad_.end() ? 0.0 : it->second);
         }
         recovery_command_publisher_->publish(msg);
+    }
+
+    bool build_primary_command_seed_deg(
+        std::array<std::array<double, kJointsPerArm>, 2> &joint_positions_deg,
+        std::string &error_message) const
+    {
+        std::string feedback_error;
+        if (current_joint_positions_deg(joint_positions_deg, feedback_error)) {
+            return true;
+        }
+
+        const std::string fallback_pose_id =
+            go_home_pose_sequence_.empty() ? home_pose_id_ : go_home_pose_sequence_.back();
+        std::map<std::string, double> target;
+        if (!build_named_target(fallback_pose_id, target, error_message)) {
+            if (!feedback_error.empty()) {
+                error_message =
+                    "Failed to build primary command seed from /joint_states (" + feedback_error +
+                    ") and fallback pose '" + fallback_pose_id + "' (" + error_message + ").";
+            } else {
+                error_message =
+                    "Failed to build primary command seed from fallback pose '" +
+                    fallback_pose_id + "': " + error_message;
+            }
+            return false;
+        }
+
+        for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+            joint_positions_deg[0][joint] = target.at(kLeftJointNames[joint]) * 180.0 / M_PI;
+            joint_positions_deg[1][joint] = target.at(kRightJointNames[joint]) * 180.0 / M_PI;
+        }
+
+        RCLCPP_WARN(
+            get_logger(),
+            "Primary command seed fell back to named pose '%s' because /joint_states feedback "
+            "was unavailable (%s).",
+            fallback_pose_id.c_str(),
+            feedback_error.c_str());
+        return true;
+    }
+
+    bool reseed_primary_command_reference(const char *phase, std::string &error_message)
+    {
+        if (!recovery_command_publisher_) {
+            return true;
+        }
+
+        std::array<std::array<double, kJointsPerArm>, 2> seed_deg{};
+        if (!build_primary_command_seed_deg(seed_deg, error_message)) {
+            return false;
+        }
+
+        // Publish more than once so the primary controller's command buffer is refreshed
+        // both before and immediately after a controller-mode handoff.
+        publish_recovery_command(seed_deg);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        publish_recovery_command(seed_deg);
+        RCLCPP_INFO(
+            get_logger(),
+            "Reseeded primary controller reference from joint feedback (%s).",
+            phase);
+        return true;
     }
 
     bool wait_until_recovery_target_reached(
@@ -1403,7 +1470,7 @@ private:
     bool build_named_target(
         const std::string &pose_id,
         std::map<std::string, double> &target,
-        std::string &error_message)
+        std::string &error_message) const
     {
         const auto left = get_named_pose_values(pose_id, "left");
         const auto right = get_named_pose_values(pose_id, "right");
@@ -1417,6 +1484,100 @@ private:
             target[kRightJointNames[i]] = right[i];
         }
         return true;
+    }
+
+    bool named_target_reached(
+        const std::map<std::string, double> &target,
+        double tolerance_rad,
+        std::string &largest_error_joint,
+        double &largest_error_rad) const
+    {
+        largest_error_joint.clear();
+        largest_error_rad = 0.0;
+
+        std::lock_guard<std::mutex> lock(joint_state_mutex_);
+        for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+            const auto left_it = target.find(kLeftJointNames[joint]);
+            if (left_it != target.end()) {
+                if (!joint_position_valid_[joint]) {
+                    largest_error_joint = kLeftJointNames[joint];
+                    largest_error_rad = std::numeric_limits<double>::infinity();
+                    return false;
+                }
+                const double error =
+                    std::abs(joint_positions_rad_[joint] - left_it->second);
+                if (error > largest_error_rad) {
+                    largest_error_rad = error;
+                    largest_error_joint = kLeftJointNames[joint];
+                }
+                if (error > tolerance_rad) {
+                    return false;
+                }
+            }
+
+            const auto right_it = target.find(kRightJointNames[joint]);
+            if (right_it != target.end()) {
+                const size_t index = kJointsPerArm + joint;
+                if (!joint_position_valid_[index]) {
+                    largest_error_joint = kRightJointNames[joint];
+                    largest_error_rad = std::numeric_limits<double>::infinity();
+                    return false;
+                }
+                const double error =
+                    std::abs(joint_positions_rad_[index] - right_it->second);
+                if (error > largest_error_rad) {
+                    largest_error_rad = error;
+                    largest_error_joint = kRightJointNames[joint];
+                }
+                if (error > tolerance_rad) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    bool wait_for_named_pose_reached(
+        const std::string &pose_id,
+        double timeout_sec,
+        double tolerance_rad,
+        std::string &error_message)
+    {
+        std::map<std::string, double> target;
+        if (!build_named_target(pose_id, target, error_message)) {
+            return false;
+        }
+        if (!wait_for_joint_feedback(error_message)) {
+            return false;
+        }
+
+        const auto deadline =
+            std::chrono::steady_clock::now() +
+            std::chrono::duration<double>(std::max(0.5, timeout_sec));
+        std::string largest_error_joint;
+        double largest_error_rad = 0.0;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (named_target_reached(
+                    target,
+                    tolerance_rad,
+                    largest_error_joint,
+                    largest_error_rad)) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+
+        error_message =
+            "Legacy go_home did not reach pose '" + pose_id + "' within " +
+            std::to_string(timeout_sec) + "s";
+        if (!largest_error_joint.empty() && std::isfinite(largest_error_rad)) {
+            error_message +=
+                " (largest error: " + largest_error_joint + "=" +
+                std::to_string(largest_error_rad) + " rad)";
+        }
+        error_message += ".";
+        return false;
     }
 
     bool plan_and_execute_named_target(
@@ -1707,9 +1868,12 @@ private:
         std::string error_message;
         bool go_home_ok = false;
         bool workspace_guard_disabled = false;
+        bool used_legacy_fallback_after_moveit_failure = false;
+        bool wait_for_legacy_home_completion = false;
         if (backend_ == "legacy") {
             if (transition_to_mode(kModeTeleop, error_message)) {
                 go_home_ok = handle_legacy_go_home(error_message);
+                wait_for_legacy_home_completion = go_home_ok;
             }
         } else if (backend_ == "moveit") {
             if (!call_workspace_guard_set_enabled(false, error_message)) {
@@ -1772,13 +1936,73 @@ private:
                         go_home_ok = execute_moveit_go_home(error_message);
                     }
                 }
+
+                if (!go_home_ok &&
+                    allow_legacy_go_home_fallback_ &&
+                    (error_message.rfind("MoveIt planning failed", 0) == 0 ||
+                     error_message.rfind("MoveIt execution failed", 0) == 0)) {
+                    RCLCPP_WARN(
+                        get_logger(),
+                        "MoveIt home failed (%s). Falling back to legacy tracker go_home.",
+                        error_message.c_str());
+                    std::string fallback_mode_error;
+                    if (!transition_to_mode(kModeTeleop, fallback_mode_error)) {
+                        error_message +=
+                            " Legacy fallback unavailable because TELEOP mode restore failed: " +
+                            fallback_mode_error;
+                    } else {
+                        std::string legacy_error;
+                        if (handle_legacy_go_home(legacy_error)) {
+                            go_home_ok = true;
+                            used_legacy_fallback_after_moveit_failure = true;
+                            wait_for_legacy_home_completion = true;
+                            error_message.clear();
+                        } else {
+                            error_message += " Legacy fallback failed: " + legacy_error;
+                        }
+                    }
+                }
             }
         } else {
             error_message = "Unsupported motion backend: " + backend_;
         }
 
+        if (go_home_ok && wait_for_legacy_home_completion) {
+            std::string completion_error;
+            if (!wait_for_named_pose_reached(
+                    home_pose_id_,
+                    legacy_go_home_settle_timeout_sec_,
+                    legacy_home_tolerance_rad_,
+                    completion_error)) {
+                go_home_ok = false;
+                error_message = completion_error;
+            }
+        }
+
+        const bool returning_to_primary_controller =
+            go_home_return_mode_ == kModeSafeHold || go_home_return_mode_ == kModeTeleop;
+        if (go_home_ok && returning_to_primary_controller) {
+            std::string reseed_error;
+            if (!reseed_primary_command_reference("before mode restore", reseed_error)) {
+                RCLCPP_WARN(
+                    get_logger(),
+                    "Failed to reseed primary controller reference before restoring mode: %s",
+                    reseed_error.c_str());
+            }
+        }
+
         std::string restore_error;
         const bool restored_mode = transition_to_mode(go_home_return_mode_, restore_error);
+
+        if (go_home_ok && restored_mode && returning_to_primary_controller) {
+            std::string reseed_error;
+            if (!reseed_primary_command_reference("after mode restore", reseed_error)) {
+                RCLCPP_WARN(
+                    get_logger(),
+                    "Failed to reseed primary controller reference after restoring mode: %s",
+                    reseed_error.c_str());
+            }
+        }
 
         std::string workspace_guard_restore_error;
         const bool restored_workspace_guard =
@@ -1817,6 +2041,11 @@ private:
         finish(go_home_return_mode_);
         response->success = true;
         if (backend_ == "moveit") {
+            if (used_legacy_fallback_after_moveit_failure) {
+                response->message =
+                    "MoveIt go_home fallback completed via tracker legacy home.";
+                return;
+            }
             response->message = "MoveIt go_home plan executed successfully.";
             return;
         }
@@ -1861,6 +2090,8 @@ private:
     double move_group_wait_sec_{10.0};
     double teleop_service_timeout_sec_{5.0};
     double legacy_go_home_timeout_sec_{10.0};
+    double legacy_go_home_settle_timeout_sec_{20.0};
+    double legacy_home_tolerance_rad_{0.5 * M_PI / 180.0};
     int64_t num_planning_attempts_{3};
     double max_velocity_scaling_{0.2};
     double max_acceleration_scaling_{0.2};

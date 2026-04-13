@@ -25,7 +25,7 @@ from data_collection_interfaces.srv import (
     ListRecipes,
 )
 
-from .adapters import create_adapter
+from .adapters import AdapterResult, create_adapter
 from .command_server import CommandServer
 from .event_log import EventLog
 from .health_monitor import HealthMonitor
@@ -118,6 +118,7 @@ class DataCollectionSupervisor(Node):
         self.create_timer(2.0, self._run_health_monitor)
 
         stale_cleanup_notes = self._runtime_manifest.cleanup_stale_runtime()
+        stale_cleanup_notes.extend(self._runtime_manifest.cleanup_known_orphans())
         for note in stale_cleanup_notes:
             self.get_logger().warn(note)
             self._event_log.record(note)
@@ -840,12 +841,10 @@ class DataCollectionSupervisor(Node):
 
         return None
 
-    def _run_home_sequence(self) -> str | None:
+    def _run_home_sequence(self) -> tuple[AdapterResult | None, str]:
         assert self._current_recipe is not None
         for device in self._current_recipe.devices:
             result = self._adapters[device.device_id].home()
-            if result.is_failure() and device.required:
-                return result.summary
             if result.status == "OK":
                 self._mark_device(
                     device.device_id,
@@ -854,7 +853,21 @@ class DataCollectionSupervisor(Node):
                     result.summary,
                     ready=True,
                 )
-        return None
+                continue
+            if result.status == "DEGRADED":
+                self._mark_device(
+                    device.device_id,
+                    DeviceState.LIFECYCLE_READY,
+                    DeviceState.HEALTH_DEGRADED,
+                    result.summary,
+                    ready=True,
+                )
+                if device.required:
+                    return result, device.device_id
+                continue
+            if result.is_failure() and device.required:
+                return result, device.device_id
+        return None, ""
 
     def _run_arm_sequence(self) -> str | None:
         assert self._current_recipe is not None
@@ -1176,12 +1189,18 @@ class DataCollectionSupervisor(Node):
             return result
 
         self._publish_feedback(goal_handle, GoHome, "Running home hooks.")
-        home_failure = self._run_home_sequence()
-        if home_failure is not None:
-            self._set_fault(home_failure)
+        home_result, failing_device_id = self._run_home_sequence()
+        if home_result is not None:
+            if home_result.is_failure():
+                self._set_fault(home_result.summary, device_id=failing_device_id)
+            else:
+                self._set_system_state(
+                    SystemStates.READY,
+                    f"GoHome degraded: {home_result.summary}",
+                )
             goal_handle.abort()
             result.success = False
-            result.message = home_failure
+            result.message = home_result.summary
             return result
 
         next_state = SystemStates.READY

@@ -67,6 +67,10 @@ def generate_launch_description():
             description="Start the custom joint GUI publisher for slider command input.",
         ),
         DeclareLaunchArgument(
+            "shutdown_on_gui_exit", default_value="false",
+            description="Stop ros2_control, motion, and visualization processes when the joint GUI exits.",
+        ),
+        DeclareLaunchArgument(
             "use_gripper_L", default_value="true",
             description="Enable OmniPicker gripper on left arm.",
         ),
@@ -481,6 +485,7 @@ def launch_setup(context):
                 shutdown_waiter_node,
             ],
         ),
+        condition=IfCondition(LaunchConfiguration("shutdown_on_gui_exit")),
     )
 
     shutdown_when_waiter_exits = RegisterEventHandler(

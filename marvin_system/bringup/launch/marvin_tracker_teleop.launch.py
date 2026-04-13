@@ -709,7 +709,7 @@ def generate_launch_description():
             description="Path to the shared camera inventory YAML file.",
         ),
         DeclareLaunchArgument(
-            "motion_allow_legacy_home_fallback", default_value="true",
+            "motion_allow_legacy_home_fallback", default_value="false",
             description="Allow /marvin_motion/go_home to forward to tracker_teleop_controller/go_home.",
         ),
         DeclareLaunchArgument(
@@ -1258,16 +1258,36 @@ def launch_setup(context):
             output="screen",
         ))
 
-    teleop_followup_actions = [tracker_teleop_controller_spawner] + gripper_spawners
-    if enable_moveit_go_home_value:
-        teleop_followup_actions.append(dual_arm_trajectory_controller_spawner)
+    # Serialize controller bringup to avoid cold-boot races in controller_manager.
+    launch_sequence = [
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=joint_state_broadcaster_spawner,
+                on_exit=[tracker_teleop_controller_spawner],
+            ),
+        )
+    ]
 
-    start_teleop_controllers_after_feedback_ready = RegisterEventHandler(
-        OnProcessExit(
-            target_action=joint_state_broadcaster_spawner,
-            on_exit=teleop_followup_actions,
-        ),
-    )
+    last_controller_spawner = tracker_teleop_controller_spawner
+    if gripper_spawners:
+        launch_sequence.append(
+            RegisterEventHandler(
+                OnProcessExit(
+                    target_action=tracker_teleop_controller_spawner,
+                    on_exit=[gripper_spawners[0]],
+                ),
+            )
+        )
+        for current_spawner, next_spawner in zip(gripper_spawners, gripper_spawners[1:]):
+            launch_sequence.append(
+                RegisterEventHandler(
+                    OnProcessExit(
+                        target_action=current_spawner,
+                        on_exit=[next_spawner],
+                    ),
+                )
+            )
+        last_controller_spawner = gripper_spawners[-1]
 
     moveit_runtime_actions = []
     immediate_motion_nodes = [motion_server_node]
@@ -1303,9 +1323,12 @@ def launch_setup(context):
             )
         )
 
-    manus_gripper_actions = []
+    final_followup_actions = []
+    if enable_moveit_go_home_value:
+        final_followup_actions.append(dual_arm_trajectory_controller_spawner)
+
     if start_manus_gripper_bridge_value:
-        manus_gripper_actions.append(
+        final_followup_actions.append(
             Node(
                 package="manus_system",
                 executable="manus_gripper_node",
@@ -1315,16 +1338,25 @@ def launch_setup(context):
             )
         )
 
+    if final_followup_actions:
+        launch_sequence.append(
+            RegisterEventHandler(
+                OnProcessExit(
+                    target_action=last_controller_spawner,
+                    on_exit=final_followup_actions,
+                ),
+            )
+        )
+
     return [
         ros2_control_node,
         robot_state_publisher_node,
         *tracker_publisher_actions,
         *camera_actions,
-        *manus_gripper_actions,
         *immediate_motion_nodes,
         rviz_node,
         joint_state_broadcaster_spawner,
-        start_teleop_controllers_after_feedback_ready,
+        *launch_sequence,
         *moveit_runtime_actions,
         *keyboard_gate_actions,
     ]

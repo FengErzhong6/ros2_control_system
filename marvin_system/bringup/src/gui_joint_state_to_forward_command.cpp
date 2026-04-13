@@ -63,6 +63,16 @@ public:
     }
 
 private:
+    bool any_user_override_active() const
+    {
+        for (const bool active : user_override_) {
+            if (active) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     void extract_positions(const sensor_msgs::msg::JointState::SharedPtr &msg,
                            std::vector<double> &out)
     {
@@ -100,11 +110,15 @@ private:
     {
         extract_positions(msg, real_pos_);
         if (seeded_) {
-            // Keep non-overridden joints aligned with hardware feedback so a later
-            // single-joint GUI edit does not replay stale commands on the others.
-            for (size_t i = 0; i < joint_order_.size(); ++i) {
-                if (!user_override_[i]) {
-                    last_cmd_[i] = real_pos_[i];
+            // Only re-seed from feedback when the operator is not actively dragging
+            // any GUI-controlled joints. Otherwise encoder noise or passive motion on
+            // untouched joints gets republished as fresh commands and can make the
+            // opposite arm "follow" slightly during single-joint edits.
+            if (!any_user_override_active()) {
+                for (size_t i = 0; i < joint_order_.size(); ++i) {
+                    if (!user_override_[i]) {
+                        last_cmd_[i] = real_pos_[i];
+                    }
                 }
             }
             return;

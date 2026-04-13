@@ -156,12 +156,13 @@ class MarvinAdapter(AdapterBase):
         )
 
     def wait_ready(self, timeout_sec: float) -> AdapterResult:
-        if self._process is None:
+        process = self._process
+        if process is None:
             return AdapterResult.failed(f"{self.device.device_id}: Marvin launch was not started.")
 
         deadline = time.monotonic() + self._ready_timeout_sec(timeout_sec)
         while time.monotonic() < deadline:
-            if self._process.poll() is not None:
+            if process.poll() is not None:
                 return AdapterResult.failed(
                     f"{self.device.device_id}: Marvin launch exited before READY.\n"
                     f"{self._diagnostic_summary()}"
@@ -175,13 +176,26 @@ class MarvinAdapter(AdapterBase):
                     if not self._service_available(service_name, service_type)
                 ]
                 if not missing_services:
-                    return AdapterResult.ok(
-                        f"{self.device.device_id}: controller_manager and tracker teleop services are READY.",
-                        metadata={
-                            "controllers": controllers,
-                            "log_path": None if self._log_path is None else str(self._log_path),
-                        },
-                    )
+                    status_response, status_error = self._motion_status_response(timeout_sec=1.0)
+                    if status_response is not None:
+                        if (
+                            bool(getattr(status_response, "success", False))
+                            and not bool(getattr(status_response, "motion_busy", False))
+                            and bool(getattr(status_response, "controller_interlock_ok", True))
+                        ):
+                            return AdapterResult.ok(
+                                f"{self.device.device_id}: controller_manager and marvin_motion are READY.",
+                                metadata={
+                                    "controllers": controllers,
+                                    "mode": str(getattr(status_response, "mode", "")).strip(),
+                                    "teleop_state": str(
+                                        getattr(status_response, "teleop_state", "")
+                                    ).strip(),
+                                    "log_path": None if self._log_path is None else str(self._log_path),
+                                },
+                            )
+                    elif status_error:
+                        time.sleep(0.1)
 
             time.sleep(0.5)
 
@@ -194,21 +208,26 @@ class MarvinAdapter(AdapterBase):
         self._call_set_bool_service("/marvin_motion/set_enabled", False, timeout_sec=3.0)
         self._call_set_mode_service("SAFE_HOLD", timeout_sec=3.0)
 
-        if self._process is None:
+        process = self._process
+        if process is None:
             self._cleanup_process_state()
             return AdapterResult.ok(f"{self.device.device_id}: Marvin launch already stopped.")
 
-        if self._process.poll() is not None:
-            exit_code = self._process.returncode
+        if process.poll() is not None:
+            exit_code = process.returncode
             self._cleanup_process_state()
             return AdapterResult.ok(
                 f"{self.device.device_id}: Marvin launch already exited with code {exit_code}."
             )
 
-        if not self._signal_process_group(signal.SIGINT, timeout_sec=10.0):
-            self._signal_process_group(signal.SIGTERM, timeout_sec=5.0)
-        if self._process is not None and self._process.poll() is None:
-            self._signal_process_group(signal.SIGKILL, timeout_sec=2.0)
+        # Ask the ros2 launch parent process to exit first so it can shut down child nodes
+        # in launch-managed order. Escalate to the full process group only if it gets stuck.
+        if not self._signal_process(process, signal.SIGINT, timeout_sec=12.0):
+            self._signal_process(process, signal.SIGTERM, timeout_sec=6.0)
+        if process.poll() is None:
+            self._signal_process_group(process, signal.SIGTERM, timeout_sec=4.0)
+        if process.poll() is None:
+            self._signal_process_group(process, signal.SIGKILL, timeout_sec=2.0)
 
         self._cleanup_process_state()
         return AdapterResult.ok(f"{self.device.device_id}: Marvin launch stopped.")
@@ -289,18 +308,28 @@ class MarvinAdapter(AdapterBase):
     def home(self) -> AdapterResult:
         command_result = self._call_trigger_service(
             "/marvin_motion/go_home",
-            timeout_sec=10.0,
+            timeout_sec=self._home_command_timeout_sec(),
         )
         if command_result.is_failure():
-            return command_result
-        completion_result = self._wait_for_home_completion(timeout_sec=self._home_timeout_sec())
-        if completion_result.is_failure():
-            return completion_result
-        if command_result.summary:
+            return self._home_failure_result(command_result.summary)
+
+        status_result = self._wait_for_motion_idle(timeout_sec=self._home_settle_timeout_sec())
+        if status_result.is_failure():
+            return self._home_failure_result(status_result.summary)
+
+        verification_result = self._wait_for_home_verification(
+            timeout_sec=self._home_verification_timeout_sec(),
+        )
+        if verification_result.is_failure():
+            return self._home_failure_result(verification_result.summary)
+
+        if command_result.summary and verification_result.summary:
             return AdapterResult.ok(
-                f"{command_result.summary} {completion_result.summary}".strip()
+                f"{command_result.summary} {verification_result.summary}".strip()
             )
-        return completion_result
+        if command_result.summary:
+            return AdapterResult.ok(command_result.summary)
+        return verification_result
 
     def before_session(self) -> AdapterResult:
         return self._call_set_bool_service(
@@ -340,6 +369,8 @@ class MarvinAdapter(AdapterBase):
             "start_cameras": False,
             "show_camera_views": False,
             "use_mock_hardware": False,
+            "enable_moveit_go_home": True,
+            "motion_allow_legacy_home_fallback": False,
         }
         raw_arguments = self.device.config.get("launch_arguments", {})
         if isinstance(raw_arguments, dict):
@@ -668,27 +699,136 @@ class MarvinAdapter(AdapterBase):
         except (TypeError, ValueError):
             return 20.0
 
-    def _wait_for_home_completion(self, timeout_sec: float) -> AdapterResult:
+    def _home_command_timeout_sec(self) -> float:
+        configured = self.device.config.get("home_command_timeout_sec", self._home_timeout_sec())
+        try:
+            return max(5.0, float(configured))
+        except (TypeError, ValueError):
+            return self._home_timeout_sec()
+
+    def _home_settle_timeout_sec(self) -> float:
+        configured = self.device.config.get("home_settle_timeout_sec", 5.0)
+        try:
+            return max(1.0, float(configured))
+        except (TypeError, ValueError):
+            return 5.0
+
+    def _home_verification_timeout_sec(self) -> float:
+        configured = self.device.config.get(
+            "home_verification_timeout_sec",
+            self._home_timeout_sec(),
+        )
+        try:
+            return max(1.0, float(configured))
+        except (TypeError, ValueError):
+            return self._home_timeout_sec()
+
+    def _motion_status_response(self, timeout_sec: float):
+        return self._call_service_response(
+            client=self._motion_get_status_client,
+            request=GetMotionStatus.Request(),
+            timeout_sec=timeout_sec,
+        )
+
+    def _wait_for_motion_idle(self, timeout_sec: float) -> AdapterResult:
+        deadline = time.monotonic() + timeout_sec
+        last_mode = "UNKNOWN"
+        last_message = ""
+        while time.monotonic() < deadline:
+            if self._process is None or self._process.poll() is not None:
+                return AdapterResult.failed(
+                    f"{self.device.device_id}: Marvin launch exited while waiting for motion idle."
+                )
+
+            status_response, status_error = self._motion_status_response(timeout_sec=1.0)
+            if status_response is None:
+                time.sleep(0.05)
+                last_message = status_error
+                continue
+
+            last_mode = str(getattr(status_response, "mode", "")).strip() or "UNKNOWN"
+            last_message = str(getattr(status_response, "message", "")).strip()
+            if not bool(getattr(status_response, "controller_interlock_ok", True)):
+                return AdapterResult.failed(
+                    f"{self.device.device_id}: marvin_motion controller interlock violation."
+                )
+            if last_mode == "FAULT":
+                return AdapterResult.failed(
+                    f"{self.device.device_id}: marvin_motion entered FAULT during go_home. "
+                    f"{last_message}".strip()
+                )
+            if bool(getattr(status_response, "motion_busy", False)):
+                time.sleep(0.05)
+                continue
+
+            return AdapterResult.ok(
+                f"{self.device.device_id}: marvin_motion idle after home "
+                f"(mode={last_mode}, teleop={getattr(status_response, 'teleop_state', 'UNKNOWN')})."
+            )
+
+        return AdapterResult.failed(
+            f"{self.device.device_id}: marvin_motion did not become idle within "
+            f"{timeout_sec:.1f}s. last_mode={last_mode} message={last_message or 'n/a'}"
+        )
+
+    def _wait_for_home_verification(self, timeout_sec: float) -> AdapterResult:
         if not self._home_joint_targets:
             return AdapterResult.ok(
-                f"{self.device.device_id}: go_home accepted; home verification unavailable."
+                f"{self.device.device_id}: go_home completed; home verification unavailable."
             )
 
         deadline = time.monotonic() + timeout_sec
         while time.monotonic() < deadline:
-            if self._process is None or self._process.poll() is not None:
+            if self._process is not None and self._process.poll() is not None:
                 return AdapterResult.failed(
-                    f"{self.device.device_id}: Marvin launch exited while waiting for home."
+                    f"{self.device.device_id}: Marvin launch exited while verifying home pose."
                 )
             if self._is_home_reached():
-                return AdapterResult.ok(
-                    f"{self.device.device_id}: home pose reached."
-                )
+                return AdapterResult.ok(f"{self.device.device_id}: home pose reached.")
             time.sleep(0.05)
 
+        if self._last_joint_state_monotonic <= 0.0:
+            return AdapterResult.ok(
+                f"{self.device.device_id}: go_home completed; joint verification unavailable."
+            )
+        if time.monotonic() - self._last_joint_state_monotonic > 1.0:
+            return AdapterResult.ok(
+                f"{self.device.device_id}: go_home completed; joint verification is stale."
+            )
+
+        max_error_joint, max_error_rad = self._largest_home_error()
         return AdapterResult.failed(
-            f"{self.device.device_id}: home pose not reached within {timeout_sec:.1f}s."
+            f"{self.device.device_id}: go_home completed but joint verification "
+            f"does not match the expected home pose within {timeout_sec:.1f}s"
+            + (
+                f" (largest error: {max_error_joint}={max_error_rad:.4f} rad)."
+                if max_error_joint
+                else "."
+            )
         )
+
+    def _home_failure_result(self, summary: str) -> AdapterResult:
+        soft_failure_markers = (
+            "MoveIt planning failed",
+            "MoveIt execution failed",
+            "Recovery ",
+            "go_home completed but joint verification",
+            "marvin_motion did not become idle within",
+        )
+        hard_failure_markers = (
+            "service unavailable",
+            "launch exited",
+            "controller interlock violation",
+            "entered FAULT",
+            "launch is not running",
+            "no native client",
+        )
+
+        if any(marker in summary for marker in hard_failure_markers):
+            return AdapterResult.failed(summary)
+        if any(marker in summary for marker in soft_failure_markers):
+            return AdapterResult.degraded(summary)
+        return AdapterResult.failed(summary)
 
     def _is_home_reached(self) -> bool:
         if self._last_joint_state_monotonic <= 0.0:
@@ -704,21 +844,60 @@ class MarvinAdapter(AdapterBase):
                 return False
         return True
 
-    def _signal_process_group(self, sig: signal.Signals, timeout_sec: float) -> bool:
-        if self._process is None:
+    def _largest_home_error(self) -> tuple[str, float]:
+        largest_joint = ""
+        largest_error = 0.0
+        for joint_name, target_position in self._home_joint_targets.items():
+            current_position = self._joint_positions.get(joint_name)
+            if current_position is None:
+                continue
+            error = abs(current_position - target_position)
+            if error > largest_error:
+                largest_error = error
+                largest_joint = joint_name
+        return largest_joint, largest_error
+
+    def _signal_process_group(
+        self,
+        process: subprocess.Popen,
+        sig: signal.Signals,
+        timeout_sec: float,
+    ) -> bool:
+        if process.poll() is not None:
             return True
 
         try:
-            os.killpg(self._process.pid, sig)
+            os.killpg(process.pid, sig)
         except ProcessLookupError:
             return True
 
         deadline = time.monotonic() + timeout_sec
         while time.monotonic() < deadline:
-            if self._process.poll() is not None:
+            if process.poll() is not None:
                 return True
             time.sleep(0.2)
-        return self._process.poll() is not None
+        return process.poll() is not None
+
+    def _signal_process(
+        self,
+        process: subprocess.Popen,
+        sig: signal.Signals,
+        timeout_sec: float,
+    ) -> bool:
+        if process.poll() is not None:
+            return True
+
+        try:
+            os.kill(process.pid, sig)
+        except ProcessLookupError:
+            return True
+
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                return True
+            time.sleep(0.2)
+        return process.poll() is not None
 
     def _cleanup_process_state(self) -> None:
         if self._log_handle is not None:
