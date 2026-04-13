@@ -22,6 +22,14 @@ def generate_launch_description():
         "left_rpy",
         "right_xyz",
         "right_rpy",
+        "collision_guard_enabled",
+        "collision_guard_check_rate_hz",
+        "collision_guard_min_command_delta_deg",
+        "collision_guard_near_distance_m",
+        "collision_guard_hard_collision_distance_m",
+        "collision_guard_escape_min_distance_improvement_m",
+        "collision_guard_interpolation_steps",
+        "collision_guard_binary_search_steps",
         "motion_allow_legacy_home_fallback",
     ]
 
@@ -36,6 +44,14 @@ def generate_launch_description():
         DeclareLaunchArgument("left_rpy", default_value="-1.5707963 0 0"),
         DeclareLaunchArgument("right_xyz", default_value="0 -0.037 0.3618964"),
         DeclareLaunchArgument("right_rpy", default_value="1.5707963 0 0"),
+        DeclareLaunchArgument("collision_guard_enabled", default_value="false"),
+        DeclareLaunchArgument("collision_guard_check_rate_hz", default_value="30.0"),
+        DeclareLaunchArgument("collision_guard_min_command_delta_deg", default_value="0.0"),
+        DeclareLaunchArgument("collision_guard_near_distance_m", default_value="0.10"),
+        DeclareLaunchArgument("collision_guard_hard_collision_distance_m", default_value="0.05"),
+        DeclareLaunchArgument("collision_guard_escape_min_distance_improvement_m", default_value="0.001"),
+        DeclareLaunchArgument("collision_guard_interpolation_steps", default_value="6"),
+        DeclareLaunchArgument("collision_guard_binary_search_steps", default_value="5"),
         DeclareLaunchArgument("motion_allow_legacy_home_fallback", default_value="false"),
     ]
 

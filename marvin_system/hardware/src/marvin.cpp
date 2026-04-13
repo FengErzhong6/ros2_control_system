@@ -123,6 +123,7 @@ namespace marvin_system {
 
 MarvinHardware::~MarvinHardware()
 {
+    stop_collision_guard_worker();
     stop_gripper_worker();
     for (size_t g = 0; g < gripper_count_; ++g) {
         if (grippers_[g].device) {
@@ -135,6 +136,176 @@ MarvinHardware::~MarvinHardware()
     if (connected_) {
         OnRelease();
         connected_ = false;
+    }
+}
+
+void MarvinHardware::start_collision_guard_worker()
+{
+    stop_collision_guard_worker();
+    if (!collision_guard_.ready()) {
+        return;
+    }
+
+    collision_guard_stop_.store(false, std::memory_order_relaxed);
+    collision_guard_thread_ = std::thread([this]() { collision_guard_worker_loop(); });
+    RCLCPP_INFO(
+        get_logger(),
+        "Started collision guard worker thread (rate=%.1f Hz).",
+        collision_guard_.check_rate_hz());
+}
+
+void MarvinHardware::stop_collision_guard_worker()
+{
+    collision_guard_stop_.store(true, std::memory_order_relaxed);
+    if (collision_guard_thread_.joinable()) {
+        collision_guard_thread_.join();
+        RCLCPP_INFO(get_logger(), "Stopped collision guard worker thread.");
+    }
+}
+
+void MarvinHardware::collision_guard_worker_loop()
+{
+    using JointArray = std::array<std::array<double, kJointsPerArm>, kArmCount>;
+    const auto interval = std::chrono::duration_cast<Clock::duration>(
+        std::chrono::duration<double>(1.0 / std::max(1.0, collision_guard_.check_rate_hz())));
+    auto next_wake = Clock::now();
+    int block_streak = 0;
+
+    auto load_snapshot = [this](const auto &source) {
+        JointArray snapshot{};
+        for (size_t arm = 0; arm < kArmCount; ++arm) {
+            for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+                const size_t index = arm * kJointsPerArm + joint;
+                snapshot[arm][joint] = source[index].load(std::memory_order_relaxed);
+            }
+        }
+        return snapshot;
+    };
+
+    auto store_snapshot = [this](const JointArray &snapshot, auto &target) {
+        for (size_t arm = 0; arm < kArmCount; ++arm) {
+            for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+                const size_t index = arm * kJointsPerArm + joint;
+                target[index].store(snapshot[arm][joint], std::memory_order_relaxed);
+            }
+        }
+    };
+
+    while (!collision_guard_stop_.load(std::memory_order_relaxed)) {
+        if (!activated_ ||
+            !collision_guard_.active() ||
+            !collision_guard_runtime_enabled_.load(std::memory_order_relaxed) ||
+            !current_feedback_valid_.load(std::memory_order_relaxed)) {
+            next_wake += interval;
+            const auto current_time = Clock::now();
+            if (next_wake <= current_time) {
+                next_wake = current_time + interval;
+            }
+            std::this_thread::sleep_until(next_wake);
+            continue;
+        }
+
+        const JointArray current_deg = load_snapshot(current_feedback_deg_);
+        const JointArray desired_deg = load_snapshot(collision_guard_target_deg_);
+        JointArray approved_deg = desired_deg;
+
+        std::array<double, CollisionGuard::kGripperCount> gripper_percent{{0.0, 0.0}};
+        std::array<bool, CollisionGuard::kGripperCount> gripper_valid{{false, false}};
+        for (size_t g = 0; g < gripper_count_ && g < CollisionGuard::kGripperCount; ++g) {
+            gripper_percent[g] = grippers_[g].state_percent.load(std::memory_order_relaxed);
+            gripper_valid[g] = grippers_[g].state_valid.load(std::memory_order_relaxed);
+        }
+
+        const auto evaluation =
+            collision_guard_.evaluate_motion(current_deg, desired_deg, gripper_percent, gripper_valid, get_logger());
+
+        if (!evaluation.ready) {
+            next_wake += interval;
+            const auto current_time = Clock::now();
+            if (next_wake <= current_time) {
+                next_wake = current_time + interval;
+            }
+            std::this_thread::sleep_until(next_wake);
+            continue;
+        }
+
+        auto apply_alpha = [](const JointArray &from,
+                              const JointArray &to,
+                              double left_alpha,
+                              double right_alpha) {
+            JointArray result = from;
+            for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+                result[0][joint] =
+                    from[0][joint] + (to[0][joint] - from[0][joint]) * left_alpha;
+                result[1][joint] =
+                    from[1][joint] + (to[1][joint] - from[1][joint]) * right_alpha;
+            }
+            return result;
+        };
+
+        if (!evaluation.safe) {
+            const double combined_alpha = std::clamp(evaluation.max_safe_alpha, 0.0, 1.0);
+            approved_deg = apply_alpha(current_deg, desired_deg, combined_alpha, combined_alpha);
+
+            JointArray left_only = current_deg;
+            left_only[0] = desired_deg[0];
+            const auto left_evaluation =
+                collision_guard_.evaluate_motion(current_deg, left_only, gripper_percent, gripper_valid, get_logger());
+
+            JointArray right_only = current_deg;
+            right_only[1] = desired_deg[1];
+            const auto right_evaluation =
+                collision_guard_.evaluate_motion(current_deg, right_only, gripper_percent, gripper_valid, get_logger());
+
+            const double left_alpha =
+                left_evaluation.ready ? std::clamp(left_evaluation.max_safe_alpha, 0.0, 1.0) : 0.0;
+            const double right_alpha =
+                right_evaluation.ready ? std::clamp(right_evaluation.max_safe_alpha, 0.0, 1.0) : 0.0;
+            const JointArray decoupled_candidate =
+                apply_alpha(current_deg, desired_deg, left_alpha, right_alpha);
+            const auto decoupled_evaluation = collision_guard_.evaluate_motion(
+                current_deg, decoupled_candidate, gripper_percent, gripper_valid, get_logger());
+
+            if (decoupled_evaluation.ready) {
+                const double decoupled_alpha =
+                    std::clamp(decoupled_evaluation.max_safe_alpha, 0.0, 1.0);
+                if (decoupled_evaluation.safe ||
+                    decoupled_alpha > combined_alpha + 1.0e-6 ||
+                    (left_alpha > combined_alpha + 1.0e-6) ||
+                    (right_alpha > combined_alpha + 1.0e-6)) {
+                    approved_deg = apply_alpha(current_deg, decoupled_candidate, decoupled_alpha, decoupled_alpha);
+                }
+            }
+
+            ++block_streak;
+            if (block_streak == 1 || block_streak % 100 == 0) {
+                RCLCPP_WARN(
+                    get_logger(),
+                    "Collision guard blocked command path at sample %d; applying combined_alpha=%.4f "
+                    "(left_alpha=%.4f, right_alpha=%.4f, count=%d).",
+                    evaluation.blocking_sample,
+                    combined_alpha,
+                    left_alpha,
+                    right_alpha,
+                    block_streak);
+            }
+        } else if (block_streak > 0) {
+            RCLCPP_INFO(
+                get_logger(),
+                "Collision guard path is clear again after %d blocked cycles.",
+                block_streak);
+            block_streak = 0;
+        }
+
+        store_snapshot(approved_deg, collision_guard_approved_deg_);
+        collision_guard_approved_valid_.store(true, std::memory_order_relaxed);
+
+        next_wake += interval;
+        const auto current_time = Clock::now();
+        if (next_wake <= current_time) {
+            next_wake = current_time + interval;
+        }
+        std::this_thread::sleep_until(next_wake);
     }
 }
 
@@ -241,6 +412,14 @@ hardware_interface::CallbackReturn MarvinHardware::on_init(
         return hardware_interface::CallbackReturn::ERROR;
     }
 
+    for (size_t i = 0; i < kTotalJoints; ++i) {
+        current_feedback_deg_[i].store(0.0, std::memory_order_relaxed);
+        collision_guard_target_deg_[i].store(0.0, std::memory_order_relaxed);
+        collision_guard_approved_deg_[i].store(0.0, std::memory_order_relaxed);
+    }
+    current_feedback_valid_.store(false, std::memory_order_relaxed);
+    collision_guard_approved_valid_.store(false, std::memory_order_relaxed);
+
     const size_t n_joints = info_.joints.size();
     if (n_joints < kTotalJoints || n_joints > kTotalJoints + kMaxGrippers) {
         RCLCPP_FATAL(get_logger(), "Expected %zu~%zu joints, got %zu.",
@@ -319,6 +498,45 @@ hardware_interface::CallbackReturn MarvinHardware::on_init(
                                         : "Workspace guard runtime enforcement disabled.";
                 RCLCPP_INFO(get_logger(), "%s", response->message.c_str());
             });
+
+        collision_guard_service_ = node->create_service<std_srvs::srv::SetBool>(
+            "~/set_collision_guard_enabled",
+            [this](
+                const std::shared_ptr<std_srvs::srv::SetBool::Request> request,
+                std::shared_ptr<std_srvs::srv::SetBool::Response> response) {
+                collision_guard_runtime_enabled_.store(request->data, std::memory_order_relaxed);
+                response->success = true;
+
+                if (!collision_guard_.enabled()) {
+                    response->message =
+                        "Collision guard is not configured on this hardware instance.";
+                    RCLCPP_INFO(
+                        get_logger(),
+                        "Collision guard runtime request ignored because the guard is not configured.");
+                    return;
+                }
+
+                if (!collision_guard_.ready()) {
+                    response->message = "Collision guard is configured but not ready: " +
+                                        collision_guard_.status_message();
+                    RCLCPP_WARN(get_logger(), "%s", response->message.c_str());
+                    return;
+                }
+
+                if (request->data && current_feedback_valid_.load(std::memory_order_relaxed)) {
+                    for (size_t i = 0; i < kTotalJoints; ++i) {
+                        const double feedback = current_feedback_deg_[i].load(std::memory_order_relaxed);
+                        collision_guard_target_deg_[i].store(feedback, std::memory_order_relaxed);
+                        collision_guard_approved_deg_[i].store(feedback, std::memory_order_relaxed);
+                    }
+                    collision_guard_approved_valid_.store(true, std::memory_order_relaxed);
+                }
+
+                response->message = request->data
+                                        ? "Collision guard runtime enforcement enabled."
+                                        : "Collision guard runtime enforcement disabled.";
+                RCLCPP_INFO(get_logger(), "%s", response->message.c_str());
+            });
     }
 
     // Detect optional OmniPicker gripper joints (indices kTotalJoints+)
@@ -377,9 +595,13 @@ hardware_interface::CallbackReturn MarvinHardware::on_init(
 hardware_interface::CallbackReturn MarvinHardware::on_configure(
     const rclcpp_lifecycle::State &)
 {
+    stop_collision_guard_worker();
     stop_gripper_worker();
     activated_ = false;
     workspace_guard_.disarm();
+    collision_guard_.disarm();
+    current_feedback_valid_.store(false, std::memory_order_relaxed);
+    collision_guard_approved_valid_.store(false, std::memory_order_relaxed);
     const auto &p = info_.hardware_parameters;
 
     joint_vel_ratio_     = param_int(p, "joint_vel_ratio",     30,   1, 100);
@@ -538,15 +760,25 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
     }
 
     workspace_guard_.configure(p, get_logger());
+    collision_guard_.configure(p, get_node(), get_logger());
+    if (collision_guard_.enabled()) {
+        if (collision_guard_.ready()) {
+            RCLCPP_INFO(get_logger(), "%s", collision_guard_.status_message().c_str());
+        } else {
+            RCLCPP_WARN(get_logger(), "%s", collision_guard_.status_message().c_str());
+        }
+    }
 
     RCLCPP_INFO(get_logger(),
                 "Configured dual-arm system (joint_vel=%d%%, joint_acc=%d%%, "
-                "gripper_velocity=%d, gripper_acceleration=%d, grippers=%zu).",
+                "gripper_velocity=%d, gripper_acceleration=%d, grippers=%zu, "
+                "collision_guard=%s).",
                 joint_vel_ratio_,
                 joint_acc_ratio_,
                 gripper_velocity_,
                 gripper_acceleration_,
-                gripper_count_);
+                gripper_count_,
+                collision_guard_.active() ? "active" : (collision_guard_.enabled() ? "configured" : "off"));
     return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -556,6 +788,7 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
 hardware_interface::CallbackReturn MarvinHardware::on_activate(
     const rclcpp_lifecycle::State &)
 {
+    stop_collision_guard_worker();
     constexpr auto kPreClearSetDelay = std::chrono::milliseconds(10);
     constexpr auto kClearErrCommandDelay = std::chrono::milliseconds(200);
     constexpr auto kPostClearSendSettle = std::chrono::milliseconds(300);
@@ -1050,8 +1283,12 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
             const size_t idx = arm * kJointsPerArm + j;
             const auto &jn = info_.joints[idx].name;
             const double pos_rad = static_cast<double>(out.m_FB_Joint_PosE[j]) * kDeg2Rad;
+            const double pos_deg = static_cast<double>(out.m_FB_Joint_PosE[j]);
             set_state(pos_if(jn), pos_rad);
             set_command(pos_if(jn), pos_rad);
+            current_feedback_deg_[idx].store(pos_deg, std::memory_order_relaxed);
+            collision_guard_target_deg_[idx].store(pos_deg, std::memory_order_relaxed);
+            collision_guard_approved_deg_[idx].store(pos_deg, std::memory_order_relaxed);
             if (has_velocity_state_) {
                 set_state(vel_if(jn), static_cast<double>(out.m_FB_Joint_Vel[j]) * kDeg2Rad);
             }
@@ -1062,6 +1299,8 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
         last_frame_serial_[arm] = out.m_OutFrameSerial;
         last_frame_time_[arm] = Clock::now();
     }
+    current_feedback_valid_.store(true, std::memory_order_relaxed);
+    collision_guard_approved_valid_.store(true, std::memory_order_relaxed);
 
     // Seed gripper state & command (query_states blocks briefly, OK during activation)
     for (size_t g = 0; g < gripper_count_; ++g) {
@@ -1112,6 +1351,25 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
         }
     }
 
+    if (collision_guard_.enabled()) {
+        if (collision_guard_.ready()) {
+            if (collision_guard_runtime_enabled_.load(std::memory_order_relaxed)) {
+                collision_guard_.arm();
+                start_collision_guard_worker();
+                RCLCPP_INFO(get_logger(), "Async collision guard armed for runtime commands.");
+            } else {
+                RCLCPP_INFO(
+                    get_logger(),
+                    "Collision guard is configured but runtime enforcement is disabled.");
+            }
+        } else {
+            RCLCPP_WARN(
+                get_logger(),
+                "Collision guard requested but not ready: %s",
+                collision_guard_.status_message().c_str());
+        }
+    }
+
     start_gripper_worker();
     activated_ = true;
 
@@ -1132,8 +1390,11 @@ hardware_interface::CallbackReturn MarvinHardware::on_deactivate(
     const rclcpp_lifecycle::State &)
 {
     activated_ = false;
+    stop_collision_guard_worker();
     stop_gripper_worker();
     workspace_guard_.disarm();
+    collision_guard_.disarm();
+    current_feedback_valid_.store(false, std::memory_order_relaxed);
 
     bool holding_position = false;
     if (connected_) {
@@ -1188,8 +1449,11 @@ hardware_interface::CallbackReturn MarvinHardware::on_cleanup(
     const rclcpp_lifecycle::State &)
 {
     activated_ = false;
+    stop_collision_guard_worker();
     stop_gripper_worker();
     workspace_guard_.disarm();
+    collision_guard_.disarm();
+    current_feedback_valid_.store(false, std::memory_order_relaxed);
 
     // Disconnect grippers BEFORE releasing Marvin link (they need it to send close cmd)
     for (size_t g = 0; g < gripper_count_; ++g) {
@@ -1251,7 +1515,9 @@ hardware_interface::return_type MarvinHardware::read(
         for (size_t j = 0; j < kJointsPerArm; ++j) {
             const size_t idx = arm * kJointsPerArm + j;
             const auto &jn = info_.joints[idx].name;
-            set_state(pos_if(jn), static_cast<double>(out.m_FB_Joint_PosE[j]) * kDeg2Rad);
+            const double pos_deg = static_cast<double>(out.m_FB_Joint_PosE[j]);
+            set_state(pos_if(jn), pos_deg * kDeg2Rad);
+            current_feedback_deg_[idx].store(pos_deg, std::memory_order_relaxed);
             if (has_velocity_state_) {
                 set_state(vel_if(jn), static_cast<double>(out.m_FB_Joint_Vel[j]) * kDeg2Rad);
             }
@@ -1260,6 +1526,7 @@ hardware_interface::return_type MarvinHardware::read(
             }
         }
     }
+    current_feedback_valid_.store(true, std::memory_order_relaxed);
 
     // Read gripper state cache maintained by the background worker.
     for (size_t g = 0; g < gripper_count_; ++g) {
@@ -1280,6 +1547,8 @@ hardware_interface::return_type MarvinHardware::write(
 {
     if (!activated_) return hardware_interface::return_type::OK;
 
+    double desired_a[kJointsPerArm];
+    double desired_b[kJointsPerArm];
     double cmd_a[kJointsPerArm];
     double cmd_b[kJointsPerArm];
 
@@ -1290,7 +1559,7 @@ hardware_interface::return_type MarvinHardware::write(
             RCLCPP_ERROR(get_logger(), "Non-finite command on joint %zu (arm A).", j);
             return hardware_interface::return_type::ERROR;
         }
-        cmd_a[j] = std::clamp(va, joint_min_[j], joint_max_[j]) * kRad2Deg;
+        desired_a[j] = std::clamp(va, joint_min_[j], joint_max_[j]) * kRad2Deg;
 
         // Arm B (right): joints 7..13
         const size_t idx_b = kJointsPerArm + j;
@@ -1299,11 +1568,29 @@ hardware_interface::return_type MarvinHardware::write(
             RCLCPP_ERROR(get_logger(), "Non-finite command on joint %zu (arm B).", j);
             return hardware_interface::return_type::ERROR;
         }
-        cmd_b[j] = std::clamp(vb, joint_min_[idx_b], joint_max_[idx_b]) * kRad2Deg;
+        desired_b[j] = std::clamp(vb, joint_min_[idx_b], joint_max_[idx_b]) * kRad2Deg;
+        collision_guard_target_deg_[j].store(desired_a[j], std::memory_order_relaxed);
+        collision_guard_target_deg_[idx_b].store(desired_b[j], std::memory_order_relaxed);
+    }
+
+    bool using_collision_guard = false;
+    if (collision_guard_.active() &&
+        collision_guard_runtime_enabled_.load(std::memory_order_relaxed) &&
+        collision_guard_approved_valid_.load(std::memory_order_relaxed)) {
+        using_collision_guard = true;
+        for (size_t j = 0; j < kJointsPerArm; ++j) {
+            const size_t idx_b = kJointsPerArm + j;
+            cmd_a[j] = collision_guard_approved_deg_[j].load(std::memory_order_relaxed);
+            cmd_b[j] = collision_guard_approved_deg_[idx_b].load(std::memory_order_relaxed);
+        }
+    } else {
+        std::copy(desired_a, desired_a + kJointsPerArm, cmd_a);
+        std::copy(desired_b, desired_b + kJointsPerArm, cmd_b);
     }
 
     if (workspace_guard_.enabled() &&
-        workspace_guard_runtime_enabled_.load(std::memory_order_relaxed)) {
+        workspace_guard_runtime_enabled_.load(std::memory_order_relaxed) &&
+        !using_collision_guard) {
         workspace_guard_.filter(0, cmd_a, get_logger());
         workspace_guard_.filter(1, cmd_b, get_logger());
     }
@@ -1330,6 +1617,16 @@ hardware_interface::return_type MarvinHardware::write(
         return hardware_interface::return_type::OK;
     }
     consecutive_write_failures_ = 0;
+
+    if (!using_collision_guard && collision_guard_.active() &&
+        collision_guard_runtime_enabled_.load(std::memory_order_relaxed)) {
+        RCLCPP_WARN_THROTTLE(
+            get_logger(),
+            *get_clock(),
+            5000,
+            "Collision guard is active but no approved command is available yet; "
+            "falling back to direct command output for this cycle.");
+    }
 
     // Hand gripper targets to the non-realtime worker to keep SDK I/O out of the control loop.
     for (size_t g = 0; g < gripper_count_; ++g) {

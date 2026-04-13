@@ -7,6 +7,14 @@
                        joint_vel_ratio:=80  joint_acc_ratio:=80
                        gripper_velocity:=255  gripper_acceleration:=255
                        gripper_command_rate_hz:=50.0  gripper_command_epsilon:=0.001
+                       collision_guard_enabled:=false
+                       collision_guard_check_rate_hz:=30.0
+                       collision_guard_min_command_delta_deg:=0.0
+                       collision_guard_near_distance_m:=0.10
+                       collision_guard_hard_collision_distance_m:=0.05
+                       collision_guard_escape_min_distance_improvement_m:=0.001
+                       collision_guard_interpolation_steps:=6
+                       collision_guard_binary_search_steps:=5
                        use_gripper_L:=false  gripper_L_arm:=A  gripper_L_can_id:=1
                        use_gripper_R:=false  gripper_R_arm:=B  gripper_R_can_id:=2">
 
@@ -42,6 +50,28 @@
           <param name="mount_rpy_L">$(arg left_rpy)</param>
           <param name="mount_xyz_R">$(arg right_xyz)</param>
           <param name="mount_rpy_R">$(arg right_rpy)</param>
+          <param name="collision_guard_enabled">${collision_guard_enabled}</param>
+          <param name="collision_guard_check_rate_hz">${collision_guard_check_rate_hz}</param>
+          <param name="collision_guard_min_command_delta_deg">${collision_guard_min_command_delta_deg}</param>
+          <param name="collision_guard_near_distance_m">${collision_guard_near_distance_m}</param>
+          <param name="collision_guard_hard_collision_distance_m">${collision_guard_hard_collision_distance_m}</param>
+          <param name="collision_guard_escape_min_distance_improvement_m">${collision_guard_escape_min_distance_improvement_m}</param>
+          <param name="collision_guard_interpolation_steps">${collision_guard_interpolation_steps}</param>
+          <param name="collision_guard_binary_search_steps">${collision_guard_binary_search_steps}</param>
+          <param name="collision_guard_description_package">marvin_system</param>
+          <param name="collision_guard_description_file">description/urdf/marvin_dual.urdf</param>
+          <param name="collision_guard_semantic_package">marvin_system</param>
+          <param name="collision_guard_semantic_file">description/srdf/marvin_dual.srdf</param>
+          <param name="collision_guard_use_gripper_L">${use_gripper_L}</param>
+          <param name="collision_guard_use_gripper_R">${use_gripper_R}</param>
+          <param name="collision_guard_table_enabled">true</param>
+          <param name="collision_guard_table_size">1.2 0.8 0.05</param>
+          <param name="collision_guard_table_position">0 0 -0.025</param>
+          <param name="collision_guard_table_orientation">0 0 0 1</param>
+          <param name="collision_guard_gripper_height_intercept_m">0.15</param>
+          <param name="collision_guard_gripper_height_slope_m">-0.03</param>
+          <param name="collision_guard_gripper_radius_intercept_m">0.0425</param>
+          <param name="collision_guard_gripper_radius_slope_m">0.0575</param>
           <xacro:if value="${str(use_gripper_L).lower() == 'true' or str(use_gripper_R).lower() == 'true'}">
             <!-- Gripper tip in Link7 frame: flange 9.5cm + finger 15cm = 24.5cm along -Y_link7 -->
             <param name="tool_offset">0 -0.245 0</param>

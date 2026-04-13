@@ -66,6 +66,38 @@ def generate_launch_description():
             description="Mount pose (rpy) of Base_R in world.",
         ),
         DeclareLaunchArgument(
+            "collision_guard_enabled", default_value="false",
+            description="Enable async MoveIt-backed collision guard in hardware.",
+        ),
+        DeclareLaunchArgument(
+            "collision_guard_check_rate_hz", default_value="30.0",
+            description="Collision guard worker frequency in Hz.",
+        ),
+        DeclareLaunchArgument(
+            "collision_guard_min_command_delta_deg", default_value="0.0",
+            description="Skip collision re-check when max command delta is below this value in degrees.",
+        ),
+        DeclareLaunchArgument(
+            "collision_guard_near_distance_m", default_value="0.10",
+            description="Distance threshold in meters below which commands enter the near-collision zone.",
+        ),
+        DeclareLaunchArgument(
+            "collision_guard_hard_collision_distance_m", default_value="0.05",
+            description="Distance threshold in meters below which commands are treated as colliding.",
+        ),
+        DeclareLaunchArgument(
+            "collision_guard_escape_min_distance_improvement_m", default_value="0.001",
+            description="Minimum collision-distance improvement required to allow escaping from an already-colliding state.",
+        ),
+        DeclareLaunchArgument(
+            "collision_guard_interpolation_steps", default_value="6",
+            description="Number of interpolation samples checked between current and target commands.",
+        ),
+        DeclareLaunchArgument(
+            "collision_guard_binary_search_steps", default_value="5",
+            description="Binary search refinement steps for the last safe command on a blocked path.",
+        ),
+        DeclareLaunchArgument(
             "motion_allow_legacy_home_fallback", default_value="false",
             description="Allow /marvin_motion/go_home to forward to legacy tracker teleop home.",
         ),
@@ -81,6 +113,9 @@ def launch_setup(context):
     workspace_guard_service_name = (
         "" if use_mock_hardware_value else "/marvin_dual/set_workspace_guard_enabled"
     )
+    collision_guard_service_name = (
+        "" if use_mock_hardware_value else "/marvin_dual/set_collision_guard_enabled"
+    )
 
     pkg = LaunchConfiguration("description_package").perform(context)
     desc_file = LaunchConfiguration("description_file").perform(context)
@@ -90,6 +125,14 @@ def launch_setup(context):
     left_rpy = LaunchConfiguration("left_rpy")
     right_xyz = LaunchConfiguration("right_xyz")
     right_rpy = LaunchConfiguration("right_rpy")
+    collision_guard_enabled = LaunchConfiguration("collision_guard_enabled")
+    collision_guard_check_rate_hz = LaunchConfiguration("collision_guard_check_rate_hz")
+    collision_guard_min_command_delta_deg = LaunchConfiguration("collision_guard_min_command_delta_deg")
+    collision_guard_near_distance_m = LaunchConfiguration("collision_guard_near_distance_m")
+    collision_guard_hard_collision_distance_m = LaunchConfiguration("collision_guard_hard_collision_distance_m")
+    collision_guard_escape_min_distance_improvement_m = LaunchConfiguration("collision_guard_escape_min_distance_improvement_m")
+    collision_guard_interpolation_steps = LaunchConfiguration("collision_guard_interpolation_steps")
+    collision_guard_binary_search_steps = LaunchConfiguration("collision_guard_binary_search_steps")
 
     xacro_cmd = [
         PathJoinSubstitution([FindExecutable(name="xacro")]),
@@ -102,6 +145,14 @@ def launch_setup(context):
         f" use_mock_hardware:={'true' if use_mock_hardware_value else 'false'}",
         f" use_gripper_L:={'true' if grip_L else 'false'}",
         f" use_gripper_R:={'true' if grip_R else 'false'}",
+        ' collision_guard_enabled:="', collision_guard_enabled, '"',
+        ' collision_guard_check_rate_hz:="', collision_guard_check_rate_hz, '"',
+        ' collision_guard_min_command_delta_deg:="', collision_guard_min_command_delta_deg, '"',
+        ' collision_guard_near_distance_m:="', collision_guard_near_distance_m, '"',
+        ' collision_guard_hard_collision_distance_m:="', collision_guard_hard_collision_distance_m, '"',
+        ' collision_guard_escape_min_distance_improvement_m:="', collision_guard_escape_min_distance_improvement_m, '"',
+        ' collision_guard_interpolation_steps:="', collision_guard_interpolation_steps, '"',
+        ' collision_guard_binary_search_steps:="', collision_guard_binary_search_steps, '"',
     ]
 
     robot_description = {
@@ -211,6 +262,7 @@ def launch_setup(context):
                 "trajectory_controller_name": "dual_arm_trajectory_controller",
                 "primary_controller_name": "",
                 "workspace_guard_service_name": workspace_guard_service_name,
+                "collision_guard_service_name": collision_guard_service_name,
                 "allow_legacy_go_home_fallback": ParameterValue(
                     LaunchConfiguration("motion_allow_legacy_home_fallback"),
                     value_type=bool,

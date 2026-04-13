@@ -287,6 +287,8 @@ public:
             this, "primary_controller_name", "tracker_teleop_controller");
         workspace_guard_service_name_ = get_param_or_declare<std::string>(
             this, "workspace_guard_service_name", "");
+        collision_guard_service_name_ = get_param_or_declare<std::string>(
+            this, "collision_guard_service_name", "");
         use_mock_hardware_ = get_param_or_declare<bool>(this, "use_mock_hardware", false);
         go_home_pose_sequence_ = get_string_array_param(this, "go_home_pose_sequence");
         if (go_home_pose_sequence_.empty()) {
@@ -318,6 +320,8 @@ public:
             this, "recovery_feedback_timeout_sec", 2.0);
         recovery_settle_timeout_sec_ = get_param_or_declare<double>(
             this, "recovery_settle_timeout_sec", 8.0);
+        recovery_post_escape_settle_sec_ = get_param_or_declare<double>(
+            this, "recovery_post_escape_settle_sec", 0.5);
         recovery_position_tolerance_rad_ = get_param_or_declare<double>(
             this, "recovery_position_tolerance_rad", 0.05);
         recovery_joint2_step_rad_ = get_param_or_declare<double>(
@@ -381,6 +385,12 @@ public:
         if (!workspace_guard_service_name_.empty()) {
             workspace_guard_client_ = this->create_client<std_srvs::srv::SetBool>(
                 workspace_guard_service_name_,
+                rclcpp::ServicesQoS(),
+                callback_group_);
+        }
+        if (!collision_guard_service_name_.empty()) {
+            collision_guard_client_ = this->create_client<std_srvs::srv::SetBool>(
+                collision_guard_service_name_,
                 rclcpp::ServicesQoS(),
                 callback_group_);
         }
@@ -477,7 +487,7 @@ public:
             "Motion layer ready. backend=%s go_home=%s set_mode=%s set_enabled=%s "
             "legacy_fallback=%s return_mode=%s planning_group=%s execute=%s "
             "initial_mode=%s teleop_services=%s primary_controller=%s trajectory_controller=%s "
-            "workspace_guard_service=%s go_home_sequence=%zu recovery=%s recovery_topic=%s scene_objects=%zu",
+            "workspace_guard_service=%s collision_guard_service=%s go_home_sequence=%zu recovery=%s recovery_topic=%s scene_objects=%zu",
             backend_.c_str(),
             go_home_service_name_.c_str(),
             set_mode_service_name_.c_str(),
@@ -491,6 +501,7 @@ public:
             primary_controller_name_.c_str(),
             trajectory_controller_name_.c_str(),
             workspace_guard_service_name_.c_str(),
+            collision_guard_service_name_.c_str(),
             go_home_pose_sequence_.size(),
             to_bool_string(recovery_enabled_ && recovery_workspace_guard_configured_).c_str(),
             recovery_command_topic_.c_str(),
@@ -973,6 +984,10 @@ private:
         }
         const auto final_evaluation = recovery_workspace_guard_.evaluate(final_deg);
         if (final_evaluation.safe) {
+            if (recovery_post_escape_settle_sec_ > 0.0) {
+                std::this_thread::sleep_for(
+                    std::chrono::duration<double>(recovery_post_escape_settle_sec_));
+            }
             return true;
         }
 
@@ -1138,6 +1153,23 @@ private:
         return call_tracker_set_bool(
             workspace_guard_client_,
             workspace_guard_service_name_,
+            value,
+            error_message);
+    }
+
+    bool call_collision_guard_set_enabled(bool value, std::string &error_message)
+    {
+        if (collision_guard_service_name_.empty()) {
+            return true;
+        }
+        if (!collision_guard_client_) {
+            error_message =
+                "Collision guard service client is not configured: " + collision_guard_service_name_;
+            return false;
+        }
+        return call_tracker_set_bool(
+            collision_guard_client_,
+            collision_guard_service_name_,
             value,
             error_message);
     }
@@ -2117,6 +2149,7 @@ private:
         std::string error_message;
         bool go_home_ok = false;
         bool workspace_guard_disabled = false;
+        bool collision_guard_disabled = false;
         bool used_legacy_fallback_after_moveit_failure = false;
         bool wait_for_legacy_home_completion = false;
         if (backend_ == "legacy") {
@@ -2132,6 +2165,13 @@ private:
                 return;
             }
             workspace_guard_disabled = true;
+            if (!call_collision_guard_set_enabled(false, error_message)) {
+                finish(kModeSafeHold);
+                response->success = false;
+                response->message = error_message;
+                return;
+            }
+            collision_guard_disabled = true;
             if (recovery_enabled_ && recovery_workspace_guard_configured_ &&
                 recovery_command_publisher_) {
                 std::array<std::array<double, kJointsPerArm>, 2> current_deg{};
@@ -2257,8 +2297,12 @@ private:
         const bool restored_workspace_guard =
             !workspace_guard_disabled ||
             call_workspace_guard_set_enabled(true, workspace_guard_restore_error);
+        std::string collision_guard_restore_error;
+        const bool restored_collision_guard =
+            !collision_guard_disabled ||
+            call_collision_guard_set_enabled(true, collision_guard_restore_error);
 
-        if (!restored_mode || !restored_workspace_guard) {
+        if (!restored_mode || !restored_workspace_guard || !restored_collision_guard) {
             finish(kModeFault);
             response->success = false;
             if (!restored_mode) {
@@ -2269,13 +2313,20 @@ private:
                     response->message =
                         error_message + " Restore step also failed: " + restore_error;
                 }
-            } else {
+            } else if (!restored_workspace_guard) {
                 response->message =
                     error_message.empty()
                         ? "GoHome restored motion mode but failed to re-enable workspace guard: " +
                               workspace_guard_restore_error
                         : error_message + " Workspace guard re-enable also failed: " +
                               workspace_guard_restore_error;
+            } else {
+                response->message =
+                    error_message.empty()
+                        ? "GoHome restored motion mode but failed to re-enable collision guard: " +
+                              collision_guard_restore_error
+                        : error_message + " Collision guard re-enable also failed: " +
+                              collision_guard_restore_error;
             }
             return;
         }
@@ -2312,6 +2363,7 @@ private:
     rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr tracker_set_armed_client_;
     rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr tracker_set_enabled_client_;
     rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr workspace_guard_client_;
+    rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr collision_guard_client_;
     rclcpp::Client<controller_manager_msgs::srv::SwitchController>::SharedPtr
         switch_controller_client_;
     rclcpp::Client<controller_manager_msgs::srv::ListControllers>::SharedPtr
@@ -2357,6 +2409,7 @@ private:
     std::string trajectory_controller_name_;
     std::string primary_controller_name_;
     std::string workspace_guard_service_name_;
+    std::string collision_guard_service_name_;
     bool use_mock_hardware_{false};
     std::vector<std::string> go_home_pose_sequence_;
     bool recovery_enabled_{true};
@@ -2364,6 +2417,7 @@ private:
     std::vector<std::string> recovery_command_joint_names_;
     double recovery_feedback_timeout_sec_{2.0};
     double recovery_settle_timeout_sec_{8.0};
+    double recovery_post_escape_settle_sec_{0.5};
     double recovery_position_tolerance_rad_{0.05};
     double recovery_joint2_step_rad_{2.0 * M_PI / 180.0};
     double recovery_joint4_step_rad_{2.0 * M_PI / 180.0};

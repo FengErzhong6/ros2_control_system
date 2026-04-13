@@ -93,6 +93,11 @@ def generate_launch_description():
             "right_rpy", default_value="1.5707963 0 0",
             description="Mount pose (rpy) of Base_R in world.",
         ),
+        DeclareLaunchArgument("collision_guard_enabled", default_value="false"),
+        DeclareLaunchArgument("collision_guard_check_rate_hz", default_value="30.0"),
+        DeclareLaunchArgument("collision_guard_min_command_delta_deg", default_value="0.0"),
+        DeclareLaunchArgument("collision_guard_interpolation_steps", default_value="6"),
+        DeclareLaunchArgument("collision_guard_binary_search_steps", default_value="5"),
         OpaqueFunction(function=launch_setup),
     ])
 
@@ -104,6 +109,9 @@ def launch_setup(context):
     )
     workspace_guard_service_name = (
         "" if use_mock_hardware_value else "/marvin_dual/set_workspace_guard_enabled"
+    )
+    collision_guard_service_name = (
+        "" if use_mock_hardware_value else "/marvin_dual/set_collision_guard_enabled"
     )
 
     trajectory_bag = LaunchConfiguration("trajectory_bag").perform(context).strip()
@@ -121,6 +129,11 @@ def launch_setup(context):
     left_rpy = LaunchConfiguration("left_rpy")
     right_xyz = LaunchConfiguration("right_xyz")
     right_rpy = LaunchConfiguration("right_rpy")
+    collision_guard_enabled = LaunchConfiguration("collision_guard_enabled")
+    collision_guard_check_rate_hz = LaunchConfiguration("collision_guard_check_rate_hz")
+    collision_guard_min_command_delta_deg = LaunchConfiguration("collision_guard_min_command_delta_deg")
+    collision_guard_interpolation_steps = LaunchConfiguration("collision_guard_interpolation_steps")
+    collision_guard_binary_search_steps = LaunchConfiguration("collision_guard_binary_search_steps")
 
     xacro_cmd = [
         PathJoinSubstitution([FindExecutable(name="xacro")]),
@@ -133,6 +146,11 @@ def launch_setup(context):
         f" use_mock_hardware:={'true' if use_mock_hardware_value else 'false'}",
         f" use_gripper_L:={'true' if grip_L else 'false'}",
         f" use_gripper_R:={'true' if grip_R else 'false'}",
+        ' collision_guard_enabled:="', collision_guard_enabled, '"',
+        ' collision_guard_check_rate_hz:="', collision_guard_check_rate_hz, '"',
+        ' collision_guard_min_command_delta_deg:="', collision_guard_min_command_delta_deg, '"',
+        ' collision_guard_interpolation_steps:="', collision_guard_interpolation_steps, '"',
+        ' collision_guard_binary_search_steps:="', collision_guard_binary_search_steps, '"',
     ]
 
     robot_description = {
@@ -264,6 +282,7 @@ def launch_setup(context):
                 "trajectory_controller_name": "dual_arm_trajectory_controller",
                 "primary_controller_name": "forward_position_controller",
                 "workspace_guard_service_name": workspace_guard_service_name,
+                "collision_guard_service_name": collision_guard_service_name,
                 "workspace_z_min": "0.0",
                 "workspace_safety_margin": "0.06",
                 "mount_xyz_L": LaunchConfiguration("left_xyz"),

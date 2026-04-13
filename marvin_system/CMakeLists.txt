@@ -18,8 +18,10 @@ set(THIS_PACKAGE_INCLUDE_DEPENDS
   controller_manager_msgs
   geometry_msgs
   hardware_interface
+  ament_index_cpp
   moveit_core
   moveit_msgs
+  moveit_ros_planning
   moveit_ros_planning_interface
   pluginlib
   rclcpp
@@ -55,6 +57,7 @@ set(MARVIN_KINE_LIBRARY
 add_library(
   marvin_system_hardware
   SHARED
+  hardware/src/collision_guard.cpp
   hardware/src/marvin.cpp
   hardware/src/workspace_guard.cpp
 )
@@ -65,9 +68,14 @@ target_include_directories(marvin_system_hardware PUBLIC
 )
 ament_target_dependencies(marvin_system_hardware PUBLIC
   hardware_interface
+  geometry_msgs
+  moveit_core
+  moveit_msgs
+  moveit_ros_planning
   pluginlib
   rclcpp
   rclcpp_lifecycle
+  shape_msgs
   std_srvs
 )
 target_link_libraries(marvin_system_hardware PUBLIC
@@ -284,8 +292,15 @@ install(
   DESTINATION share/${PROJECT_NAME}/motion
 )
 
+set(MOTION_DOC_FILES
+  motion/README.md
+)
+if(EXISTS "${PROJECT_SOURCE_DIR}/MOVEIT_INTEGRATION_PLAN.md")
+  list(APPEND MOTION_DOC_FILES MOVEIT_INTEGRATION_PLAN.md)
+endif()
+
 install(
-  FILES motion/README.md MOVEIT_INTEGRATION_PLAN.md
+  FILES ${MOTION_DOC_FILES}
   DESTINATION share/${PROJECT_NAME}/motion
 )
 

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <thread>
 
+#include "marvin_system/collision_guard.hpp"
 #include "marvin_system/omnipicker.hpp"
 #include "marvin_system/workspace_guard.hpp"
 
@@ -46,6 +47,9 @@ private:
     void start_gripper_worker();
     void stop_gripper_worker();
     void gripper_worker_loop();
+    void start_collision_guard_worker();
+    void stop_collision_guard_worker();
+    void collision_guard_worker_loop();
 
     static constexpr size_t kJointsPerArm = 7;
     static constexpr size_t kArmCount = 2;
@@ -107,6 +111,18 @@ private:
     WorkspaceGuard workspace_guard_;
     std::atomic<bool> workspace_guard_runtime_enabled_{true};
     rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr workspace_guard_service_;
+
+    // ---- Async collision guard (optional) ----
+    CollisionGuard collision_guard_;
+    std::atomic<bool> collision_guard_runtime_enabled_{true};
+    rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr collision_guard_service_;
+    std::thread collision_guard_thread_{};
+    std::atomic<bool> collision_guard_stop_{false};
+    std::array<std::atomic<double>, kTotalJoints> current_feedback_deg_{};
+    std::array<std::atomic<double>, kTotalJoints> collision_guard_target_deg_{};
+    std::array<std::atomic<double>, kTotalJoints> collision_guard_approved_deg_{};
+    std::atomic<bool> current_feedback_valid_{false};
+    std::atomic<bool> collision_guard_approved_valid_{false};
 
     // ---- Control loop frequency monitoring ----
     int loop_stats_interval_cycles_{5000};

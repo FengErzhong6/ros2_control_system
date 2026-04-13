@@ -23,6 +23,14 @@
   <xacro:arg name="joint_acc_ratio" default="80" />
   <xacro:arg name="gripper_velocity" default="255" />
   <xacro:arg name="gripper_acceleration" default="255" />
+  <xacro:arg name="collision_guard_enabled" default="false" />
+  <xacro:arg name="collision_guard_check_rate_hz" default="30.0" />
+  <xacro:arg name="collision_guard_min_command_delta_deg" default="0.0" />
+  <xacro:arg name="collision_guard_near_distance_m" default="0.10" />
+  <xacro:arg name="collision_guard_hard_collision_distance_m" default="0.05" />
+  <xacro:arg name="collision_guard_escape_min_distance_improvement_m" default="0.001" />
+  <xacro:arg name="collision_guard_interpolation_steps" default="6" />
+  <xacro:arg name="collision_guard_binary_search_steps" default="5" />
 
   <link name="world" />
 
@@ -140,6 +148,14 @@
     joint_acc_ratio="$(arg joint_acc_ratio)"
     gripper_velocity="$(arg gripper_velocity)"
     gripper_acceleration="$(arg gripper_acceleration)"
+    collision_guard_enabled="$(arg collision_guard_enabled)"
+    collision_guard_check_rate_hz="$(arg collision_guard_check_rate_hz)"
+    collision_guard_min_command_delta_deg="$(arg collision_guard_min_command_delta_deg)"
+    collision_guard_near_distance_m="$(arg collision_guard_near_distance_m)"
+    collision_guard_hard_collision_distance_m="$(arg collision_guard_hard_collision_distance_m)"
+    collision_guard_escape_min_distance_improvement_m="$(arg collision_guard_escape_min_distance_improvement_m)"
+    collision_guard_interpolation_steps="$(arg collision_guard_interpolation_steps)"
+    collision_guard_binary_search_steps="$(arg collision_guard_binary_search_steps)"
     use_gripper_L="$(arg use_gripper_L)"
     use_gripper_R="$(arg use_gripper_R)" />
 
