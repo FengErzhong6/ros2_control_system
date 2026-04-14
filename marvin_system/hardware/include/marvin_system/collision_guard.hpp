@@ -22,6 +22,12 @@ public:
         bool safe{true};
         double max_safe_alpha{1.0};
         int blocking_sample{-1};
+        double current_distance_m{std::numeric_limits<double>::max()};
+        double best_distance_m{std::numeric_limits<double>::max()};
+        std::string current_pair;
+        bool environment_pair{false};
+        bool affect_left{false};
+        bool affect_right{false};
     };
 
     CollisionGuard();

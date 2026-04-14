@@ -18,6 +18,7 @@
   <xacro:arg name="right_rpy" default="1.5707963 0 0" />
   <xacro:arg name="use_gripper_L" default="true" />
   <xacro:arg name="use_gripper_R" default="true" />
+  <xacro:arg name="mock_grippers" default="false" />
   <xacro:arg name="use_mock_hardware" default="false" />
   <xacro:arg name="joint_vel_ratio" default="80" />
   <xacro:arg name="joint_acc_ratio" default="80" />
@@ -157,6 +158,7 @@
     collision_guard_interpolation_steps="$(arg collision_guard_interpolation_steps)"
     collision_guard_binary_search_steps="$(arg collision_guard_binary_search_steps)"
     use_gripper_L="$(arg use_gripper_L)"
-    use_gripper_R="$(arg use_gripper_R)" />
+    use_gripper_R="$(arg use_gripper_R)"
+    mock_grippers="$(arg mock_grippers)" />
 
 </robot>

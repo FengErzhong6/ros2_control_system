@@ -15,6 +15,7 @@
                        collision_guard_escape_min_distance_improvement_m:=0.001
                        collision_guard_interpolation_steps:=6
                        collision_guard_binary_search_steps:=5
+                       mock_grippers:=false
                        use_gripper_L:=false  gripper_L_arm:=A  gripper_L_can_id:=1
                        use_gripper_R:=false  gripper_R_arm:=B  gripper_R_can_id:=2">
 
@@ -34,6 +35,7 @@
           <param name="gripper_acceleration">${gripper_acceleration}</param>
           <param name="gripper_command_rate_hz">${gripper_command_rate_hz}</param>
           <param name="gripper_command_epsilon">${gripper_command_epsilon}</param>
+          <param name="mock_grippers">${mock_grippers}</param>
           <param name="connect_timeout_ms">1500</param>
           <param name="state_timeout_ms">8000</param>
           <param name="activation_retry_settle_ms">2000</param>
@@ -43,9 +45,6 @@
           <param name="home_position_L">1.16 -1.28 -1.5707963 -1.25 0 0 0</param>
           <param name="home_position_R">-1.16 -1.28 1.5707963 -1.25 0 0 0</param>
 
-          <!-- Workspace z-floor safety check (optional, remove to disable) -->
-          <param name="workspace_z_min">0.0</param>
-          <param name="workspace_safety_margin">0.06</param>
           <param name="mount_xyz_L">$(arg left_xyz)</param>
           <param name="mount_rpy_L">$(arg left_rpy)</param>
           <param name="mount_xyz_R">$(arg right_xyz)</param>
@@ -72,10 +71,6 @@
           <param name="collision_guard_gripper_height_slope_m">-0.03</param>
           <param name="collision_guard_gripper_radius_intercept_m">0.0425</param>
           <param name="collision_guard_gripper_radius_slope_m">0.0575</param>
-          <xacro:if value="${str(use_gripper_L).lower() == 'true' or str(use_gripper_R).lower() == 'true'}">
-            <!-- Gripper tip in Link7 frame: flange 9.5cm + finger 15cm = 24.5cm along -Y_link7 -->
-            <param name="tool_offset">0 -0.245 0</param>
-          </xacro:if>
         </xacro:unless>
       </hardware>
 

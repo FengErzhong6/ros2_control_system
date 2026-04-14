@@ -23,6 +23,7 @@ class SupervisorConfig:
     trackers_config: Optional[Path]
     manus_config: Optional[Path]
     manus_user_name: Optional[str]
+    marvin_mock_grippers: bool = False
 
 
 @dataclass(frozen=True)

@@ -2,6 +2,7 @@
 #include "marvin_system/MarvinSDK.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -56,6 +57,25 @@ double param_double(const std::unordered_map<std::string, std::string> &m,
     } catch (...) {
         return def;
     }
+}
+
+bool param_bool(const std::unordered_map<std::string, std::string> &m,
+                const std::string &key, bool def)
+{
+    const auto it = m.find(key);
+    if (it == m.end()) return def;
+
+    std::string value = it->second;
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (value == "true" || value == "1" || value == "yes" || value == "on") {
+        return true;
+    }
+    if (value == "false" || value == "0" || value == "no" || value == "off") {
+        return false;
+    }
+    return def;
 }
 
 double clamp_unit(double value)
@@ -207,6 +227,10 @@ void MarvinHardware::collision_guard_worker_loop()
 
         const JointArray current_deg = load_snapshot(current_feedback_deg_);
         const JointArray desired_deg = load_snapshot(collision_guard_target_deg_);
+        const bool approved_snapshot_valid =
+            collision_guard_approved_valid_.load(std::memory_order_relaxed);
+        const JointArray approved_base_deg =
+            approved_snapshot_valid ? load_snapshot(collision_guard_approved_deg_) : current_deg;
         JointArray approved_deg = desired_deg;
 
         std::array<double, CollisionGuard::kGripperCount> gripper_percent{{0.0, 0.0}};
@@ -245,48 +269,32 @@ void MarvinHardware::collision_guard_worker_loop()
 
         if (!evaluation.safe) {
             const double combined_alpha = std::clamp(evaluation.max_safe_alpha, 0.0, 1.0);
-            approved_deg = apply_alpha(current_deg, desired_deg, combined_alpha, combined_alpha);
-
-            JointArray left_only = current_deg;
-            left_only[0] = desired_deg[0];
-            const auto left_evaluation =
-                collision_guard_.evaluate_motion(current_deg, left_only, gripper_percent, gripper_valid, get_logger());
-
-            JointArray right_only = current_deg;
-            right_only[1] = desired_deg[1];
-            const auto right_evaluation =
-                collision_guard_.evaluate_motion(current_deg, right_only, gripper_percent, gripper_valid, get_logger());
-
-            const double left_alpha =
-                left_evaluation.ready ? std::clamp(left_evaluation.max_safe_alpha, 0.0, 1.0) : 0.0;
-            const double right_alpha =
-                right_evaluation.ready ? std::clamp(right_evaluation.max_safe_alpha, 0.0, 1.0) : 0.0;
-            const JointArray decoupled_candidate =
-                apply_alpha(current_deg, desired_deg, left_alpha, right_alpha);
-            const auto decoupled_evaluation = collision_guard_.evaluate_motion(
-                current_deg, decoupled_candidate, gripper_percent, gripper_valid, get_logger());
-
-            if (decoupled_evaluation.ready) {
-                const double decoupled_alpha =
-                    std::clamp(decoupled_evaluation.max_safe_alpha, 0.0, 1.0);
-                if (decoupled_evaluation.safe ||
-                    decoupled_alpha > combined_alpha + 1.0e-6 ||
-                    (left_alpha > combined_alpha + 1.0e-6) ||
-                    (right_alpha > combined_alpha + 1.0e-6)) {
-                    approved_deg = apply_alpha(current_deg, decoupled_candidate, decoupled_alpha, decoupled_alpha);
-                }
+            double left_alpha = combined_alpha;
+            double right_alpha = combined_alpha;
+            const bool single_arm_environment_case =
+                evaluation.environment_pair &&
+                (evaluation.affect_left != evaluation.affect_right);
+            if (single_arm_environment_case) {
+                left_alpha = evaluation.affect_left ? combined_alpha : 1.0;
+                right_alpha = evaluation.affect_right ? combined_alpha : 1.0;
             }
+            approved_deg = apply_alpha(approved_base_deg, desired_deg, left_alpha, right_alpha);
 
             ++block_streak;
             if (block_streak == 1 || block_streak % 100 == 0) {
                 RCLCPP_WARN(
                     get_logger(),
                     "Collision guard blocked command path at sample %d; applying combined_alpha=%.4f "
-                    "(left_alpha=%.4f, right_alpha=%.4f, count=%d).",
+                    "(left_alpha=%.4f, right_alpha=%.4f, current_distance=%.4f m, "
+                    "best_distance=%.4f m, pair=%s, mode=%s, count=%d).",
                     evaluation.blocking_sample,
                     combined_alpha,
                     left_alpha,
                     right_alpha,
+                    evaluation.current_distance_m,
+                    evaluation.best_distance_m,
+                    evaluation.current_pair.empty() ? "unknown" : evaluation.current_pair.c_str(),
+                    single_arm_environment_case ? "single_arm_environment" : "combined",
                     block_streak);
             }
         } else if (block_streak > 0) {
@@ -313,6 +321,21 @@ void MarvinHardware::start_gripper_worker()
 {
     stop_gripper_worker();
     if (gripper_count_ == 0) {
+        return;
+    }
+
+    bool has_real_gripper = false;
+    for (size_t g = 0; g < gripper_count_; ++g) {
+        if (grippers_[g].device != nullptr) {
+            has_real_gripper = true;
+            break;
+        }
+    }
+    if (!has_real_gripper) {
+        RCLCPP_INFO(
+            get_logger(),
+            "Gripper hardware is mocked for %zu gripper(s); worker thread not started.",
+            gripper_count_);
         return;
     }
 
@@ -344,12 +367,21 @@ void MarvinHardware::gripper_worker_loop()
         const auto now = Clock::now();
         for (size_t g = 0; g < gripper_count_; ++g) {
             auto &slot = grippers_[g];
+            const double desired =
+                clamp_unit(slot.command_target_percent.load(std::memory_order_relaxed));
+            if (slot.mock) {
+                slot.state_percent.store(desired, std::memory_order_relaxed);
+                slot.state_valid.store(true, std::memory_order_relaxed);
+                slot.has_sent_command = true;
+                slot.last_command_percent = desired;
+                slot.last_command_time = now;
+                slot.consecutive_send_failures = 0;
+                continue;
+            }
             if (!slot.device) {
                 continue;
             }
 
-            const double desired =
-                clamp_unit(slot.command_target_percent.load(std::memory_order_relaxed));
             const double observed =
                 clamp_unit(static_cast<double>(slot.device->get_position_percent()));
             slot.state_percent.store(observed, std::memory_order_relaxed);
@@ -602,6 +634,16 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
     collision_guard_.disarm();
     current_feedback_valid_.store(false, std::memory_order_relaxed);
     collision_guard_approved_valid_.store(false, std::memory_order_relaxed);
+    mock_grippers_ = false;
+    for (auto &slot : grippers_) {
+        slot.mock = false;
+        slot.command_target_percent.store(0.0, std::memory_order_relaxed);
+        slot.state_percent.store(0.0, std::memory_order_relaxed);
+        slot.state_valid.store(false, std::memory_order_relaxed);
+        slot.has_sent_command = false;
+        slot.last_command_percent = 0.0;
+        slot.consecutive_send_failures = 0;
+    }
     const auto &p = info_.hardware_parameters;
 
     joint_vel_ratio_     = param_int(p, "joint_vel_ratio",     30,   1, 100);
@@ -612,6 +654,7 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
         p, "gripper_command_rate_hz", 50.0, 1.0, 1000.0);
     gripper_command_epsilon_ = param_double(
         p, "gripper_command_epsilon", 1.0e-3, 0.0, 1.0);
+    mock_grippers_ = param_bool(p, "mock_grippers", false);
     connect_timeout_ms_ = param_int(p, "connect_timeout_ms", 1500, 100, 30000);
     state_timeout_ms_ = param_int(p, "state_timeout_ms", 8000, 100, 30000);
     activation_retry_settle_ms_ = param_int(
@@ -697,6 +740,21 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
     for (size_t g = 0; g < gripper_count_; ++g) {
         auto &slot = grippers_[g];
         const auto &jn = info_.joints[slot.joint_index].name;
+        slot.mock = mock_grippers_;
+
+        if (slot.mock) {
+            slot.command_target_percent.store(0.0, std::memory_order_relaxed);
+            slot.state_percent.store(0.0, std::memory_order_relaxed);
+            slot.state_valid.store(true, std::memory_order_relaxed);
+            slot.has_sent_command = false;
+            slot.last_command_percent = 0.0;
+            slot.consecutive_send_failures = 0;
+            RCLCPP_WARN(
+                get_logger(),
+                "Gripper '%s' hardware is mocked; skipping physical connection.",
+                jn.c_str());
+            continue;
+        }
 
         slot.device = omnipicker_create();
         auto err = slot.device->connect(slot.arm_side, slot.can_node_id,
@@ -772,13 +830,14 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
     RCLCPP_INFO(get_logger(),
                 "Configured dual-arm system (joint_vel=%d%%, joint_acc=%d%%, "
                 "gripper_velocity=%d, gripper_acceleration=%d, grippers=%zu, "
-                "collision_guard=%s).",
+                "collision_guard=%s, mock_grippers=%s).",
                 joint_vel_ratio_,
                 joint_acc_ratio_,
                 gripper_velocity_,
                 gripper_acceleration_,
                 gripper_count_,
-                collision_guard_.active() ? "active" : (collision_guard_.enabled() ? "configured" : "off"));
+                collision_guard_.active() ? "active" : (collision_guard_.enabled() ? "configured" : "off"),
+                mock_grippers_ ? "on" : "off");
     return hardware_interface::CallbackReturn::SUCCESS;
 }
 
@@ -955,6 +1014,9 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
             if (OnGetBuf(&dcss)) {
+                // Do not refresh hold_a/hold_b here: if the arm is sagging while
+                // switching into position mode, following the latest feedback would
+                // turn that sag into the new commanded hold target.
                 for (size_t arm = 0; arm < kArmCount; ++arm) {
                     const auto &state = dcss.m_State[arm];
                     if (!has_status_snapshot[arm] ||
@@ -971,8 +1033,6 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
                         last_err_code[arm] = state.m_ERRCode;
                     }
                 }
-
-                refresh_hold_positions();
 
                 if (!arm_a_ready) {
                     const auto &state = dcss.m_State[0];
@@ -1034,6 +1094,12 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
         if (mode_switch_succeeded) {
             const auto stability_deadline = Clock::now() + kPostActivationStability;
             while (Clock::now() < stability_deadline) {
+                if (!request_position_mode(false, false)) {
+                    RCLCPP_ERROR(
+                        get_logger(),
+                        "Failed to maintain hold-position command during activation stability check.");
+                    return hardware_interface::CallbackReturn::ERROR;
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 if (!OnGetBuf(&dcss)) {
                     RCLCPP_ERROR(get_logger(), "OnGetBuf failed during activation stability check.");
@@ -1070,6 +1136,12 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
             const auto frame_deadline =
                 Clock::now() + std::chrono::milliseconds(activation_frame_timeout_ms);
             while (!(frame_advanced[0] && frame_advanced[1])) {
+                if (!request_position_mode(false, false)) {
+                    RCLCPP_ERROR(
+                        get_logger(),
+                        "Failed to maintain hold-position command during activation frame-progress check.");
+                    return hardware_interface::CallbackReturn::ERROR;
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 if (!OnGetBuf(&dcss)) {
                     RCLCPP_ERROR(
@@ -1142,7 +1214,6 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
                     RCLCPP_ERROR(get_logger(), "OnGetBuf failed before activation retry.");
                     return hardware_interface::CallbackReturn::ERROR;
                 }
-                refresh_hold_positions();
                 continue;
             }
         }
@@ -1307,15 +1378,23 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
         auto &slot = grippers_[g];
         const auto &jn = info_.joints[slot.joint_index].name;
 
-        omnipicker::GripperStatus gst;
-        auto err = slot.device->query_states(gst);
         double init_pos = 0.0;
-        if (err == omnipicker::ErrorCode::kOK && gst.valid) {
-            init_pos = static_cast<double>(gst.position) / 255.0;
+        if (slot.mock || !slot.device) {
+            init_pos = clamp_unit(slot.command_target_percent.load(std::memory_order_relaxed));
+            RCLCPP_INFO(get_logger(), "Gripper '%s' ready in mock mode (pos=%.1f%%).",
+                        jn.c_str(), init_pos * 100.0);
         } else {
-            RCLCPP_WARN(get_logger(),
-                "Gripper '%s' initial query returned %s; defaulting to 0.0.",
-                jn.c_str(), omnipicker::error_to_string(err));
+            omnipicker::GripperStatus gst;
+            auto err = slot.device->query_states(gst);
+            if (err == omnipicker::ErrorCode::kOK && gst.valid) {
+                init_pos = static_cast<double>(gst.position) / 255.0;
+            } else {
+                RCLCPP_WARN(get_logger(),
+                    "Gripper '%s' initial query returned %s; defaulting to 0.0.",
+                    jn.c_str(), omnipicker::error_to_string(err));
+            }
+            RCLCPP_INFO(get_logger(), "Gripper '%s' ready (pos=%.1f%%).",
+                        jn.c_str(), init_pos * 100.0);
         }
         set_state(pos_if(jn), init_pos);
         set_command(pos_if(jn), init_pos);
@@ -1326,8 +1405,99 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
         slot.last_command_percent = init_pos;
         slot.last_command_time = Clock::now();
         slot.consecutive_send_failures = 0;
-        RCLCPP_INFO(get_logger(), "Gripper '%s' ready (pos=%.1f%%).",
-                     jn.c_str(), init_pos * 100.0);
+    }
+
+    auto evaluate_activation_collision_clearance =
+        [this, &dcss]() -> std::optional<CollisionGuard::Evaluation> {
+        if (!collision_guard_.enabled() || !collision_guard_.ready()) {
+            return std::nullopt;
+        }
+
+        std::array<std::array<double, kJointsPerArm>, kArmCount> current_deg{};
+        for (size_t arm = 0; arm < kArmCount; ++arm) {
+            for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+                current_deg[arm][joint] =
+                    static_cast<double>(dcss.m_Out[arm].m_FB_Joint_PosE[joint]);
+            }
+        }
+
+        std::array<double, CollisionGuard::kGripperCount> gripper_percent{{0.0, 0.0}};
+        std::array<bool, CollisionGuard::kGripperCount> gripper_valid{{false, false}};
+        for (size_t g = 0; g < gripper_count_ && g < CollisionGuard::kGripperCount; ++g) {
+            gripper_percent[g] = grippers_[g].state_percent.load(std::memory_order_relaxed);
+            gripper_valid[g] = grippers_[g].state_valid.load(std::memory_order_relaxed);
+        }
+
+        const bool was_armed = collision_guard_.armed();
+        if (!was_armed) {
+            collision_guard_.arm();
+        }
+        const auto evaluation = collision_guard_.evaluate_motion(
+            current_deg, current_deg, gripper_percent, gripper_valid, get_logger());
+        if (!was_armed) {
+            collision_guard_.disarm();
+        }
+        return evaluation;
+    };
+
+    if (const auto evaluation = evaluate_activation_collision_clearance()) {
+        if (evaluation->current_distance_m <= collision_guard_.hard_collision_distance_m()) {
+            constexpr auto kActivationCollisionRecoveryTimeout = std::chrono::milliseconds(1500);
+            constexpr auto kActivationCollisionRecoveryStep = std::chrono::milliseconds(20);
+            RCLCPP_ERROR(
+                get_logger(),
+                "Activation starts inside hard collision band (distance=%.4f m <= %.4f m). "
+                "Holding current joint targets before allowing controllers to start.",
+                evaluation->current_distance_m,
+                collision_guard_.hard_collision_distance_m());
+
+            const auto recovery_deadline = Clock::now() + kActivationCollisionRecoveryTimeout;
+            auto latest_evaluation = *evaluation;
+            while (Clock::now() < recovery_deadline) {
+                if (!request_position_mode(false, false)) {
+                    RCLCPP_ERROR(
+                        get_logger(),
+                        "Failed to resend hold-position command while recovering from startup collision.");
+                    return hardware_interface::CallbackReturn::ERROR;
+                }
+                std::this_thread::sleep_for(kActivationCollisionRecoveryStep);
+                if (!OnGetBuf(&dcss)) {
+                    RCLCPP_ERROR(
+                        get_logger(),
+                        "OnGetBuf failed while verifying startup collision recovery.");
+                    return hardware_interface::CallbackReturn::ERROR;
+                }
+                if (const auto refreshed = evaluate_activation_collision_clearance()) {
+                    latest_evaluation = *refreshed;
+                    if (latest_evaluation.current_distance_m >
+                        collision_guard_.hard_collision_distance_m() +
+                            collision_guard_.escape_min_distance_improvement_m()) {
+                        break;
+                    }
+                }
+            }
+
+            if (latest_evaluation.current_distance_m <= collision_guard_.hard_collision_distance_m()) {
+                RCLCPP_ERROR(
+                    get_logger(),
+                    "Refusing to finish activation because startup clearance is still inside "
+                    "the hard collision band (distance=%.4f m, hard=%.4f m).",
+                    latest_evaluation.current_distance_m,
+                    collision_guard_.hard_collision_distance_m());
+                return hardware_interface::CallbackReturn::ERROR;
+            }
+
+            RCLCPP_WARN(
+                get_logger(),
+                "Startup collision clearance recovered to %.4f m before controller activation.",
+                latest_evaluation.current_distance_m);
+        } else if (evaluation->current_distance_m < collision_guard_.near_distance_m()) {
+            RCLCPP_WARN(
+                get_logger(),
+                "Activation starts inside the near-collision band (distance=%.4f m, near=%.4f m).",
+                evaluation->current_distance_m,
+                collision_guard_.near_distance_m());
+        }
     }
 
     consecutive_write_failures_ = 0;
@@ -1595,6 +1765,24 @@ hardware_interface::return_type MarvinHardware::write(
         workspace_guard_.filter(1, cmd_b, get_logger());
     }
 
+    // Hand gripper targets to the non-realtime worker to keep SDK I/O out of the control loop.
+    for (size_t g = 0; g < gripper_count_; ++g) {
+        auto &slot = grippers_[g];
+        const auto &jn = info_.joints[slot.joint_index].name;
+        const double cmd = get_command<double>(pos_if(jn));
+        if (!std::isfinite(cmd)) {
+            RCLCPP_ERROR(get_logger(), "Non-finite command on gripper '%s'.", jn.c_str());
+            return hardware_interface::return_type::ERROR;
+        }
+
+        const double clamped = std::clamp(cmd, 0.0, 1.0);
+        slot.command_target_percent.store(clamped, std::memory_order_relaxed);
+        if (slot.mock) {
+            slot.state_percent.store(clamped, std::memory_order_relaxed);
+            slot.state_valid.store(true, std::memory_order_relaxed);
+        }
+    }
+
     // Single atomic send: ClearSet → set A → set B → Send
     OnClearSet();
     const bool ok = OnSetJointCmdPos_A(cmd_a)
@@ -1626,20 +1814,6 @@ hardware_interface::return_type MarvinHardware::write(
             5000,
             "Collision guard is active but no approved command is available yet; "
             "falling back to direct command output for this cycle.");
-    }
-
-    // Hand gripper targets to the non-realtime worker to keep SDK I/O out of the control loop.
-    for (size_t g = 0; g < gripper_count_; ++g) {
-        auto &slot = grippers_[g];
-        const auto &jn = info_.joints[slot.joint_index].name;
-        const double cmd = get_command<double>(pos_if(jn));
-        if (!std::isfinite(cmd)) {
-            RCLCPP_ERROR(get_logger(), "Non-finite command on gripper '%s'.", jn.c_str());
-            return hardware_interface::return_type::ERROR;
-        }
-
-        slot.command_target_percent.store(
-            std::clamp(cmd, 0.0, 1.0), std::memory_order_relaxed);
     }
 
     return hardware_interface::return_type::OK;

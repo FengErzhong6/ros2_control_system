@@ -5,6 +5,7 @@ from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -42,6 +43,10 @@ def generate_launch_description():
                 "trackers_config": LaunchConfiguration("trackers_config"),
                 "manus_config": LaunchConfiguration("manus_config"),
                 "manus_user_name": LaunchConfiguration("manus_user_name"),
+                "marvin_mock_grippers": ParameterValue(
+                    LaunchConfiguration("marvin_mock_grippers"),
+                    value_type=bool,
+                ),
             }
         ],
     )
@@ -73,6 +78,7 @@ def generate_launch_description():
             DeclareLaunchArgument("trackers_config", default_value=default_trackers_config),
             DeclareLaunchArgument("manus_config", default_value=default_manus_config),
             DeclareLaunchArgument("manus_user_name", default_value=""),
+            DeclareLaunchArgument("marvin_mock_grippers", default_value="false"),
             DeclareLaunchArgument("startup_policy_config", default_value=default_startup_policy),
             DeclareLaunchArgument("fault_policy_config", default_value=default_fault_policy),
             DeclareLaunchArgument("ui_config", default_value=default_ui_config),

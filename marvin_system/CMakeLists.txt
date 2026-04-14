@@ -200,17 +200,20 @@ target_include_directories(motion_server PRIVATE
   ${PROJECT_SOURCE_DIR}/hardware/include
 )
 ament_target_dependencies(motion_server
+  control_msgs
   controller_manager_msgs
   geometry_msgs
   moveit_core
   moveit_msgs
   moveit_ros_planning_interface
   rclcpp
+  rclcpp_action
   sensor_msgs
   shape_msgs
   std_msgs
   std_srvs
   tf2_ros
+  trajectory_msgs
 )
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 target_link_libraries(motion_server "${cpp_typesupport_target}")

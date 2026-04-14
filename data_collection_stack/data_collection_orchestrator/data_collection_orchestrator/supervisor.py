@@ -49,6 +49,14 @@ def _optional_text(raw_value: str) -> Optional[str]:
     return value
 
 
+def _coerce_bool(raw_value: object) -> bool:
+    if isinstance(raw_value, bool):
+        return raw_value
+    if isinstance(raw_value, str):
+        return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(raw_value)
+
+
 def _load_yaml_map(path: Path | None) -> dict:
     if path is None or not path.exists():
         return {}
@@ -147,6 +155,7 @@ class DataCollectionSupervisor(Node):
         self.declare_parameter("trackers_config", "")
         self.declare_parameter("manus_config", "")
         self.declare_parameter("manus_user_name", "")
+        self.declare_parameter("marvin_mock_grippers", False)
 
         return SupervisorConfig(
             recipe_id=self.get_parameter("recipe_id").value,
@@ -161,6 +170,9 @@ class DataCollectionSupervisor(Node):
             trackers_config=_optional_path(self.get_parameter("trackers_config").value),
             manus_config=_optional_path(self.get_parameter("manus_config").value),
             manus_user_name=_optional_text(self.get_parameter("manus_user_name").value),
+            marvin_mock_grippers=_coerce_bool(
+                self.get_parameter("marvin_mock_grippers").value
+            ),
         )
 
     def _load_startup_policy(self) -> StartupPolicy:
@@ -293,6 +305,8 @@ class DataCollectionSupervisor(Node):
                 launch_arguments.setdefault("cameras_config", str(self._config.cameras_config))
             if self._config.trackers_config is not None:
                 launch_arguments.setdefault("trackers_config", str(self._config.trackers_config))
+            if self._config.marvin_mock_grippers:
+                launch_arguments.setdefault("mock_grippers", True)
             if launch_arguments:
                 config["launch_arguments"] = launch_arguments
 

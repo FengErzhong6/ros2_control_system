@@ -487,6 +487,23 @@ CollisionGuard::Evaluation CollisionGuard::evaluate_motion(
     struct StateCheck {
         bool safe{true};
         double distance{std::numeric_limits<double>::max()};
+        std::string pair_summary;
+        bool environment_pair{false};
+        bool affect_left{false};
+        bool affect_right{false};
+    };
+
+    auto mark_affected_arms = [](const std::string &a, const std::string &b, StateCheck &check) {
+        if (a.find("_L") != std::string::npos || b.find("_L") != std::string::npos) {
+            check.affect_left = true;
+        }
+        if (a.find("_R") != std::string::npos || b.find("_R") != std::string::npos) {
+            check.affect_right = true;
+        }
+        if (!check.affect_left && !check.affect_right) {
+            check.affect_left = true;
+            check.affect_right = true;
+        }
     };
 
     auto evaluate_state_at = [&](double alpha) {
@@ -550,7 +567,7 @@ CollisionGuard::Evaluation CollisionGuard::evaluate_motion(
             }
 
             if (!impl_->planning_scene_->processAttachedCollisionObjectMsg(attached)) {
-                return StateCheck{false, -std::numeric_limits<double>::max()};
+                return StateCheck{false, -std::numeric_limits<double>::max(), ""};
             }
         }
 
@@ -559,44 +576,114 @@ CollisionGuard::Evaluation CollisionGuard::evaluate_motion(
         request.pad_environment_collisions = false;
         request.pad_self_collisions = false;
         request.distance = true;
-        collision_detection::CollisionResult result;
-        impl_->planning_scene_->checkCollision(request, result, state);
+        request.detailed_distance = true;
+        collision_detection::CollisionResult env_result;
+        impl_->planning_scene_->getCollisionEnv()->checkRobotCollision(
+            request,
+            env_result,
+            state,
+            impl_->planning_scene_->getAllowedCollisionMatrix());
+        collision_detection::CollisionResult self_result;
+        impl_->planning_scene_->checkSelfCollision(
+            request,
+            self_result,
+            state,
+            impl_->planning_scene_->getAllowedCollisionMatrix());
         StateCheck check;
-        check.safe = !result.collision;
-        check.distance = std::isfinite(result.distance)
-                             ? result.distance
-                             : (result.collision ? -std::numeric_limits<double>::max()
-                                                 : std::numeric_limits<double>::max());
+        if (self_result.collision) {
+            check.safe = false;
+            check.distance = -std::numeric_limits<double>::max();
+            if (!self_result.contacts.empty()) {
+                const auto &pair = self_result.contacts.begin()->first;
+                check.pair_summary = pair.first + " - " + pair.second + " (self)";
+                mark_affected_arms(pair.first, pair.second, check);
+            } else if (!self_result.distance_result.minimum_distance.link_names[0].empty() &&
+                       !self_result.distance_result.minimum_distance.link_names[1].empty()) {
+                check.pair_summary =
+                    self_result.distance_result.minimum_distance.link_names[0] + " - " +
+                    self_result.distance_result.minimum_distance.link_names[1] + " (self)";
+                mark_affected_arms(
+                    self_result.distance_result.minimum_distance.link_names[0],
+                    self_result.distance_result.minimum_distance.link_names[1],
+                    check);
+            } else {
+                check.pair_summary = "self collision";
+                check.affect_left = true;
+                check.affect_right = true;
+            }
+            return check;
+        }
+
+        check.safe = !env_result.collision;
+        const auto &min_env = env_result.distance_result.minimum_distance;
+        check.environment_pair = true;
+        check.distance = std::isfinite(min_env.distance)
+                             ? min_env.distance
+                             : (env_result.collision ? -std::numeric_limits<double>::max()
+                                                     : std::numeric_limits<double>::max());
+        if (!min_env.link_names[0].empty() && !min_env.link_names[1].empty()) {
+            check.pair_summary = min_env.link_names[0] + " - " + min_env.link_names[1];
+            mark_affected_arms(min_env.link_names[0], min_env.link_names[1], check);
+        } else if (!env_result.contacts.empty()) {
+            const auto &pair = env_result.contacts.begin()->first;
+            check.pair_summary = pair.first + " - " + pair.second;
+            mark_affected_arms(pair.first, pair.second, check);
+        }
         return check;
+    };
+
+    auto alpha_from_distance = [this](double distance) {
+        if (distance <= hard_collision_distance_m_) {
+            return 0.0;
+        }
+        if (distance >= near_distance_m_) {
+            return 1.0;
+        }
+        const double denom = std::max(1.0e-9, near_distance_m_ - hard_collision_distance_m_);
+        return std::clamp(
+            (distance - hard_collision_distance_m_) / denom,
+            0.0,
+            1.0);
     };
 
     const int samples = std::max(1, interpolation_steps_);
     const StateCheck start_state = evaluate_state_at(0.0);
+    evaluation.current_distance_m = start_state.distance;
+    evaluation.best_distance_m = start_state.distance;
+    evaluation.current_pair = start_state.pair_summary;
+    evaluation.environment_pair = start_state.environment_pair;
+    evaluation.affect_left = start_state.affect_left;
+    evaluation.affect_right = start_state.affect_right;
+
+    // Recovery mode: if the current state is already inside the near/collision band,
+    // only allow prefixes that do not materially worsen clearance and prefer prefixes
+    // that improve distance. This keeps recovery possible while staying conservative.
     if (start_state.distance < near_distance_m_) {
-        const bool started_in_collision = start_state.distance <= hard_collision_distance_m_;
+        if (start_state.distance <= hard_collision_distance_m_) {
+            evaluation.max_safe_alpha = 0.0;
+            evaluation.blocking_sample = 0;
+            evaluation.safe = false;
+            evaluation.best_distance_m = start_state.distance;
+            return evaluation;
+        }
+
         double best_alpha = 0.0;
         double best_distance = start_state.distance;
         for (int sample = 1; sample <= samples; ++sample) {
             const double alpha = static_cast<double>(sample) / static_cast<double>(samples);
             const StateCheck candidate = evaluate_state_at(alpha);
 
-            if (!started_in_collision &&
-                candidate.distance <= hard_collision_distance_m_) {
-                break;
-            }
-
-            // Allow leaving the near/collision band only if distance does not get
-            // materially worse than the current state.
             if (candidate.distance <
                 start_state.distance - escape_min_distance_improvement_m_) {
                 break;
             }
 
-            if (candidate.distance >
-                    best_distance + escape_min_distance_improvement_m_ ||
-                (candidate.distance >=
-                     best_distance - escape_min_distance_improvement_m_ &&
-                 alpha > best_alpha)) {
+            // When already inside the near band, do not "creep" around the
+            // boundary. Only allow motion if a sampled prefix actually exits the
+            // near band; otherwise hold and let explicit recovery / go_home take over.
+            if (candidate.distance >= near_distance_m_ &&
+                candidate.distance >
+                    best_distance + escape_min_distance_improvement_m_) {
                 best_distance = candidate.distance;
                 best_alpha = alpha;
             }
@@ -605,13 +692,16 @@ CollisionGuard::Evaluation CollisionGuard::evaluate_motion(
         evaluation.max_safe_alpha = best_alpha;
         evaluation.blocking_sample = 0;
         evaluation.safe = best_alpha >= 1.0 - 1.0e-6;
+        evaluation.best_distance_m = best_distance;
         return evaluation;
     }
 
     double last_safe_alpha = 0.0;
     for (int sample = 1; sample <= samples; ++sample) {
         const double alpha = static_cast<double>(sample) / static_cast<double>(samples);
-        if (evaluate_state_at(alpha).distance >= near_distance_m_) {
+        const StateCheck candidate = evaluate_state_at(alpha);
+        const double allowed_alpha = alpha_from_distance(candidate.distance);
+        if (alpha <= allowed_alpha + 1.0e-6) {
             last_safe_alpha = alpha;
             continue;
         }
@@ -619,25 +709,36 @@ CollisionGuard::Evaluation CollisionGuard::evaluate_motion(
         evaluation.safe = false;
         evaluation.blocking_sample = sample;
         evaluation.max_safe_alpha = last_safe_alpha;
+        evaluation.best_distance_m = std::max(start_state.distance, candidate.distance);
+        evaluation.current_pair = candidate.pair_summary.empty() ? start_state.pair_summary : candidate.pair_summary;
+        evaluation.environment_pair = candidate.environment_pair;
+        evaluation.affect_left = candidate.affect_left;
+        evaluation.affect_right = candidate.affect_right;
 
         if (binary_search_steps_ > 0) {
             double low = last_safe_alpha;
             double high = alpha;
+            double low_distance = start_state.distance;
             for (int step = 0; step < binary_search_steps_; ++step) {
                 const double mid = 0.5 * (low + high);
-                if (evaluate_state_at(mid).distance >= near_distance_m_) {
+                const StateCheck mid_candidate = evaluate_state_at(mid);
+                const double mid_allowed_alpha = alpha_from_distance(mid_candidate.distance);
+                if (mid <= mid_allowed_alpha + 1.0e-6) {
                     low = mid;
+                    low_distance = mid_candidate.distance;
                 } else {
                     high = mid;
                 }
             }
             evaluation.max_safe_alpha = low;
+            evaluation.best_distance_m = low_distance;
         }
         return evaluation;
     }
 
     evaluation.safe = true;
     evaluation.max_safe_alpha = 1.0;
+    evaluation.best_distance_m = start_state.distance;
     return evaluation;
 }
 

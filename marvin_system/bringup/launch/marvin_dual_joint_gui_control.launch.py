@@ -79,6 +79,10 @@ def generate_launch_description():
             description="Enable OmniPicker gripper on right arm.",
         ),
         DeclareLaunchArgument(
+            "mock_grippers", default_value="false",
+            description="Keep gripper joints/collision geometry but skip physical gripper hardware.",
+        ),
+        DeclareLaunchArgument(
             "left_xyz", default_value="0 0.037 0.3618964",
             description="Mount pose (xyz) of Base_L in world.",
         ),
@@ -95,7 +99,7 @@ def generate_launch_description():
             description="Mount pose (rpy) of Base_R in world.",
         ),
         DeclareLaunchArgument(
-            "collision_guard_enabled", default_value="false",
+            "collision_guard_enabled", default_value="true",
             description="Enable async MoveIt-backed collision guard in hardware.",
         ),
         DeclareLaunchArgument(
@@ -148,6 +152,7 @@ def launch_setup(context):
     ctrl_file_arg = LaunchConfiguration("controllers_file").perform(context)
     grip_L = LaunchConfiguration("use_gripper_L").perform(context).lower() == "true"
     grip_R = LaunchConfiguration("use_gripper_R").perform(context).lower() == "true"
+    mock_grippers = LaunchConfiguration("mock_grippers").perform(context).lower() == "true"
     left_xyz = LaunchConfiguration("left_xyz")
     left_rpy = LaunchConfiguration("left_rpy")
     right_xyz = LaunchConfiguration("right_xyz")
@@ -173,6 +178,7 @@ def launch_setup(context):
         f" use_mock_hardware:={'true' if use_mock_hardware_value else 'false'}",
         f" use_gripper_L:={'true' if grip_L else 'false'}",
         f" use_gripper_R:={'true' if grip_R else 'false'}",
+        f" mock_grippers:={'true' if mock_grippers else 'false'}",
         ' collision_guard_enabled:="', collision_guard_enabled, '"',
         ' collision_guard_check_rate_hz:="', collision_guard_check_rate_hz, '"',
         ' collision_guard_min_command_delta_deg:="', collision_guard_min_command_delta_deg, '"',
@@ -310,15 +316,7 @@ def launch_setup(context):
                 "controller_manager_list_service": "/controller_manager/list_controllers",
                 "trajectory_controller_name": "dual_arm_trajectory_controller",
                 "primary_controller_name": "forward_position_controller",
-                "workspace_guard_service_name": workspace_guard_service_name,
                 "collision_guard_service_name": collision_guard_service_name,
-                "workspace_z_min": "0.0",
-                "workspace_safety_margin": "0.06",
-                "mount_xyz_L": LaunchConfiguration("left_xyz"),
-                "mount_rpy_L": LaunchConfiguration("left_rpy"),
-                "mount_xyz_R": LaunchConfiguration("right_xyz"),
-                "mount_rpy_R": LaunchConfiguration("right_rpy"),
-                "tool_offset": "0 -0.245 0" if (grip_L or grip_R) else "",
                 "recovery_enabled": True,
                 "recovery_command_topic": "/forward_position_controller/commands",
                 "recovery_command_joint_names": joint_names,

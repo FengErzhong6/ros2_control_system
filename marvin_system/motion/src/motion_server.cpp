@@ -16,25 +16,31 @@
 #include <unordered_map>
 #include <vector>
 
+#include "control_msgs/action/follow_joint_trajectory.hpp"
 #include "controller_manager_msgs/srv/list_controllers.hpp"
 #include "controller_manager_msgs/srv/switch_controller.hpp"
 #include "geometry_msgs/msg/pose.hpp"
-#include "marvin_system/workspace_guard.hpp"
 #include "marvin_system/srv/get_motion_mode.hpp"
 #include "marvin_system/srv/get_motion_status.hpp"
 #include "marvin_system/srv/set_motion_mode.hpp"
+#include "moveit/collision_detection/collision_common.hpp"
 #include "moveit/move_group_interface/move_group_interface.hpp"
+#include "moveit/planning_scene/planning_scene.hpp"
 #include "moveit/planning_scene_interface/planning_scene_interface.hpp"
+#include "moveit/robot_model_loader/robot_model_loader.hpp"
 #include "moveit/utils/moveit_error_code.hpp"
 #include "moveit_msgs/msg/attached_collision_object.hpp"
 #include "moveit_msgs/msg/collision_object.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "rclcpp_action/rclcpp_action.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "shape_msgs/msg/solid_primitive.hpp"
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "std_srvs/srv/set_bool.hpp"
 #include "std_srvs/srv/trigger.hpp"
+#include "trajectory_msgs/msg/joint_trajectory.hpp"
+#include "trajectory_msgs/msg/joint_trajectory_point.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 
 namespace {
@@ -205,6 +211,10 @@ namespace marvin_system {
 
 class MarvinMotionServer : public rclcpp::Node {
 public:
+    using FollowJointTrajectory = control_msgs::action::FollowJointTrajectory;
+    using FollowJointTrajectoryGoalHandle =
+        rclcpp_action::ClientGoalHandle<FollowJointTrajectory>;
+
     explicit MarvinMotionServer(rclcpp::NodeOptions options)
         : rclcpp::Node(
               "marvin_motion_server",
@@ -285,8 +295,6 @@ public:
             this, "trajectory_controller_name", "dual_arm_trajectory_controller");
         primary_controller_name_ = get_param_or_declare<std::string>(
             this, "primary_controller_name", "tracker_teleop_controller");
-        workspace_guard_service_name_ = get_param_or_declare<std::string>(
-            this, "workspace_guard_service_name", "");
         collision_guard_service_name_ = get_param_or_declare<std::string>(
             this, "collision_guard_service_name", "");
         use_mock_hardware_ = get_param_or_declare<bool>(this, "use_mock_hardware", false);
@@ -338,20 +346,6 @@ public:
             this, "recovery_min_improvement_m", 0.002);
         recovery_max_drop_m_ = get_param_or_declare<double>(
             this, "recovery_max_drop_m", 0.0005);
-        workspace_z_min_param_ = get_param_or_declare<std::string>(
-            this, "workspace_z_min", "");
-        workspace_safety_margin_param_ = get_param_or_declare<std::string>(
-            this, "workspace_safety_margin", "0.06");
-        mount_xyz_l_param_ = get_param_or_declare<std::string>(
-            this, "mount_xyz_L", "0 0.037 0.3618964");
-        mount_rpy_l_param_ = get_param_or_declare<std::string>(
-            this, "mount_rpy_L", "-1.5707963 0 0");
-        mount_xyz_r_param_ = get_param_or_declare<std::string>(
-            this, "mount_xyz_R", "0 -0.037 0.3618964");
-        mount_rpy_r_param_ = get_param_or_declare<std::string>(
-            this, "mount_rpy_R", "1.5707963 0 0");
-        tool_offset_param_ = get_param_or_declare<std::string>(
-            this, "tool_offset", "");
         teleop_services_configured_ = !tracker_set_armed_service_.empty() &&
                                       !tracker_set_enabled_service_.empty();
         teleop_state_feedback_configured_ = !teleop_state_topic_.empty();
@@ -382,12 +376,6 @@ public:
                 controller_manager_list_service_,
                 rclcpp::ServicesQoS(),
                 callback_group_);
-        if (!workspace_guard_service_name_.empty()) {
-            workspace_guard_client_ = this->create_client<std_srvs::srv::SetBool>(
-                workspace_guard_service_name_,
-                rclcpp::ServicesQoS(),
-                callback_group_);
-        }
         if (!collision_guard_service_name_.empty()) {
             collision_guard_client_ = this->create_client<std_srvs::srv::SetBool>(
                 collision_guard_service_name_,
@@ -420,21 +408,6 @@ public:
             kGripperCollisionSyncPeriod,
             std::bind(&MarvinMotionServer::handle_gripper_collision_timer, this),
             callback_group_);
-
-        if (!workspace_z_min_param_.empty()) {
-            std::unordered_map<std::string, std::string> workspace_params;
-            workspace_params["workspace_z_min"] = workspace_z_min_param_;
-            workspace_params["workspace_safety_margin"] = workspace_safety_margin_param_;
-            workspace_params["mount_xyz_L"] = mount_xyz_l_param_;
-            workspace_params["mount_rpy_L"] = mount_rpy_l_param_;
-            workspace_params["mount_xyz_R"] = mount_xyz_r_param_;
-            workspace_params["mount_rpy_R"] = mount_rpy_r_param_;
-            if (!tool_offset_param_.empty()) {
-                workspace_params["tool_offset"] = tool_offset_param_;
-            }
-            recovery_workspace_guard_configured_ =
-                recovery_workspace_guard_.configure(workspace_params, get_logger());
-        }
 
         go_home_service_ = this->create_service<std_srvs::srv::Trigger>(
             go_home_service_name_,
@@ -487,7 +460,7 @@ public:
             "Motion layer ready. backend=%s go_home=%s set_mode=%s set_enabled=%s "
             "legacy_fallback=%s return_mode=%s planning_group=%s execute=%s "
             "initial_mode=%s teleop_services=%s primary_controller=%s trajectory_controller=%s "
-            "workspace_guard_service=%s collision_guard_service=%s go_home_sequence=%zu recovery=%s recovery_topic=%s scene_objects=%zu",
+            "collision_guard_service=%s go_home_sequence=%zu recovery=%s recovery_topic=%s scene_objects=%zu",
             backend_.c_str(),
             go_home_service_name_.c_str(),
             set_mode_service_name_.c_str(),
@@ -500,10 +473,9 @@ public:
             to_bool_string(teleop_services_configured_).c_str(),
             primary_controller_name_.c_str(),
             trajectory_controller_name_.c_str(),
-            workspace_guard_service_name_.c_str(),
             collision_guard_service_name_.c_str(),
             go_home_pose_sequence_.size(),
-            to_bool_string(recovery_enabled_ && recovery_workspace_guard_configured_).c_str(),
+            to_bool_string(recovery_enabled_).c_str(),
             recovery_command_topic_.c_str(),
             count_scene_objects());
     }
@@ -544,13 +516,6 @@ private:
         bool motion_busy{false};
         bool controller_interlock_ok{true};
         std::string message;
-    };
-
-    struct RecoveryCandidate {
-        std::array<std::array<double, kJointsPerArm>, 2> joints_deg{};
-        marvin_system::WorkspaceGuard::Evaluation evaluation{};
-        double movement_cost{0.0};
-        bool valid{false};
     };
 
     std::vector<double> get_named_pose_values(const std::string &pose_id, const std::string &side) const
@@ -641,6 +606,21 @@ private:
         return true;
     }
 
+    struct EscapeCollisionEvaluation {
+        bool safe{true};
+        bool collision{false};
+        double distance{std::numeric_limits<double>::max()};
+        std::string contact_pair;
+        std::array<bool, 2> arm_involved{{false, false}};
+    };
+
+    struct EscapeCandidate {
+        bool valid{false};
+        std::array<std::array<double, kJointsPerArm>, 2> joints_deg{};
+        EscapeCollisionEvaluation evaluation;
+        double movement_cost{0.0};
+    };
+
     static double movement_cost(
         const std::array<std::array<double, kJointsPerArm>, 2> &from_deg,
         const std::array<std::array<double, kJointsPerArm>, 2> &to_deg)
@@ -654,13 +634,214 @@ private:
         return cost;
     }
 
-    bool candidate_path_is_safe_enough(
+    bool ensure_trajectory_action_client(std::string &error_message)
+    {
+        if (trajectory_controller_name_.empty()) {
+            error_message = "Trajectory controller name is not configured.";
+            return false;
+        }
+
+        if (!trajectory_action_client_) {
+            trajectory_action_client_ =
+                rclcpp_action::create_client<FollowJointTrajectory>(
+                    shared_from_this(),
+                    "/" + trajectory_controller_name_ + "/follow_joint_trajectory",
+                    callback_group_);
+        }
+
+        if (trajectory_action_client_->wait_for_action_server(
+                std::chrono::duration<double>(controller_switch_timeout_sec_))) {
+            return true;
+        }
+
+        error_message =
+            "Trajectory action unavailable: /" + trajectory_controller_name_ +
+            "/follow_joint_trajectory";
+        return false;
+    }
+
+    std::array<double, kTrackedGripperCount> current_gripper_percents() const
+    {
+        std::array<double, kTrackedGripperCount> percents{{0.0, 0.0}};
+        for (size_t index = 0; index < kTrackedGripperCount; ++index) {
+            const auto percent = get_gripper_percent(kGripperJointNames[index]);
+            if (percent.has_value()) {
+                percents[index] = *percent;
+            }
+        }
+        return percents;
+    }
+
+    bool ensure_escape_collision_scene(std::string &error_message)
+    {
+        std::lock_guard<std::mutex> lock(escape_scene_mutex_);
+        if (escape_scene_initialized_) {
+            return true;
+        }
+
+        const auto robot_description =
+            get_param_or_declare<std::string>(this, "robot_description", "");
+        const auto robot_description_semantic =
+            get_param_or_declare<std::string>(this, "robot_description_semantic", "");
+        if (robot_description.empty() || robot_description_semantic.empty()) {
+            error_message =
+                "Escape collision scene requires robot_description and robot_description_semantic.";
+            return false;
+        }
+
+        robot_model_loader::RobotModelLoader::Options options(
+            robot_description, robot_description_semantic);
+        options.load_kinematics_solvers = false;
+        escape_robot_model_loader_ = std::make_shared<robot_model_loader::RobotModelLoader>(
+            std::static_pointer_cast<rclcpp::Node>(shared_from_this()), options);
+        escape_robot_model_ = escape_robot_model_loader_->getModel();
+        if (!escape_robot_model_) {
+            error_message = "Failed to build escape collision RobotModel.";
+            return false;
+        }
+
+        escape_planning_scene_ = std::make_shared<planning_scene::PlanningScene>(escape_robot_model_);
+        escape_planning_scene_->removeAllCollisionObjects();
+
+        const bool table_enabled =
+            get_param_or_declare<bool>(this, "scene.table.enabled", true);
+        if (table_enabled) {
+            const auto table_size = get_double_array_param(this, "scene.table.size");
+            const auto table_position =
+                get_double_array_param(this, "scene.table.pose.position");
+            const auto table_orientation =
+                get_double_array_param(this, "scene.table.pose.orientation");
+            if (table_size.size() != 3 || table_position.size() != 3 || table_orientation.size() != 4) {
+                error_message =
+                    "Escape collision scene requires a valid scene.table collision object.";
+                return false;
+            }
+
+            moveit_msgs::msg::CollisionObject table;
+            table.id = "escape_table";
+            table.header.frame_id = scene_frame_id_;
+            table.operation = moveit_msgs::msg::CollisionObject::ADD;
+
+            shape_msgs::msg::SolidPrimitive primitive;
+            primitive.type = shape_msgs::msg::SolidPrimitive::BOX;
+            primitive.dimensions = {table_size[0], table_size[1], table_size[2]};
+
+            geometry_msgs::msg::Pose pose;
+            pose.position.x = table_position[0];
+            pose.position.y = table_position[1];
+            pose.position.z = table_position[2];
+            pose.orientation.x = table_orientation[0];
+            pose.orientation.y = table_orientation[1];
+            pose.orientation.z = table_orientation[2];
+            pose.orientation.w = table_orientation[3];
+
+            table.primitives.push_back(primitive);
+            table.primitive_poses.push_back(pose);
+            if (!escape_planning_scene_->processCollisionObjectMsg(table)) {
+                error_message = "Failed to add table collision object to escape scene.";
+                return false;
+            }
+        }
+
+        for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+            escape_arm_var_indices_[joint] = static_cast<int>(
+                escape_robot_model_->getVariableIndex(kLeftJointNames[joint]));
+            escape_arm_var_indices_[kJointsPerArm + joint] = static_cast<int>(
+                escape_robot_model_->getVariableIndex(kRightJointNames[joint]));
+        }
+
+        for (size_t index = 0; index < kTrackedGripperCount; ++index) {
+            if (escape_robot_model_->hasJointModel(kGripperJointNames[index])) {
+                escape_gripper_var_indices_[index] = static_cast<int>(
+                    escape_robot_model_->getVariableIndex(kGripperJointNames[index]));
+                escape_gripper_enabled_[index] = true;
+            }
+        }
+
+        escape_scene_initialized_ = true;
+        return true;
+    }
+
+    bool evaluate_escape_state(
+        const std::array<std::array<double, kJointsPerArm>, 2> &joint_positions_deg,
+        EscapeCollisionEvaluation &evaluation,
+        std::string &error_message)
+    {
+        if (!ensure_escape_collision_scene(error_message)) {
+            return false;
+        }
+
+        const auto gripper_percents = current_gripper_percents();
+
+        std::lock_guard<std::mutex> lock(escape_scene_mutex_);
+        auto &state = escape_planning_scene_->getCurrentStateNonConst();
+        for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+            state.setVariablePosition(
+                escape_arm_var_indices_[joint], joint_positions_deg[0][joint] * M_PI / 180.0);
+            state.setVariablePosition(
+                escape_arm_var_indices_[kJointsPerArm + joint],
+                joint_positions_deg[1][joint] * M_PI / 180.0);
+        }
+        for (size_t index = 0; index < kTrackedGripperCount; ++index) {
+            if (!escape_gripper_enabled_[index]) {
+                continue;
+            }
+            state.setVariablePosition(
+                escape_gripper_var_indices_[index],
+                clamp_gripper_percent(gripper_percents[index]));
+        }
+        state.update();
+
+        for (size_t index = 0; index < kTrackedGripperCount; ++index) {
+            if (!escape_gripper_enabled_[index]) {
+                continue;
+            }
+            if (!escape_planning_scene_->processAttachedCollisionObjectMsg(
+                    make_gripper_collision_object(index, gripper_percents[index]))) {
+                error_message =
+                    "Failed to apply attached gripper collision object in escape scene.";
+                return false;
+            }
+        }
+
+        collision_detection::CollisionRequest request;
+        request.distance = true;
+        request.contacts = true;
+        request.max_contacts = 1;
+        request.max_contacts_per_pair = 1;
+        request.pad_environment_collisions = false;
+        request.pad_self_collisions = false;
+        collision_detection::CollisionResult result;
+        escape_planning_scene_->checkCollision(request, result, state);
+
+        evaluation = EscapeCollisionEvaluation{};
+        evaluation.safe = !result.collision;
+        evaluation.collision = result.collision;
+        evaluation.distance = result.distance;
+        if (!result.contacts.empty()) {
+            const auto &first_contact = result.contacts.begin()->first;
+            evaluation.contact_pair = first_contact.first + " - " + first_contact.second;
+            if (evaluation.contact_pair.find("_L") != std::string::npos) {
+                evaluation.arm_involved[0] = true;
+            }
+            if (evaluation.contact_pair.find("_R") != std::string::npos) {
+                evaluation.arm_involved[1] = true;
+            }
+        }
+        if (!evaluation.arm_involved[0] && !evaluation.arm_involved[1] && evaluation.collision) {
+            evaluation.arm_involved = {{true, true}};
+        }
+        return true;
+    }
+
+    bool escape_candidate_path_is_acceptable(
         const std::array<std::array<double, kJointsPerArm>, 2> &current_deg,
         const std::array<std::array<double, kJointsPerArm>, 2> &candidate_deg,
-        double current_min_z,
-        marvin_system::WorkspaceGuard::Evaluation &candidate_evaluation) const
+        const EscapeCollisionEvaluation &current_evaluation,
+        EscapeCollisionEvaluation &candidate_evaluation,
+        std::string &error_message)
     {
-        double previous_min_z = current_min_z;
+        double previous_distance = current_evaluation.distance;
         const auto samples = std::max<int64_t>(1, recovery_interpolation_samples_);
         for (int64_t sample = 1; sample <= samples; ++sample) {
             const double alpha = static_cast<double>(sample) / static_cast<double>(samples);
@@ -673,67 +854,49 @@ private:
                 }
             }
 
-            const auto evaluation = recovery_workspace_guard_.evaluate(interpolated);
-            if (evaluation.min_z < current_min_z - recovery_max_drop_m_) {
+            EscapeCollisionEvaluation sample_evaluation;
+            if (!evaluate_escape_state(interpolated, sample_evaluation, error_message)) {
                 return false;
             }
-            if (evaluation.min_z < previous_min_z - recovery_max_drop_m_) {
+
+            if (current_evaluation.safe && sample_evaluation.collision) {
                 return false;
             }
-            previous_min_z = evaluation.min_z;
-            if (sample == samples) {
-                candidate_evaluation = evaluation;
+            if (!current_evaluation.safe &&
+                sample_evaluation.distance + recovery_max_drop_m_ < previous_distance) {
+                return false;
             }
+
+            previous_distance = sample_evaluation.distance;
+            candidate_evaluation = sample_evaluation;
+        }
+
+        if (!candidate_evaluation.safe) {
+            return false;
+        }
+        if (!current_evaluation.safe &&
+            candidate_evaluation.distance <
+                current_evaluation.distance + recovery_min_improvement_m_) {
+            return false;
         }
         return true;
     }
 
-    RecoveryCandidate find_best_recovery_candidate(
+    EscapeCandidate find_best_escape_candidate(
         const std::array<std::array<double, kJointsPerArm>, 2> &current_deg,
-        bool force_escape_safe_state) const
+        const EscapeCollisionEvaluation &current_evaluation)
     {
-        RecoveryCandidate best;
-        const auto current_evaluation = recovery_workspace_guard_.evaluate(current_deg);
-        if (current_evaluation.safe && !force_escape_safe_state) {
-            best.valid = true;
-            best.joints_deg = current_deg;
-            best.evaluation = current_evaluation;
-            return best;
-        }
+        EscapeCandidate best;
 
-        std::array<bool, 2> arm_requires_recovery{};
-        bool any_arm_requires_recovery = false;
-        for (size_t arm = 0; arm < 2; ++arm) {
-            const auto arm_evaluation =
-                recovery_workspace_guard_.evaluate_arm(arm, current_deg[arm].data());
-            arm_requires_recovery[arm] = !arm_evaluation.safe;
-            any_arm_requires_recovery |= arm_requires_recovery[arm];
-        }
-        if (!any_arm_requires_recovery && force_escape_safe_state) {
-            size_t preferred_arm = 0;
-            auto preferred_eval =
-                recovery_workspace_guard_.evaluate_arm(preferred_arm, current_deg[preferred_arm].data());
-            for (size_t arm = 1; arm < 2; ++arm) {
-                const auto candidate_eval =
-                    recovery_workspace_guard_.evaluate_arm(arm, current_deg[arm].data());
-                if (candidate_eval.min_z < preferred_eval.min_z) {
-                    preferred_arm = arm;
-                    preferred_eval = candidate_eval;
-                }
-            }
-            arm_requires_recovery[preferred_arm] = true;
-            any_arm_requires_recovery = true;
-        }
-        if (!any_arm_requires_recovery) {
-            return best;
+        std::array<bool, 2> arm_requires_escape = current_evaluation.arm_involved;
+        if (!arm_requires_escape[0] && !arm_requires_escape[1]) {
+            arm_requires_escape = {{true, true}};
         }
 
         for (size_t arm = 0; arm < 2; ++arm) {
-            if (!arm_requires_recovery[arm]) {
+            if (!arm_requires_escape[arm]) {
                 continue;
             }
-            const auto current_arm_evaluation =
-                recovery_workspace_guard_.evaluate_arm(arm, current_deg[arm].data());
             for (int64_t layer2 = 0; layer2 <= recovery_search_layers_; ++layer2) {
                 for (int64_t layer4 = 0; layer4 <= recovery_search_layers_; ++layer4) {
                     if (layer2 == 0 && layer4 == 0) {
@@ -758,31 +921,27 @@ private:
                                 continue;
                             }
 
-                            marvin_system::WorkspaceGuard::Evaluation candidate_evaluation;
-                            if (!candidate_path_is_safe_enough(
+                            EscapeCollisionEvaluation candidate_evaluation;
+                            std::string path_error;
+                            if (!escape_candidate_path_is_acceptable(
                                     current_deg,
                                     candidate,
-                                    current_evaluation.min_z,
-                                    candidate_evaluation)) {
-                                continue;
-                            }
-                            const auto candidate_arm_evaluation =
-                                recovery_workspace_guard_.evaluate_arm(arm, candidate[arm].data());
-                            if (candidate_arm_evaluation.min_z <
-                                current_arm_evaluation.min_z + recovery_min_improvement_m_) {
+                                    current_evaluation,
+                                    candidate_evaluation,
+                                    path_error)) {
                                 continue;
                             }
 
                             const double candidate_cost = movement_cost(current_deg, candidate);
                             if (!best.valid ||
-                                candidate_arm_evaluation.min_z > best.evaluation.min_z +
-                                                            recovery_min_improvement_m_ / 10.0 ||
-                                (std::abs(candidate_arm_evaluation.min_z - best.evaluation.min_z) <=
+                                candidate_evaluation.distance >
+                                    best.evaluation.distance + recovery_min_improvement_m_ / 10.0 ||
+                                (std::abs(candidate_evaluation.distance - best.evaluation.distance) <=
                                      recovery_min_improvement_m_ / 10.0 &&
                                  candidate_cost < best.movement_cost)) {
                                 best.valid = true;
                                 best.joints_deg = candidate;
-                                best.evaluation = candidate_arm_evaluation;
+                                best.evaluation = candidate_evaluation;
                                 best.movement_cost = candidate_cost;
                             }
                         }
@@ -790,7 +949,184 @@ private:
                 }
             }
         }
+
         return best;
+    }
+
+    bool execute_escape_trajectory(
+        const std::array<std::array<double, kJointsPerArm>, 2> &target_deg,
+        std::string &error_message)
+    {
+        if (!ensure_trajectory_action_client(error_message)) {
+            return false;
+        }
+
+        FollowJointTrajectory::Goal goal;
+        for (const auto *joint_name : kLeftJointNames) {
+            goal.trajectory.joint_names.emplace_back(joint_name);
+        }
+        for (const auto *joint_name : kRightJointNames) {
+            goal.trajectory.joint_names.emplace_back(joint_name);
+        }
+
+        double max_delta_rad = 0.0;
+        {
+            std::lock_guard<std::mutex> lock(joint_state_mutex_);
+            for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+                if (joint_position_valid_[joint]) {
+                    max_delta_rad = std::max(
+                        max_delta_rad,
+                        std::abs(target_deg[0][joint] * M_PI / 180.0 - joint_positions_rad_[joint]));
+                }
+                const size_t index = kJointsPerArm + joint;
+                if (joint_position_valid_[index]) {
+                    max_delta_rad = std::max(
+                        max_delta_rad,
+                        std::abs(target_deg[1][joint] * M_PI / 180.0 - joint_positions_rad_[index]));
+                }
+            }
+        }
+
+        trajectory_msgs::msg::JointTrajectoryPoint point;
+        point.positions.reserve(kTotalTrackedJoints);
+        for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+            point.positions.push_back(target_deg[0][joint] * M_PI / 180.0);
+        }
+        for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+            point.positions.push_back(target_deg[1][joint] * M_PI / 180.0);
+        }
+
+        const double duration_sec = std::clamp(max_delta_rad / 0.35, 1.0, 6.0);
+        const auto duration_ns = rclcpp::Duration::from_seconds(duration_sec).nanoseconds();
+        point.time_from_start.sec = static_cast<int32_t>(duration_ns / 1000000000LL);
+        point.time_from_start.nanosec =
+            static_cast<uint32_t>(duration_ns % 1000000000LL);
+        goal.trajectory.points.push_back(point);
+        const auto tolerance_ns = rclcpp::Duration::from_seconds(1.0).nanoseconds();
+        goal.goal_time_tolerance.sec = static_cast<int32_t>(tolerance_ns / 1000000000LL);
+        goal.goal_time_tolerance.nanosec =
+            static_cast<uint32_t>(tolerance_ns % 1000000000LL);
+
+        auto goal_future = trajectory_action_client_->async_send_goal(goal);
+        const auto goal_status = goal_future.wait_for(
+            std::chrono::duration<double>(controller_switch_timeout_sec_ + 1.0));
+        if (goal_status != std::future_status::ready) {
+            error_message = "Timed out sending escape trajectory goal.";
+            return false;
+        }
+
+        auto goal_handle = goal_future.get();
+        if (!goal_handle) {
+            error_message = "Escape trajectory goal was rejected by the controller.";
+            return false;
+        }
+
+        auto result_future = trajectory_action_client_->async_get_result(goal_handle);
+        const auto result_status = result_future.wait_for(
+            std::chrono::duration<double>(duration_sec + recovery_settle_timeout_sec_ + 2.0));
+        if (result_status != std::future_status::ready) {
+            error_message = "Timed out waiting for escape trajectory execution.";
+            return false;
+        }
+
+        const auto wrapped_result = result_future.get();
+        if (wrapped_result.code != rclcpp_action::ResultCode::SUCCEEDED) {
+            error_message = "Escape trajectory action failed.";
+            if (wrapped_result.result) {
+                error_message += " controller_error=" +
+                    std::to_string(wrapped_result.result->error_code);
+                if (!wrapped_result.result->error_string.empty()) {
+                    error_message += " message=" + wrapped_result.result->error_string;
+                }
+            }
+            return false;
+        }
+        if (wrapped_result.result &&
+            wrapped_result.result->error_code !=
+                control_msgs::action::FollowJointTrajectory::Result::SUCCESSFUL) {
+            error_message =
+                "Escape trajectory controller reported error_code=" +
+                std::to_string(wrapped_result.result->error_code);
+            if (!wrapped_result.result->error_string.empty()) {
+                error_message += " message=" + wrapped_result.result->error_string;
+            }
+            return false;
+        }
+
+        return wait_until_recovery_target_reached(target_deg, error_message);
+    }
+
+    bool execute_collision_escape(std::string &error_message, bool force_escape_safe_state = false)
+    {
+        if (!recovery_enabled_) {
+            error_message = "Collision escape recovery is disabled.";
+            return false;
+        }
+        if (!transition_to_mode(kModeMotion, error_message)) {
+            return false;
+        }
+
+        for (int64_t iteration = 0; iteration < std::max<int64_t>(1, recovery_max_iterations_);
+             ++iteration) {
+            std::array<std::array<double, kJointsPerArm>, 2> current_deg{};
+            if (!current_joint_positions_deg(current_deg, error_message)) {
+                return false;
+            }
+
+            EscapeCollisionEvaluation current_evaluation;
+            if (!evaluate_escape_state(current_deg, current_evaluation, error_message)) {
+                return false;
+            }
+            if (current_evaluation.safe && !force_escape_safe_state) {
+                RCLCPP_INFO(
+                    get_logger(),
+                    "Collision escape finished before iteration %ld (distance=%.4f).",
+                    iteration,
+                    current_evaluation.distance);
+                return true;
+            }
+
+            const auto candidate = find_best_escape_candidate(current_deg, current_evaluation);
+            if (!candidate.valid) {
+                error_message =
+                    "Collision escape could not find a collision-free Joint2/Joint4 candidate.";
+                return false;
+            }
+
+            RCLCPP_WARN(
+                get_logger(),
+                "Collision escape iteration %ld: contact=%s distance %.4f -> %.4f",
+                iteration + 1,
+                current_evaluation.contact_pair.empty() ? "unknown" :
+                    current_evaluation.contact_pair.c_str(),
+                current_evaluation.distance,
+                candidate.evaluation.distance);
+
+            if (!execute_escape_trajectory(candidate.joints_deg, error_message)) {
+                return false;
+            }
+            force_escape_safe_state = false;
+        }
+
+        std::array<std::array<double, kJointsPerArm>, 2> final_deg{};
+        if (!current_joint_positions_deg(final_deg, error_message)) {
+            return false;
+        }
+        EscapeCollisionEvaluation final_evaluation;
+        if (!evaluate_escape_state(final_deg, final_evaluation, error_message)) {
+            return false;
+        }
+        if (final_evaluation.safe) {
+            if (recovery_post_escape_settle_sec_ > 0.0) {
+                std::this_thread::sleep_for(
+                    std::chrono::duration<double>(recovery_post_escape_settle_sec_));
+            }
+            return true;
+        }
+
+        error_message =
+            "Collision escape exhausted all iterations without leaving start-state collision.";
+        return false;
     }
 
     void publish_recovery_command(
@@ -917,81 +1253,6 @@ private:
         }
 
         error_message = "Recovery command did not converge before timeout.";
-        return false;
-    }
-
-    bool execute_recovery(std::string &error_message, bool force_escape_safe_state = false)
-    {
-        if (!recovery_enabled_) {
-            error_message = "Recovery is disabled.";
-            return false;
-        }
-        if (!recovery_workspace_guard_configured_) {
-            error_message = "Recovery workspace evaluator is not configured.";
-            return false;
-        }
-        if (!recovery_command_publisher_) {
-            error_message = "Recovery command publisher is not configured.";
-            return false;
-        }
-        if (!transition_to_mode(kModeSafeHold, error_message)) {
-            return false;
-        }
-
-        for (int64_t iteration = 0; iteration < std::max<int64_t>(1, recovery_max_iterations_);
-             ++iteration) {
-            std::array<std::array<double, kJointsPerArm>, 2> current_deg{};
-            if (!current_joint_positions_deg(current_deg, error_message)) {
-                return false;
-            }
-
-            const auto current_evaluation = recovery_workspace_guard_.evaluate(current_deg);
-            if (current_evaluation.safe && !force_escape_safe_state) {
-                RCLCPP_INFO(
-                    get_logger(),
-                    "Recovery finished before iteration %ld (min_z=%.4f).",
-                    iteration,
-                    current_evaluation.min_z);
-                return true;
-            }
-
-            const auto candidate = find_best_recovery_candidate(
-                current_deg, force_escape_safe_state);
-            if (!candidate.valid) {
-                error_message =
-                    "Recovery could not find a safer Joint2/Joint4 candidate.";
-                return false;
-            }
-
-            RCLCPP_WARN(
-                get_logger(),
-                "Recovery iteration %ld: min_z %.4f -> %.4f by adjusting Joint2/Joint4 on arm %zu only.",
-                iteration + 1,
-                current_evaluation.min_z,
-                candidate.evaluation.min_z,
-                candidate.evaluation.arm_index);
-
-            publish_recovery_command(candidate.joints_deg);
-            if (!wait_until_recovery_target_reached(candidate.joints_deg, error_message)) {
-                return false;
-            }
-            force_escape_safe_state = false;
-        }
-
-        std::array<std::array<double, kJointsPerArm>, 2> final_deg{};
-        if (!current_joint_positions_deg(final_deg, error_message)) {
-            return false;
-        }
-        const auto final_evaluation = recovery_workspace_guard_.evaluate(final_deg);
-        if (final_evaluation.safe) {
-            if (recovery_post_escape_settle_sec_ > 0.0) {
-                std::this_thread::sleep_for(
-                    std::chrono::duration<double>(recovery_post_escape_settle_sec_));
-            }
-            return true;
-        }
-
-        error_message = "Recovery exhausted all iterations without restoring a safe z-floor state.";
         return false;
     }
 
@@ -1138,23 +1399,6 @@ private:
             latest_teleop_state_ = kTeleopStateArmed;
         }
         return true;
-    }
-
-    bool call_workspace_guard_set_enabled(bool value, std::string &error_message)
-    {
-        if (workspace_guard_service_name_.empty()) {
-            return true;
-        }
-        if (!workspace_guard_client_) {
-            error_message =
-                "Workspace guard service client is not configured: " + workspace_guard_service_name_;
-            return false;
-        }
-        return call_tracker_set_bool(
-            workspace_guard_client_,
-            workspace_guard_service_name_,
-            value,
-            error_message);
     }
 
     bool call_collision_guard_set_enabled(bool value, std::string &error_message)
@@ -2148,7 +2392,6 @@ private:
 
         std::string error_message;
         bool go_home_ok = false;
-        bool workspace_guard_disabled = false;
         bool collision_guard_disabled = false;
         bool used_legacy_fallback_after_moveit_failure = false;
         bool wait_for_legacy_home_completion = false;
@@ -2158,13 +2401,6 @@ private:
                 wait_for_legacy_home_completion = go_home_ok;
             }
         } else if (backend_ == "moveit") {
-            if (!call_workspace_guard_set_enabled(false, error_message)) {
-                finish(kModeSafeHold);
-                response->success = false;
-                response->message = error_message;
-                return;
-            }
-            workspace_guard_disabled = true;
             if (!call_collision_guard_set_enabled(false, error_message)) {
                 finish(kModeSafeHold);
                 response->success = false;
@@ -2172,57 +2408,57 @@ private:
                 return;
             }
             collision_guard_disabled = true;
-            if (recovery_enabled_ && recovery_workspace_guard_configured_ &&
-                recovery_command_publisher_) {
+            bool start_state_requires_escape = false;
+            EscapeCollisionEvaluation start_state_evaluation;
+            if (recovery_enabled_) {
                 std::array<std::array<double, kJointsPerArm>, 2> current_deg{};
-                if (!current_joint_positions_deg(current_deg, error_message)) {
+                if (!current_joint_positions_deg(current_deg, error_message) ||
+                    !evaluate_escape_state(current_deg, start_state_evaluation, error_message)) {
                     finish(kModeSafeHold);
                     response->success = false;
                     response->message = error_message;
                     return;
                 }
+                start_state_requires_escape = !start_state_evaluation.safe;
+            }
 
-                const auto current_evaluation = recovery_workspace_guard_.evaluate(current_deg);
-                if (!current_evaluation.safe) {
+            if (transition_to_mode(kModeMotion, error_message)) {
+                if (start_state_requires_escape) {
                     RCLCPP_WARN(
                         get_logger(),
-                        "GoHome requested from unsafe state (min_z=%.4f). Starting recovery.",
-                        current_evaluation.min_z);
-                    if (!execute_recovery(error_message)) {
+                        "GoHome requested from colliding state (%s, distance=%.4f). "
+                        "Running collision-based escape before planning.",
+                        start_state_evaluation.contact_pair.empty() ?
+                            "unknown contact" : start_state_evaluation.contact_pair.c_str(),
+                        start_state_evaluation.distance);
+                    if (!execute_collision_escape(error_message)) {
                         finish(kModeSafeHold);
                         response->success = false;
                         response->message = error_message;
                         return;
                     }
                 }
-            }
 
-            if (transition_to_mode(kModeMotion, error_message)) {
                 go_home_ok = execute_moveit_go_home(error_message);
                 if (!go_home_ok &&
                     (error_message.rfind("MoveIt planning failed", 0) == 0 ||
                      error_message.rfind("MoveIt execution failed", 0) == 0) &&
-                    recovery_enabled_ && recovery_workspace_guard_configured_ &&
-                    recovery_command_publisher_) {
-                    RCLCPP_WARN(
-                        get_logger(),
-                        "Direct MoveIt home command failed from current state (%s). "
-                        "Attempting escape recovery before retrying home.",
-                        error_message.c_str());
-
-                    std::string recovery_mode_error;
-                    if (!transition_to_mode(kModeSafeHold, recovery_mode_error)) {
-                        error_message +=
-                            " Failed to switch back to SAFE_HOLD for recovery: " +
-                            recovery_mode_error;
-                    } else if (!execute_recovery(error_message, true)) {
-                        // error_message already filled by execute_recovery
-                    } else if (!transition_to_mode(kModeMotion, recovery_mode_error)) {
-                        error_message +=
-                            " Recovery succeeded but failed to re-enter MOTION mode: " +
-                            recovery_mode_error;
-                    } else {
-                        go_home_ok = execute_moveit_go_home(error_message);
+                    recovery_enabled_) {
+                    std::array<std::array<double, kJointsPerArm>, 2> current_deg{};
+                    EscapeCollisionEvaluation current_evaluation;
+                    if (current_joint_positions_deg(current_deg, error_message) &&
+                        evaluate_escape_state(current_deg, current_evaluation, error_message) &&
+                        !current_evaluation.safe) {
+                        RCLCPP_WARN(
+                            get_logger(),
+                            "MoveIt home failed from colliding state (%s, distance=%.4f). "
+                            "Running collision-based escape before retrying home.",
+                            current_evaluation.contact_pair.empty() ?
+                                "unknown contact" : current_evaluation.contact_pair.c_str(),
+                            current_evaluation.distance);
+                        if (execute_collision_escape(error_message, true)) {
+                            go_home_ok = execute_moveit_go_home(error_message);
+                        }
                     }
                 }
 
@@ -2293,16 +2529,12 @@ private:
             }
         }
 
-        std::string workspace_guard_restore_error;
-        const bool restored_workspace_guard =
-            !workspace_guard_disabled ||
-            call_workspace_guard_set_enabled(true, workspace_guard_restore_error);
         std::string collision_guard_restore_error;
         const bool restored_collision_guard =
             !collision_guard_disabled ||
             call_collision_guard_set_enabled(true, collision_guard_restore_error);
 
-        if (!restored_mode || !restored_workspace_guard || !restored_collision_guard) {
+        if (!restored_mode || !restored_collision_guard) {
             finish(kModeFault);
             response->success = false;
             if (!restored_mode) {
@@ -2313,13 +2545,6 @@ private:
                     response->message =
                         error_message + " Restore step also failed: " + restore_error;
                 }
-            } else if (!restored_workspace_guard) {
-                response->message =
-                    error_message.empty()
-                        ? "GoHome restored motion mode but failed to re-enable workspace guard: " +
-                              workspace_guard_restore_error
-                        : error_message + " Workspace guard re-enable also failed: " +
-                              workspace_guard_restore_error;
             } else {
                 response->message =
                     error_message.empty()
@@ -2362,12 +2587,12 @@ private:
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr legacy_go_home_client_;
     rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr tracker_set_armed_client_;
     rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr tracker_set_enabled_client_;
-    rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr workspace_guard_client_;
     rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr collision_guard_client_;
     rclcpp::Client<controller_manager_msgs::srv::SwitchController>::SharedPtr
         switch_controller_client_;
     rclcpp::Client<controller_manager_msgs::srv::ListControllers>::SharedPtr
         list_controllers_client_;
+    rclcpp_action::Client<FollowJointTrajectory>::SharedPtr trajectory_action_client_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr teleop_state_subscription_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_subscription_;
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr recovery_command_publisher_;
@@ -2408,7 +2633,6 @@ private:
     std::string controller_manager_list_service_;
     std::string trajectory_controller_name_;
     std::string primary_controller_name_;
-    std::string workspace_guard_service_name_;
     std::string collision_guard_service_name_;
     bool use_mock_hardware_{false};
     std::vector<std::string> go_home_pose_sequence_;
@@ -2426,13 +2650,6 @@ private:
     int64_t recovery_max_iterations_{6};
     double recovery_min_improvement_m_{0.002};
     double recovery_max_drop_m_{0.0005};
-    std::string workspace_z_min_param_;
-    std::string workspace_safety_margin_param_;
-    std::string mount_xyz_l_param_;
-    std::string mount_rpy_l_param_;
-    std::string mount_xyz_r_param_;
-    std::string mount_rpy_r_param_;
-    std::string tool_offset_param_;
     bool teleop_services_configured_{true};
     bool teleop_state_feedback_configured_{true};
 
@@ -2444,12 +2661,17 @@ private:
     std::array<double, kTotalTrackedJoints> joint_positions_rad_{};
     std::array<bool, kTotalTrackedJoints> joint_position_valid_{};
     std::unordered_map<std::string, double> recovery_aux_joint_positions_rad_;
-    marvin_system::WorkspaceGuard recovery_workspace_guard_;
-    bool recovery_workspace_guard_configured_{false};
-
     std::mutex moveit_mutex_;
     std::unique_ptr<moveit::planning_interface::MoveGroupInterface> move_group_;
     std::unique_ptr<moveit::planning_interface::PlanningSceneInterface> planning_scene_interface_;
+    std::mutex escape_scene_mutex_;
+    robot_model_loader::RobotModelLoaderPtr escape_robot_model_loader_;
+    moveit::core::RobotModelPtr escape_robot_model_;
+    planning_scene::PlanningScenePtr escape_planning_scene_;
+    std::array<int, kTotalTrackedJoints> escape_arm_var_indices_{};
+    std::array<int, kTrackedGripperCount> escape_gripper_var_indices_{{-1, -1}};
+    std::array<bool, kTrackedGripperCount> escape_gripper_enabled_{{false, false}};
+    bool escape_scene_initialized_{false};
     std::atomic<bool> static_scene_applied_{false};
     std::array<double, kTrackedGripperCount> last_synced_gripper_percent_{{-1.0, -1.0}};
     std::array<bool, kTrackedGripperCount> gripper_collision_objects_active_{{false, false}};

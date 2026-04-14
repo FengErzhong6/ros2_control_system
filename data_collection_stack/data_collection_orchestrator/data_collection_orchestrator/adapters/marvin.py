@@ -369,6 +369,13 @@ class MarvinAdapter(AdapterBase):
             "start_cameras": False,
             "show_camera_views": False,
             "use_mock_hardware": False,
+            "collision_guard_enabled": True,
+            "collision_guard_near_distance_m": 0.10,
+            "collision_guard_hard_collision_distance_m": 0.05,
+            "collision_guard_escape_min_distance_improvement_m": 0.0002,
+            "collision_guard_check_rate_hz": 30.0,
+            "collision_guard_interpolation_steps": 6,
+            "collision_guard_binary_search_steps": 5,
             "enable_moveit_go_home": True,
             "motion_allow_legacy_home_fallback": False,
         }

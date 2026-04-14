@@ -66,7 +66,7 @@ def generate_launch_description():
             description="Mount pose (rpy) of Base_R in world.",
         ),
         DeclareLaunchArgument(
-            "collision_guard_enabled", default_value="false",
+            "collision_guard_enabled", default_value="true",
             description="Enable async MoveIt-backed collision guard in hardware.",
         ),
         DeclareLaunchArgument(
@@ -261,7 +261,6 @@ def launch_setup(context):
                 "controller_manager_list_service": "/controller_manager/list_controllers",
                 "trajectory_controller_name": "dual_arm_trajectory_controller",
                 "primary_controller_name": "",
-                "workspace_guard_service_name": workspace_guard_service_name,
                 "collision_guard_service_name": collision_guard_service_name,
                 "allow_legacy_go_home_fallback": ParameterValue(
                     LaunchConfiguration("motion_allow_legacy_home_fallback"),

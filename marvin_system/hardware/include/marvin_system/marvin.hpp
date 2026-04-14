@@ -70,6 +70,7 @@ private:
     int activation_max_attempts_{2};
     int no_frame_timeout_ms_{800};
     int home_timeout_ms_{30000};
+    bool mock_grippers_{false};
 
     bool has_home_position_{false};
     std::array<std::array<double, kJointsPerArm>, kArmCount> home_position_deg_{};
@@ -94,6 +95,7 @@ private:
         omnipicker::ArmSide arm_side = omnipicker::ArmSide::kB;
         uint32_t can_node_id = 0x01;
         size_t joint_index = 0;
+        bool mock = false;
         std::atomic<double> command_target_percent{0.0};
         std::atomic<double> state_percent{0.0};
         std::atomic<bool> state_valid{false};
