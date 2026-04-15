@@ -45,6 +45,7 @@ controller_interface::CallbackReturn TrackerTeleopController::on_init()
 
         auto_declare<double>("smoothing_alpha", 0.3);
         auto_declare<double>("max_joint_velocity", 2.0);
+        auto_declare<int>("tracker_interp_cycles", 10);
         auto_declare<double>("base_x_scale", 1.0);
         auto_declare<double>("tracker_timeout_sec", 0.1);
         auto_declare<std::vector<double>>("home_joint_positions.left", {});

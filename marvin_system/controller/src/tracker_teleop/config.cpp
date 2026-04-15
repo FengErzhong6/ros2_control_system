@@ -93,6 +93,7 @@ bool TrackerTeleopController::loadControllerParameters()
     node->get_parameter("dh_d1", dh_d1_);
     node->get_parameter("smoothing_alpha", smoothing_alpha_);
     node->get_parameter("max_joint_velocity", max_joint_velocity_);
+    node->get_parameter("tracker_interp_cycles", tracker_interp_cycles_);
     node->get_parameter("base_x_scale", base_x_scale_);
     node->get_parameter("tracking_ik.fk_accept_tol", tracking_ik_config_.fk_accept_tol);
     node->get_parameter(
@@ -144,6 +145,7 @@ bool TrackerTeleopController::loadControllerParameters()
     home_tolerance_rad_ = std::max(0.0, home_tolerance_deg) * kDeg2Rad;
 
     smoothing_alpha_ = std::clamp(smoothing_alpha_, 0.01, 1.0);
+    tracker_interp_cycles_ = std::max(1, tracker_interp_cycles_);
     tracking_ik_config_.fk_accept_tol = std::max(1e-9, tracking_ik_config_.fk_accept_tol);
     tracking_ik_config_.fine_psi_range_deg = std::max(0.0, tracking_ik_config_.fine_psi_range_deg);
     tracking_ik_config_.fine_psi_step_deg = std::max(0.1, tracking_ik_config_.fine_psi_step_deg);
@@ -285,8 +287,8 @@ void TrackerTeleopController::logConfigurationSummary(double home_tolerance_deg)
 
     RCLCPP_INFO(logger, "J4 bound: %.2f deg", j4_bound_);
     RCLCPP_INFO(
-        logger, "Smoothing: alpha=%.3f, max_vel=%.2f rad/s",
-        smoothing_alpha_, max_joint_velocity_);
+        logger, "Command shaping: linear_interp_cycles=%d, max_vel=%.2f rad/s",
+        tracker_interp_cycles_, max_joint_velocity_);
     RCLCPP_INFO(logger, "Base X scale: %.3f", base_x_scale_);
     RCLCPP_INFO(
         logger, "IK reference logs: %s",
@@ -358,6 +360,11 @@ void TrackerTeleopController::resetRuntimeState()
         runtime.smoothed_joints_rad.fill(0.0);
         runtime.target_joints_rad.fill(0.0);
         runtime.has_valid_target = false;
+        runtime.interp_start_joints_rad.fill(0.0);
+        runtime.interp_goal_joints_rad.fill(0.0);
+        runtime.interp_step = 0;
+        runtime.interp_total_steps = 0;
+        runtime.interp_active = false;
         runtime.last_ik_result = IKResult::kNoTarget;
         runtime.pending_diagnostics.sequence.store(0, std::memory_order_relaxed);
         runtime.pending_diagnostics.pending.store(false, std::memory_order_relaxed);

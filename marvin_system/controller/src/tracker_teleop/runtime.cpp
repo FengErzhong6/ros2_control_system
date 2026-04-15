@@ -112,6 +112,9 @@ void TrackerTeleopController::handleSetArmed(
     go_home_requested_.store(false, std::memory_order_relaxed);
     go_home_active_.store(false, std::memory_order_relaxed);
     active_home_joint_index_.store(-1, std::memory_order_relaxed);
+    for (size_t arm = 0; arm < kArmCount; ++arm) {
+        cancelTrackerInterpolation(arm);
+    }
     setTeleopState(TeleopState::kDisarmed, "service disarm");
     response->success = true;
     response->message = "Tracker teleop disarmed; holding current position.";
@@ -130,6 +133,9 @@ void TrackerTeleopController::handleSetEnabled(
         go_home_requested_.store(false, std::memory_order_relaxed);
         go_home_active_.store(false, std::memory_order_relaxed);
         active_home_joint_index_.store(-1, std::memory_order_relaxed);
+        for (size_t arm = 0; arm < kArmCount; ++arm) {
+            cancelTrackerInterpolation(arm);
+        }
         setTeleopState(TeleopState::kEnabled, "service enable");
         response->success = true;
         response->message = "Tracker teleop enabled.";
@@ -137,6 +143,9 @@ void TrackerTeleopController::handleSetEnabled(
     }
 
     if (getTeleopState() == TeleopState::kEnabled) {
+        for (size_t arm = 0; arm < kArmCount; ++arm) {
+            cancelTrackerInterpolation(arm);
+        }
         setTeleopState(TeleopState::kArmed, "service disable");
     }
     response->success = true;

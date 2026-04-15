@@ -245,9 +245,32 @@ TrackerTeleopController::evaluateTrackerInputState(
 void TrackerTeleopController::holdCurrentPosition(size_t arm)
 {
     auto &runtime = arm_state_[arm];
+    cancelTrackerInterpolation(arm);
     for (size_t j = 0; j < kJointsPerArm; ++j) {
         runtime.target_joints_rad[j] = runtime.smoothed_joints_rad[j];
     }
+    runtime.has_valid_target = true;
+}
+
+void TrackerTeleopController::cancelTrackerInterpolation(size_t arm)
+{
+    auto &runtime = arm_state_[arm];
+    runtime.interp_active = false;
+    runtime.interp_step = 0;
+    runtime.interp_total_steps = 0;
+    runtime.interp_start_joints_rad = runtime.smoothed_joints_rad;
+    runtime.interp_goal_joints_rad = runtime.smoothed_joints_rad;
+}
+
+void TrackerTeleopController::startTrackerInterpolation(
+    size_t arm, const std::array<double, kJointsPerArm> &goal_joints_rad)
+{
+    auto &runtime = arm_state_[arm];
+    runtime.interp_start_joints_rad = runtime.smoothed_joints_rad;
+    runtime.interp_goal_joints_rad = goal_joints_rad;
+    runtime.interp_step = 0;
+    runtime.interp_total_steps = std::max(1, tracker_interp_cycles_);
+    runtime.interp_active = true;
 }
 
 void TrackerTeleopController::holdAllArms(double dt)
@@ -267,20 +290,36 @@ void TrackerTeleopController::applySmoothedCommand(size_t arm, double dt)
 
     const size_t offset = arm * kJointsPerArm;
     const double max_delta = max_joint_velocity_ * dt;
+    std::array<double, kJointsPerArm> desired_joints_rad = runtime.target_joints_rad;
 
-    for (size_t j = 0; j < kJointsPerArm; ++j) {
-        double filtered = smoothing_alpha_ * runtime.target_joints_rad[j] +
-                          (1.0 - smoothing_alpha_) * runtime.smoothed_joints_rad[j];
-
-        double delta = filtered - runtime.smoothed_joints_rad[j];
-        if (std::abs(delta) > max_delta) {
-            filtered = runtime.smoothed_joints_rad[j] +
-                       std::copysign(max_delta, delta);
+    if (runtime.interp_active) {
+        const double t = static_cast<double>(runtime.interp_step + 1) /
+                         static_cast<double>(std::max(1, runtime.interp_total_steps));
+        for (size_t j = 0; j < kJointsPerArm; ++j) {
+            desired_joints_rad[j] =
+                runtime.interp_start_joints_rad[j] +
+                (runtime.interp_goal_joints_rad[j] - runtime.interp_start_joints_rad[j]) * t;
         }
 
-        runtime.smoothed_joints_rad[j] = filtered;
-        (void)cmd_interfaces_[offset + j]->set_value(filtered);
-        runtime.last_joint_deg[j] = filtered * kRad2Deg;
+        runtime.interp_step++;
+        if (runtime.interp_step >= runtime.interp_total_steps) {
+            runtime.interp_active = false;
+            runtime.interp_step = 0;
+            runtime.interp_total_steps = 0;
+            runtime.interp_start_joints_rad = runtime.interp_goal_joints_rad;
+        }
+    }
+
+    for (size_t j = 0; j < kJointsPerArm; ++j) {
+        double commanded = desired_joints_rad[j];
+        double delta = commanded - runtime.smoothed_joints_rad[j];
+        if (std::abs(delta) > max_delta) {
+            commanded = runtime.smoothed_joints_rad[j] + std::copysign(max_delta, delta);
+        }
+
+        runtime.smoothed_joints_rad[j] = commanded;
+        (void)cmd_interfaces_[offset + j]->set_value(commanded);
+        runtime.last_joint_deg[j] = commanded * kRad2Deg;
     }
 }
 
@@ -392,10 +431,13 @@ void TrackerTeleopController::handleFreshTrackerUpdate(size_t arm, const CachedT
 
     if (ik_result == IKResult::kSuccess ||
         ik_result == IKResult::kJointLimitClamped) {
+        std::array<double, kJointsPerArm> goal_joints_rad{};
         for (size_t j = 0; j < kJointsPerArm; ++j) {
+            goal_joints_rad[j] = out_q_joints_rad[j];
             runtime.target_joints_rad[j] = out_q_joints_rad[j];
         }
         runtime.has_valid_target = true;
+        startTrackerInterpolation(arm, goal_joints_rad);
         return;
     }
 

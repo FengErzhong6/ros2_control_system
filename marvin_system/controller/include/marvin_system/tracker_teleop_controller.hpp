@@ -135,6 +135,7 @@ private:
     // Joint command conditioning parameters
     double smoothing_alpha_{0.3};
     double max_joint_velocity_{2.0};  // rad/s
+    int tracker_interp_cycles_{10};
     bool has_home_joints_{false};
     double home_tolerance_rad_{0.5 * kDeg2Rad};
 
@@ -215,6 +216,11 @@ private:
         std::array<double, kJointsPerArm> smoothed_joints_rad{};
         std::array<double, kJointsPerArm> target_joints_rad{};
         bool has_valid_target{false};
+        std::array<double, kJointsPerArm> interp_start_joints_rad{};
+        std::array<double, kJointsPerArm> interp_goal_joints_rad{};
+        int interp_step{0};
+        int interp_total_steps{0};
+        bool interp_active{false};
         std::array<double, kJointsPerArm> home_joints_rad{};
         rclcpp::Time last_hand_tf_stamp{0, 0, RCL_ROS_TIME};
         rclcpp::Time last_arm_tf_stamp{0, 0, RCL_ROS_TIME};
@@ -280,6 +286,9 @@ private:
     TrackerInputState evaluateTrackerInputState(
         size_t arm, const CachedTrackerData &snap, const rclcpp::Time &now);
     void holdCurrentPosition(size_t arm);
+    void cancelTrackerInterpolation(size_t arm);
+    void startTrackerInterpolation(
+        size_t arm, const std::array<double, kJointsPerArm> &goal_joints_rad);
     void applySmoothedCommand(size_t arm, double dt);
     void fillArmTargetFromTracker(
         size_t arm, const CachedTrackerData &snap,
