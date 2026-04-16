@@ -503,6 +503,12 @@ private:
                 parent_frame_, tracker.frame_id,
                 stamp, coordinate_transform_,
                 correction);
+            tf2::Quaternion q(
+                tf.transform.rotation.x,
+                tf.transform.rotation.y,
+                tf.transform.rotation.z,
+                tf.transform.rotation.w);
+            enforceQuaternionContinuity(tracker.frame_id, q, tf);
 
             transforms.push_back(tf);
 
@@ -531,9 +537,33 @@ private:
     std::vector<TrackerState> active_trackers_;
     std::map<std::string, uint32_t> known_serials_;
     std::map<std::string, RoleCorrection> role_corrections_;
+    std::map<std::string, tf2::Quaternion> last_published_quaternions_;
     RoleCorrection identity_correction_;
     rclcpp::TimerBase::SharedPtr timer_;
     rclcpp::TimerBase::SharedPtr scan_timer_;
+
+    void enforceQuaternionContinuity(
+        const std::string &frame_id,
+        tf2::Quaternion &current_q,
+        geometry_msgs::msg::TransformStamped &transform)
+    {
+        const auto it = last_published_quaternions_.find(frame_id);
+        if (it != last_published_quaternions_.end() &&
+            it->second.dot(current_q) < 0.0) {
+            current_q = tf2::Quaternion(
+                -current_q.x(),
+                -current_q.y(),
+                -current_q.z(),
+                -current_q.w());
+        }
+
+        current_q.normalize();
+        transform.transform.rotation.x = current_q.x();
+        transform.transform.rotation.y = current_q.y();
+        transform.transform.rotation.z = current_q.z();
+        transform.transform.rotation.w = current_q.w();
+        last_published_quaternions_[frame_id] = current_q;
+    }
 };
 
 int main(int argc, char *argv[])

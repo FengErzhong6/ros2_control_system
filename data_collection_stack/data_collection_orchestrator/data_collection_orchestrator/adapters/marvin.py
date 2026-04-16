@@ -378,6 +378,7 @@ class MarvinAdapter(AdapterBase):
             "collision_guard_binary_search_steps": 5,
             "enable_moveit_go_home": True,
             "motion_allow_legacy_home_fallback": False,
+            "target_pose_file_dump_requires_recording_state": True,
         }
         raw_arguments = self.device.config.get("launch_arguments", {})
         if isinstance(raw_arguments, dict):
