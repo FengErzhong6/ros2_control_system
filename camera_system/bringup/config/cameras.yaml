@@ -1,3 +1,6 @@
+# `preview_fps` only limits the UI preview bridge topic.
+# Driver capture fps comes from the selected profile in `orbbec_defaults.yaml`
+# or `realsense_defaults.yaml`.
 cameras:
   cam_left_wrist:
     driver: orbbec

@@ -33,6 +33,8 @@ def generate_launch_description():
         executable="supervisor",
         name="data_collection_supervisor",
         output="screen",
+        sigterm_timeout=LaunchConfiguration("supervisor_sigterm_timeout_sec"),
+        sigkill_timeout=LaunchConfiguration("supervisor_sigkill_timeout_sec"),
         parameters=[
             {
                 "recipe_id": LaunchConfiguration("recipe_id"),
@@ -84,6 +86,8 @@ def generate_launch_description():
             DeclareLaunchArgument("ui_config", default_value=default_ui_config),
             DeclareLaunchArgument("shutdown_on_ui_exit", default_value="true"),
             DeclareLaunchArgument("shutdown_on_supervisor_exit", default_value="false"),
+            DeclareLaunchArgument("supervisor_sigterm_timeout_sec", default_value="20.0"),
+            DeclareLaunchArgument("supervisor_sigkill_timeout_sec", default_value="20.0"),
             supervisor_node,
             ui_node,
             RegisterEventHandler(

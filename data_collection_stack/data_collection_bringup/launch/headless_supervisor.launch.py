@@ -35,11 +35,15 @@ def generate_launch_description():
             DeclareLaunchArgument("trackers_config", default_value=default_trackers_config),
             DeclareLaunchArgument("manus_config", default_value=default_manus_config),
             DeclareLaunchArgument("manus_user_name", default_value=""),
+            DeclareLaunchArgument("supervisor_sigterm_timeout_sec", default_value="20.0"),
+            DeclareLaunchArgument("supervisor_sigkill_timeout_sec", default_value="20.0"),
             Node(
                 package="data_collection_orchestrator",
                 executable="supervisor",
                 name="data_collection_supervisor",
                 output="screen",
+                sigterm_timeout=LaunchConfiguration("supervisor_sigterm_timeout_sec"),
+                sigkill_timeout=LaunchConfiguration("supervisor_sigkill_timeout_sec"),
                 parameters=[
                     {
                         "recipe_id": LaunchConfiguration("recipe_id"),

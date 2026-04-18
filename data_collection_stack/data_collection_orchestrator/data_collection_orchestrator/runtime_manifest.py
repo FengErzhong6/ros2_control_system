@@ -47,7 +47,7 @@ class RuntimeManifest:
 
     def cleanup_known_orphans(self) -> list[str]:
         notes: list[str] = []
-        notes.extend(self._cleanup_orphaned_marvin_robot_state_publishers())
+        notes.extend(self._cleanup_orphaned_stack_process_groups())
         return notes
 
     def set_context(self, *, recipe_id: str, system_state: str) -> None:
@@ -347,6 +347,107 @@ class RuntimeManifest:
 
         return notes
 
+    def _cleanup_orphaned_stack_process_groups(self) -> list[str]:
+        notes: list[str] = []
+        cleaned_pgids: set[int] = set()
+        cleaned_pids: set[int] = set()
+
+        for proc_entry in Path("/proc").iterdir():
+            if not proc_entry.name.isdigit():
+                continue
+
+            pid = int(proc_entry.name)
+            if pid in {0, self._supervisor_pid, os.getpid()}:
+                continue
+
+            command = self._read_proc_cmdline(pid)
+            if not command:
+                continue
+
+            device_id = self._stack_orphan_device_id(command)
+            if not device_id:
+                continue
+
+            ppid = self._read_proc_ppid(pid)
+            if not self._process_looks_orphaned(ppid):
+                continue
+
+            pgid = self._safe_getpgid(pid)
+            if pgid is not None and pgid not in {os.getpid(), os.getpgrp()}:
+                if pgid in cleaned_pgids:
+                    continue
+                cleaned_pgids.add(pgid)
+                notes.extend(
+                    self._signal_process_group(
+                        pgid,
+                        device_id=device_id,
+                        command=command,
+                        pid=pid,
+                    )
+                )
+                continue
+
+            if pid in cleaned_pids:
+                continue
+            cleaned_pids.add(pid)
+            notes.extend(
+                self._signal_process(
+                    pid,
+                    device_id=device_id,
+                    command=command,
+                )
+            )
+
+        return notes
+
+    def _stack_orphan_device_id(self, command: list[str]) -> str:
+        executable = Path(command[0]).name
+        full_command = " ".join(command)
+
+        if "ros2 launch camera_system single_realsense.launch.py" in full_command:
+            return "orphaned_camera_stack"
+        if "ros2 launch camera_system single_orbbec.launch.py" in full_command:
+            return "orphaned_camera_stack"
+        if "ros2 run htc_system tracker_publisher" in full_command:
+            return "orphaned_htc_tracker"
+        if "ros2 launch htc_system tracker_publisher.launch.py" in full_command:
+            return "orphaned_htc_tracker"
+        if "ros2 launch manus_system manus_raw_publisher.launch.py" in full_command:
+            return "orphaned_manus_glove"
+        if "ros2 launch marvin_system marvin_tracker_teleop.launch.py" in full_command:
+            return "orphaned_marvin_stack"
+
+        if executable == "camera_preview_bridge":
+            return "orphaned_camera_stack"
+        if executable == "tracker_publisher":
+            return "orphaned_htc_tracker"
+        if executable == "manus_raw_publisher_node":
+            return "orphaned_manus_glove"
+        if executable == "manus_gripper_node":
+            return "orphaned_manus_gripper"
+        if executable == "motion_server":
+            return "orphaned_marvin_stack"
+        if executable == "move_group_wrapper.py":
+            return "orphaned_marvin_move_group"
+        if executable == "ui_stub":
+            return "orphaned_data_collection_ui"
+        if executable == "robot_state_publisher":
+            params_file = self._extract_params_file(command)
+            if params_file is not None and self._params_file_contains_marvin_dual(params_file):
+                return "orphaned_marvin_robot_state_publisher"
+            return ""
+        if executable == "ros2_control_node":
+            for params_file in self._extract_params_files(command):
+                params_path = Path(params_file)
+                if (
+                    self._params_file_contains_marvin_dual(params_path)
+                    or "marvin_tracker_teleop_controllers.yaml" in str(params_path)
+                    or "marvin_dual_trajectory_controllers.yaml" in str(params_path)
+                ):
+                    return "orphaned_marvin_ros2_control"
+            return ""
+        return ""
+
     def _read_proc_cmdline(self, pid: int) -> list[str]:
         cmdline_path = Path(f"/proc/{pid}/cmdline")
         try:
@@ -377,6 +478,16 @@ class RuntimeManifest:
                 return None
             return Path(command[index + 1])
         return None
+
+    def _extract_params_files(self, command: list[str]) -> list[Path]:
+        paths: list[Path] = []
+        for index, item in enumerate(command):
+            if item != "--params-file":
+                continue
+            if index + 1 >= len(command):
+                continue
+            paths.append(Path(command[index + 1]))
+        return paths
 
     def _params_file_contains_marvin_dual(self, path: Path) -> bool:
         try:

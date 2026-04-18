@@ -1318,14 +1318,35 @@ def launch_setup(context):
         ))
 
     # Serialize controller bringup to avoid cold-boot races in controller_manager.
-    launch_sequence = [
-        RegisterEventHandler(
-            OnProcessExit(
-                target_action=joint_state_broadcaster_spawner,
-                on_exit=[tracker_teleop_controller_spawner],
-            ),
+    launch_sequence = []
+    if enable_moveit_go_home_value:
+        # Pre-load the trajectory controller early, but keep it inactive. GoHome only needs this
+        # controller to be loaded ahead of time; it should not own interfaces during teleop.
+        launch_sequence.append(
+            RegisterEventHandler(
+                OnProcessExit(
+                    target_action=joint_state_broadcaster_spawner,
+                    on_exit=[dual_arm_trajectory_controller_spawner],
+                ),
+            )
         )
-    ]
+        launch_sequence.append(
+            RegisterEventHandler(
+                OnProcessExit(
+                    target_action=dual_arm_trajectory_controller_spawner,
+                    on_exit=[tracker_teleop_controller_spawner],
+                ),
+            )
+        )
+    else:
+        launch_sequence.append(
+            RegisterEventHandler(
+                OnProcessExit(
+                    target_action=joint_state_broadcaster_spawner,
+                    on_exit=[tracker_teleop_controller_spawner],
+                ),
+            )
+        )
 
     last_controller_spawner = tracker_teleop_controller_spawner
     if gripper_spawners:
@@ -1383,9 +1404,6 @@ def launch_setup(context):
         )
 
     final_followup_actions = []
-    if enable_moveit_go_home_value:
-        final_followup_actions.append(dual_arm_trajectory_controller_spawner)
-
     if start_manus_gripper_bridge_value:
         final_followup_actions.append(
             Node(

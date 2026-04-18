@@ -5,30 +5,38 @@ devices:
     required: true
     depends_on: []
     ready_timeout_sec: 15.0
+    startup_no_image_restart_timeout_sec: 12.0
+    use_managed_launch: true
   - id: cam_left_wrist
     adapter: camera
     required: true
     depends_on: []
     ready_timeout_sec: 15.0
+    use_managed_launch: true
   - id: cam_right_wrist
     adapter: camera
     required: true
     depends_on: []
     ready_timeout_sec: 15.0
+    use_managed_launch: true
   - id: htc_tracker
     adapter: htc
     required: true
     depends_on: []
+    use_managed_launch: true
   - id: manus_glove
     adapter: manus
     required: true
     depends_on: []
+    use_managed_launch: true
   - id: marvin_dual
     adapter: marvin
     required: true
     depends_on:
       - htc_tracker
       - manus_glove
+    use_managed_launch: true
+    ready_timeout_sec: 45.0
     launch_arguments:
       use_gripper_L: true
       use_gripper_R: true

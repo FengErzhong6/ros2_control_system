@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from controller_manager_msgs.srv import ListControllers
 import math
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ import time
 
 from ament_index_python.packages import get_package_share_directory
 from marvin_system.srv import GetMotionMode, GetMotionStatus, SetMotionMode
+import rclpy
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import JointState
@@ -19,6 +21,7 @@ from std_msgs.msg import String
 from std_srvs.srv import SetBool, Trigger
 import yaml
 
+from ..managed_launch import ManagedLaunchSession
 from .base import AdapterBase, AdapterResult
 
 
@@ -27,7 +30,8 @@ class MarvinAdapter(AdapterBase):
     DEFAULT_LAUNCH_FILE = "marvin_tracker_teleop.launch.py"
     DEFAULT_HOME_POSES_RELATIVE_PATH = "motion/config/home_poses.yaml"
     DEFAULT_CONTROLLER_CONFIG_RELATIVE_PATH = "bringup/config/marvin_tracker_teleop_controllers.yaml"
-    REQUIRED_CONTROLLERS = {
+    TRAJECTORY_CONTROLLER_NAME = "dual_arm_trajectory_controller"
+    REQUIRED_CONTROLLER_STATES = {
         "joint_state_broadcaster": "active",
         "tracker_teleop_controller": "active",
     }
@@ -43,12 +47,15 @@ class MarvinAdapter(AdapterBase):
         super().__init__(device, node=node)
         self._process: subprocess.Popen | None = None
         self._log_handle = None
+        self._managed_launch: ManagedLaunchSession | None = None
         self._log_path: Path | None = None
         self._launch_command: list[str] = []
+        self._ready_relaunch_count = 0
         self._latest_teleop_state = ""
         self._teleop_state_subscription = None
         self._joint_state_subscription = None
         self._service_callback_group = None
+        self._list_controllers_client = None
         self._motion_go_home_client = None
         self._motion_set_mode_client = None
         self._motion_get_mode_client = None
@@ -79,6 +86,11 @@ class MarvinAdapter(AdapterBase):
             self._motion_go_home_client = self.node.create_client(
                 Trigger,
                 "/marvin_motion/go_home",
+                callback_group=self._service_callback_group,
+            )
+            self._list_controllers_client = self.node.create_client(
+                ListControllers,
+                "/controller_manager/list_controllers",
                 callback_group=self._service_callback_group,
             )
             self._motion_set_mode_client = self.node.create_client(
@@ -119,94 +131,182 @@ class MarvinAdapter(AdapterBase):
         )
 
     def bringup(self) -> AdapterResult:
+        if self._managed_launch is not None and self._managed_launch.is_running():
+            return AdapterResult.ok(f"{self.device.device_id}: Marvin bringup already running.")
         if self._process is not None and self._process.poll() is None:
             return AdapterResult.ok(f"{self.device.device_id}: Marvin bringup already running.")
 
-        self._cleanup_process_state()
-        log_dir = Path(tempfile.mkdtemp(prefix="marvin_adapter_"))
-        self._log_path = log_dir / "launch.log"
-        self._log_handle = self._log_path.open("w", encoding="utf-8")
-
-        self._launch_command = self._build_launch_command()
-        try:
-            self._process = subprocess.Popen(
-                self._launch_command,
-                stdout=self._log_handle,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-                env=self._process_environment(),
-            )
-        except OSError as exc:
-            self._cleanup_process_state()
-            return AdapterResult.failed(f"{self.device.device_id}: failed to start Marvin launch: {exc}")
-
-        time.sleep(0.5)
-        if self._process.poll() is not None:
-            return AdapterResult.failed(
-                f"{self.device.device_id}: Marvin launch exited early.\n{self._diagnostic_summary()}"
-            )
-
-        return AdapterResult.ok(
-            f"{self.device.device_id}: Marvin launch started.",
-            metadata={
-                "pid": self._process.pid,
-                "log_path": str(self._log_path),
-                "command": self._launch_command,
-            },
-        )
+        self._ready_relaunch_count = 0
+        return self._start_launch_process()
 
     def wait_ready(self, timeout_sec: float) -> AdapterResult:
-        process = self._process
-        if process is None:
-            return AdapterResult.failed(f"{self.device.device_id}: Marvin launch was not started.")
+        ready_timeout_sec = self._ready_timeout_sec(timeout_sec)
+        relaunch_budget = self._ready_relaunch_attempts()
+        no_ready_restart_timeout_sec = self._startup_no_ready_restart_timeout_sec()
 
-        deadline = time.monotonic() + self._ready_timeout_sec(timeout_sec)
-        while time.monotonic() < deadline:
-            if process.poll() is not None:
+        while True:
+            process = self._process
+            managed_launch = self._managed_launch
+            if process is None and managed_launch is None:
                 return AdapterResult.failed(
-                    f"{self.device.device_id}: Marvin launch exited before READY.\n"
+                    f"{self.device.device_id}: Marvin launch was not started."
+                )
+
+            last_controllers: dict[str, str] | None = None
+            last_missing_controllers = list(self._required_controller_states().keys())
+            last_missing_services: list[str] | None = None
+            last_motion_status = "not queried"
+            next_progress_report_monotonic = time.monotonic() + 5.0
+            attempt_started_monotonic = time.monotonic()
+            deadline = time.monotonic() + ready_timeout_sec
+            failure_summary = ""
+            restarted_early = False
+            while time.monotonic() < deadline:
+                launch_running = (
+                    managed_launch.is_running()
+                    if managed_launch is not None
+                    else (process is not None and process.poll() is None)
+                )
+                if not launch_running:
+                    failure_summary = (
+                        f"{self.device.device_id}: Marvin launch exited before READY.\n"
+                        f"{self._diagnostic_summary()}"
+                    )
+                    break
+
+                controllers = self._list_controllers()
+                if controllers is not None:
+                    last_controllers = controllers
+                    last_missing_controllers = self._missing_required_controllers(controllers)
+                else:
+                    last_motion_status = "waiting for controller_manager/list_controllers"
+
+                if controllers is not None and not last_missing_controllers:
+                    missing_services = [
+                        service_name
+                        for service_name, service_type in self.REQUIRED_SERVICES.items()
+                        if not self._service_available(service_name, service_type)
+                    ]
+                    last_missing_services = missing_services
+                    if not missing_services:
+                        status_response, status_error = self._motion_status_response(timeout_sec=1.0)
+                        last_motion_status = self._motion_status_debug_summary(
+                            status_response,
+                            status_error,
+                        )
+                        if status_response is not None:
+                            if (
+                                bool(getattr(status_response, "success", False))
+                                and not bool(getattr(status_response, "motion_busy", False))
+                                and bool(getattr(status_response, "controller_interlock_ok", True))
+                            ):
+                                return AdapterResult.ok(
+                                    f"{self.device.device_id}: controller_manager and marvin_motion are READY "
+                                    f"(teleop and go_home readiness satisfied).",
+                                    metadata={
+                                        "controllers": controllers,
+                                        "mode": str(getattr(status_response, "mode", "")).strip(),
+                                        "teleop_state": str(
+                                            getattr(status_response, "teleop_state", "")
+                                        ).strip(),
+                                        "go_home_ready": True,
+                                        "log_path": None if self._log_path is None else str(self._log_path),
+                                    },
+                                )
+                    else:
+                        last_motion_status = "waiting for required marvin_motion services"
+
+                if time.monotonic() >= next_progress_report_monotonic:
+                    if self.node is not None:
+                        self.node.get_logger().warn(
+                            f"{self.device.device_id}: waiting for READY. "
+                            f"{self._ready_wait_debug_summary(last_controllers, last_missing_controllers, last_missing_services, last_motion_status).replace(chr(10), ' | ')}"
+                        )
+                    next_progress_report_monotonic = time.monotonic() + 5.0
+
+                early_restart_reason = self._early_restart_reason_from_log()
+                if relaunch_budget > 0 and early_restart_reason:
+                    restart_result = self._restart_launch_for_ready_failure(
+                        reason=early_restart_reason,
+                    )
+                    if restart_result.is_failure():
+                        return AdapterResult.failed(
+                            f"{self.device.device_id}: Marvin early auto-restart failed. "
+                            f"{restart_result.summary}"
+                        )
+                    relaunch_budget -= 1
+                    restarted_early = True
+                    break
+
+                if (
+                    relaunch_budget > 0
+                    and no_ready_restart_timeout_sec > 0.0
+                    and time.monotonic() - attempt_started_monotonic >= no_ready_restart_timeout_sec
+                ):
+                    restart_result = self._restart_launch_for_ready_failure(
+                        reason=(
+                            f"marvin did not satisfy READY conditions within "
+                            f"{no_ready_restart_timeout_sec:.1f}s on first launch"
+                        ),
+                    )
+                    if restart_result.is_failure():
+                        return AdapterResult.failed(
+                            f"{self.device.device_id}: Marvin early auto-restart failed. "
+                            f"{restart_result.summary}"
+                        )
+                    relaunch_budget -= 1
+                    restarted_early = True
+                    break
+
+                time.sleep(0.5)
+            else:
+                failure_summary = (
+                    f"{self.device.device_id}: Marvin READY timeout after "
+                    f"{ready_timeout_sec:.1f}s.\n"
+                    f"{self._ready_wait_debug_summary(last_controllers, last_missing_controllers, last_missing_services, last_motion_status)}\n"
                     f"{self._diagnostic_summary()}"
                 )
 
-            controllers = self._list_controllers()
-            if controllers is not None and self._controllers_ready(controllers):
-                missing_services = [
-                    service_name
-                    for service_name, service_type in self.REQUIRED_SERVICES.items()
-                    if not self._service_available(service_name, service_type)
-                ]
-                if not missing_services:
-                    status_response, status_error = self._motion_status_response(timeout_sec=1.0)
-                    if status_response is not None:
-                        if (
-                            bool(getattr(status_response, "success", False))
-                            and not bool(getattr(status_response, "motion_busy", False))
-                            and bool(getattr(status_response, "controller_interlock_ok", True))
-                        ):
-                            return AdapterResult.ok(
-                                f"{self.device.device_id}: controller_manager and marvin_motion are READY.",
-                                metadata={
-                                    "controllers": controllers,
-                                    "mode": str(getattr(status_response, "mode", "")).strip(),
-                                    "teleop_state": str(
-                                        getattr(status_response, "teleop_state", "")
-                                    ).strip(),
-                                    "log_path": None if self._log_path is None else str(self._log_path),
-                                },
-                            )
-                    elif status_error:
-                        time.sleep(0.1)
+            if restarted_early:
+                continue
 
-            time.sleep(0.5)
+            if relaunch_budget <= 0:
+                return AdapterResult.failed(failure_summary)
 
-        return AdapterResult.failed(
-            f"{self.device.device_id}: Marvin READY timeout after "
-            f"{self._ready_timeout_sec(timeout_sec):.1f}s.\n{self._diagnostic_summary()}"
-        )
+            relaunch_budget -= 1
+            restart_result = self._restart_launch_for_ready_failure(
+                reason=(
+                    "marvin launch exited before READY"
+                    if not launch_running
+                    else "marvin did not satisfy READY conditions on first launch"
+                ),
+            )
+            if restart_result.is_failure():
+                return AdapterResult.failed(
+                    f"{failure_summary}\nAuto-restart failed: {restart_result.summary}"
+                )
 
     def shutdown(self) -> AdapterResult:
-        self._call_set_bool_service("/marvin_motion/set_enabled", False, timeout_sec=3.0)
-        self._call_set_mode_service("SAFE_HOLD", timeout_sec=3.0)
+        if self._launch_is_running() and self._ros_context_is_usable():
+            self._call_set_bool_service("/marvin_motion/set_enabled", False, timeout_sec=3.0)
+            self._call_set_mode_service("SAFE_HOLD", timeout_sec=3.0)
+
+        managed_launch = self._managed_launch
+        if managed_launch is not None:
+            if not managed_launch.is_running():
+                exit_code = managed_launch.launch_exit_code()
+                self._cleanup_process_state()
+                return AdapterResult.ok(
+                    f"{self.device.device_id}: Marvin launch already exited with code {exit_code}."
+                )
+
+            if not managed_launch.shutdown(timeout_sec=18.0):
+                return AdapterResult.failed(
+                    f"{self.device.device_id}: managed Marvin launch did not stop within timeout."
+                )
+
+            self._cleanup_process_state()
+            return AdapterResult.ok(f"{self.device.device_id}: Marvin launch stopped.")
 
         process = self._process
         if process is None:
@@ -220,22 +320,28 @@ class MarvinAdapter(AdapterBase):
                 f"{self.device.device_id}: Marvin launch already exited with code {exit_code}."
             )
 
-        # Ask the ros2 launch parent process to exit first so it can shut down child nodes
-        # in launch-managed order. Escalate to the full process group only if it gets stuck.
-        if not self._signal_process(process, signal.SIGINT, timeout_sec=12.0):
-            self._signal_process(process, signal.SIGTERM, timeout_sec=6.0)
-        if process.poll() is None:
+        # Always drain the full process group before returning. The ros2 launch parent can
+        # exit while child nodes are still shutting down, and those stale child processes can
+        # confuse the next bringup attempt by keeping old ROS graph services alive.
+        if not self._signal_process_group(process, signal.SIGINT, timeout_sec=12.0):
+            self._signal_process_group(process, signal.SIGTERM, timeout_sec=6.0)
+        if not self._wait_for_process_group_exit(process.pid, timeout_sec=2.0):
             self._signal_process_group(process, signal.SIGTERM, timeout_sec=4.0)
-        if process.poll() is None:
+        if not self._wait_for_process_group_exit(process.pid, timeout_sec=2.0):
             self._signal_process_group(process, signal.SIGKILL, timeout_sec=2.0)
+        self._wait_for_process_group_exit(process.pid, timeout_sec=1.0)
 
         self._cleanup_process_state()
         return AdapterResult.ok(f"{self.device.device_id}: Marvin launch stopped.")
 
     def diagnose(self) -> AdapterResult:
-        if self._process is None:
+        if self._managed_launch is None and self._process is None:
             return AdapterResult.failed(f"{self.device.device_id}: Marvin launch not started.")
-        if self._process.poll() is not None:
+        if self._managed_launch is not None and not self._managed_launch.is_running():
+            return AdapterResult.failed(
+                f"{self.device.device_id}: Marvin launch exited with code {self._managed_launch.launch_exit_code()}."
+            )
+        if self._managed_launch is None and self._process.poll() is not None:
             return AdapterResult.failed(
                 f"{self.device.device_id}: Marvin launch exited with code {self._process.returncode}."
             )
@@ -291,6 +397,8 @@ class MarvinAdapter(AdapterBase):
                 "log_path": None if self._log_path is None else str(self._log_path),
             }
         )
+        if self._managed_launch is not None:
+            metadata.update(self._managed_launch.metadata())
         return metadata
 
     def record_topics(self) -> list[str]:
@@ -401,6 +509,38 @@ class MarvinAdapter(AdapterBase):
             return "true" if value else "false"
         return str(value)
 
+    def _launch_file_path(self) -> str:
+        launch_file = self._launch_file()
+        launch_path = Path(launch_file).expanduser()
+        if launch_path.is_absolute() or "/" in launch_file:
+            return str(launch_path)
+
+        package_share = Path(get_package_share_directory(self._launch_package()))
+        candidates = [
+            package_share / "bringup" / "launch" / launch_file,
+            package_share / "launch" / launch_file,
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+        return str(candidates[0])
+
+    def _matches_marvin_process(self, process_name: str, cmd: list[str]) -> bool:
+        executable_markers = {
+            "ros2_control_node",
+            "robot_state_publisher",
+            "move_group_wrapper.py",
+            "motion_server",
+            "manus_gripper_node",
+            "spawner",
+        }
+        if process_name in executable_markers:
+            return True
+        joined = " ".join(cmd)
+        if any(marker in joined for marker in executable_markers):
+            return True
+        return "marvin_system" in joined or "tracker_teleop_controller" in joined
+
     def _ready_timeout_sec(self, timeout_sec: float) -> float:
         configured = self.device.config.get("ready_timeout_sec", 30.0)
         if timeout_sec > 0.0:
@@ -409,6 +549,27 @@ class MarvinAdapter(AdapterBase):
             return float(configured)
         except (TypeError, ValueError):
             return 30.0
+
+    def _startup_no_ready_restart_timeout_sec(self) -> float:
+        configured = self.device.config.get("startup_no_ready_restart_timeout_sec", 20.0)
+        try:
+            return max(0.0, float(configured))
+        except (TypeError, ValueError):
+            return 20.0
+
+    def _ready_relaunch_attempts(self) -> int:
+        configured = self.device.config.get("ready_relaunch_attempts", 1)
+        try:
+            return max(0, int(configured))
+        except (TypeError, ValueError):
+            return 1
+
+    def _ready_relaunch_backoff_sec(self) -> float:
+        configured = self.device.config.get("ready_relaunch_backoff_sec", 1.0)
+        try:
+            return max(0.0, float(configured))
+        except (TypeError, ValueError):
+            return 1.0
 
     def _process_environment(self) -> dict[str, str]:
         env = os.environ.copy()
@@ -428,6 +589,23 @@ class MarvinAdapter(AdapterBase):
             return None
 
     def _list_controllers(self) -> dict[str, str] | None:
+        if self._list_controllers_client is not None:
+            response, error_message = self._call_service_response(
+                client=self._list_controllers_client,
+                request=ListControllers.Request(),
+                timeout_sec=1.0,
+            )
+            if response is None:
+                return None
+
+            controllers: dict[str, str] = {}
+            for controller in getattr(response, "controller", []):
+                name = str(getattr(controller, "name", "")).strip()
+                state = str(getattr(controller, "state", "")).strip()
+                if name:
+                    controllers[name] = state
+            return controllers
+
         completed = self._run_ros2_command(
             ["ros2", "control", "list_controllers"],
             timeout_sec=3.0,
@@ -447,18 +625,87 @@ class MarvinAdapter(AdapterBase):
         return controllers
 
     def _controllers_ready(self, controllers: dict[str, str]) -> bool:
-        for controller_name, required_state in self._required_controllers().items():
-            if controllers.get(controller_name) != required_state:
+        for controller_name, required_states in self._required_controller_states().items():
+            if controllers.get(controller_name) not in required_states:
                 return False
         return True
 
-    def _required_controllers(self) -> dict[str, str]:
-        required = dict(self.REQUIRED_CONTROLLERS)
+    def _missing_required_controllers(self, controllers: dict[str, str]) -> list[str]:
+        missing = []
+        for controller_name, required_states in self._required_controller_states().items():
+            actual_state = controllers.get(controller_name)
+            if actual_state not in required_states:
+                actual_label = "missing" if actual_state is None else actual_state
+                expected_label = "/".join(sorted(required_states))
+                missing.append(
+                    f"{controller_name}={actual_label} (expected {expected_label})"
+                )
+        return missing
+
+    def _motion_status_debug_summary(self, response, error_message: str) -> str:
+        if response is None:
+            return f"unavailable ({error_message or 'unknown error'})"
+
+        message = str(getattr(response, "message", "")).strip() or "n/a"
+        return (
+            f"success={bool(getattr(response, 'success', False))} "
+            f"mode={str(getattr(response, 'mode', '')).strip() or 'unknown'} "
+            f"teleop={str(getattr(response, 'teleop_state', '')).strip() or 'unknown'} "
+            f"busy={bool(getattr(response, 'motion_busy', False))} "
+            f"interlock={bool(getattr(response, 'controller_interlock_ok', True))} "
+            f"primary={str(getattr(response, 'primary_controller_state', '')).strip() or 'unknown'} "
+            f"trajectory={str(getattr(response, 'trajectory_controller_state', '')).strip() or 'unknown'} "
+            f"message={message}"
+        )
+
+    def _ready_wait_debug_summary(
+        self,
+        controllers: dict[str, str] | None,
+        missing_controllers: list[str],
+        missing_services: list[str] | None,
+        motion_status: str,
+    ) -> str:
+        lines = []
+        if controllers is None:
+            lines.append("controller_snapshot=unavailable")
+        else:
+            required_snapshot = ", ".join(
+                f"{name}={controllers.get(name, 'missing')}"
+                for name in sorted(self._required_controller_states().keys())
+            )
+            lines.append(f"required_controllers={required_snapshot}")
+
+        if missing_controllers:
+            lines.append(
+                "missing_required_controllers=" + ", ".join(missing_controllers)
+            )
+        else:
+            lines.append("missing_required_controllers=none")
+
+        if missing_services is None:
+            lines.append("missing_required_services=not checked")
+        elif missing_services:
+            lines.append("missing_required_services=" + ", ".join(missing_services))
+        else:
+            lines.append("missing_required_services=none")
+
+        lines.append(f"last_motion_status={motion_status}")
+        return "\n".join(lines)
+
+    def _required_controller_states(self) -> dict[str, set[str]]:
+        required = {
+            controller_name: {required_state}
+            for controller_name, required_state in self.REQUIRED_CONTROLLER_STATES.items()
+        }
         launch_arguments = self._launch_arguments()
         if self._launch_arg_enabled(launch_arguments.get("use_gripper_L", False)):
-            required["gripper_L_controller"] = "active"
+            required["gripper_L_controller"] = {"active"}
         if self._launch_arg_enabled(launch_arguments.get("use_gripper_R", False)):
-            required["gripper_R_controller"] = "active"
+            required["gripper_R_controller"] = {"active"}
+        if self._launch_arg_enabled(launch_arguments.get("enable_moveit_go_home", False)):
+            # GoHome only needs the trajectory controller to be loaded; it is expected
+            # to stay inactive until motion_server switches into MOTION mode.
+            required[self.TRAJECTORY_CONTROLLER_NAME] = {"inactive", "active"}
         return required
 
     def _launch_arg_enabled(self, value: object) -> bool:
@@ -468,17 +715,35 @@ class MarvinAdapter(AdapterBase):
             return value.strip().lower() == "true"
         return bool(value)
 
+    def _launch_is_running(self) -> bool:
+        if self._managed_launch is not None:
+            return self._managed_launch.is_running()
+        return self._process is not None and self._process.poll() is None
+
+    def _ros_context_is_usable(self) -> bool:
+        if self.node is None:
+            return False
+        try:
+            return self.node.context.ok() and rclpy.ok(context=self.node.context)
+        except Exception:
+            return False
+
     def _service_available(self, service_name: str, expected_type: str) -> bool:
         del expected_type
+        if not self._ros_context_is_usable():
+            return False
         client = self._client_for_service(service_name)
         if client is not None:
-            return client.service_is_ready()
+            try:
+                return client.service_is_ready()
+            except Exception:
+                return False
         return False
 
     def _call_set_bool_service(
         self, service_name: str, value: bool, timeout_sec: float
     ) -> AdapterResult:
-        if self._process is None or self._process.poll() is not None:
+        if not self._launch_is_running():
             return AdapterResult.failed(
                 f"{self.device.device_id}: Marvin launch is not running for {service_name}."
             )
@@ -499,7 +764,7 @@ class MarvinAdapter(AdapterBase):
         )
 
     def _call_trigger_service(self, service_name: str, timeout_sec: float) -> AdapterResult:
-        if self._process is None or self._process.poll() is not None:
+        if not self._launch_is_running():
             return AdapterResult.failed(
                 f"{self.device.device_id}: Marvin launch is not running for {service_name}."
             )
@@ -527,10 +792,19 @@ class MarvinAdapter(AdapterBase):
         success_summary: str,
         failure_prefix: str,
     ) -> AdapterResult:
-        if not client.wait_for_service(timeout_sec=timeout_sec):
+        if not self._ros_context_is_usable():
+            return AdapterResult.failed(f"{failure_prefix}: ROS context unavailable.")
+        try:
+            service_ready = client.wait_for_service(timeout_sec=timeout_sec)
+        except Exception as exc:
+            return AdapterResult.failed(f"{failure_prefix}: {exc}")
+        if not service_ready:
             return AdapterResult.failed(f"{failure_prefix}: service unavailable.")
 
-        future = client.call_async(request)
+        try:
+            future = client.call_async(request)
+        except Exception as exc:
+            return AdapterResult.failed(f"{failure_prefix}: {exc}")
         deadline = time.monotonic() + timeout_sec
         while time.monotonic() < deadline:
             if future.done():
@@ -555,10 +829,19 @@ class MarvinAdapter(AdapterBase):
     def _call_service_response(self, *, client, request, timeout_sec: float):
         if client is None:
             return None, "native client unavailable"
-        if not client.wait_for_service(timeout_sec=timeout_sec):
+        if not self._ros_context_is_usable():
+            return None, "ROS context unavailable"
+        try:
+            service_ready = client.wait_for_service(timeout_sec=timeout_sec)
+        except Exception as exc:
+            return None, str(exc)
+        if not service_ready:
             return None, "service unavailable"
 
-        future = client.call_async(request)
+        try:
+            future = client.call_async(request)
+        except Exception as exc:
+            return None, str(exc)
         deadline = time.monotonic() + timeout_sec
         while time.monotonic() < deadline:
             if future.done():
@@ -572,7 +855,7 @@ class MarvinAdapter(AdapterBase):
         return future.result(), ""
 
     def _call_set_mode_service(self, mode: str, timeout_sec: float) -> AdapterResult:
-        if self._process is None or self._process.poll() is not None:
+        if not self._launch_is_running():
             return AdapterResult.failed(
                 f"{self.device.device_id}: Marvin launch is not running for /marvin_motion/set_mode."
             )
@@ -714,6 +997,13 @@ class MarvinAdapter(AdapterBase):
         except (TypeError, ValueError):
             return self._home_timeout_sec()
 
+    def _managed_launch_start_timeout_sec(self) -> float:
+        configured = self.device.config.get("managed_launch_start_timeout_sec", 8.0)
+        try:
+            return max(2.0, float(configured))
+        except (TypeError, ValueError):
+            return 8.0
+
     def _home_settle_timeout_sec(self) -> float:
         configured = self.device.config.get("home_settle_timeout_sec", 5.0)
         try:
@@ -743,7 +1033,7 @@ class MarvinAdapter(AdapterBase):
         last_mode = "UNKNOWN"
         last_message = ""
         while time.monotonic() < deadline:
-            if self._process is None or self._process.poll() is not None:
+            if not self._launch_is_running():
                 return AdapterResult.failed(
                     f"{self.device.device_id}: Marvin launch exited while waiting for motion idle."
                 )
@@ -787,7 +1077,11 @@ class MarvinAdapter(AdapterBase):
 
         deadline = time.monotonic() + timeout_sec
         while time.monotonic() < deadline:
-            if self._process is not None and self._process.poll() is not None:
+            if self._managed_launch is not None and not self._managed_launch.is_running():
+                return AdapterResult.failed(
+                    f"{self.device.device_id}: Marvin launch exited while verifying home pose."
+                )
+            if self._managed_launch is None and self._process is not None and self._process.poll() is not None:
                 return AdapterResult.failed(
                     f"{self.device.device_id}: Marvin launch exited while verifying home pose."
                 )
@@ -886,6 +1180,21 @@ class MarvinAdapter(AdapterBase):
             time.sleep(0.2)
         return process.poll() is not None
 
+    def _wait_for_process_group_exit(self, pgid: int, timeout_sec: float) -> bool:
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                return True
+            time.sleep(0.2)
+
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        return False
+
     def _signal_process(
         self,
         process: subprocess.Popen,
@@ -908,13 +1217,115 @@ class MarvinAdapter(AdapterBase):
         return process.poll() is not None
 
     def _cleanup_process_state(self) -> None:
+        if self._managed_launch is not None:
+            self._managed_launch.close()
+            self._managed_launch = None
         if self._log_handle is not None:
             self._log_handle.close()
             self._log_handle = None
         self._process = None
 
+    def _start_launch_process(self) -> AdapterResult:
+        self._cleanup_process_state()
+        self._latest_teleop_state = ""
+        self._joint_positions.clear()
+        self._last_joint_state_monotonic = 0.0
+        self._launch_command = self._build_launch_command()
+
+        use_managed_launch = bool(self.device.config.get("use_managed_launch", False))
+        if use_managed_launch and self.launch_manager is not None:
+            managed_launch = ManagedLaunchSession(
+                launch_manager=self.launch_manager,
+                label=f"{self.device.device_id}_marvin",
+                launch_file_path=self._launch_file_path(),
+                launch_arguments=self._launch_arguments(),
+                process_matcher=self._matches_marvin_process,
+                logger=None if self.node is None else self.node.get_logger(),
+            )
+            self._managed_launch = managed_launch
+            self._log_path = Path(managed_launch.log_path)
+            try:
+                managed_launch.start()
+            except Exception as exc:
+                self._cleanup_process_state()
+                return AdapterResult.failed(
+                    f"{self.device.device_id}: failed to start managed Marvin launch: {exc}"
+                )
+
+            managed_launch.wait_started(timeout_sec=self._managed_launch_start_timeout_sec())
+            if not managed_launch.is_running():
+                return AdapterResult.failed(
+                    f"{self.device.device_id}: Marvin launch exited early.\n{self._diagnostic_summary()}"
+                )
+
+            return AdapterResult.ok(
+                f"{self.device.device_id}: Marvin launch started.",
+                metadata={
+                    **managed_launch.metadata(),
+                    "log_path": str(self._log_path),
+                    "command": self._launch_command,
+                },
+            )
+
+        log_dir = Path(tempfile.mkdtemp(prefix="marvin_adapter_"))
+        self._log_path = log_dir / "launch.log"
+        self._log_handle = self._log_path.open("w", encoding="utf-8")
+
+        try:
+            self._process = subprocess.Popen(
+                self._launch_command,
+                stdout=self._log_handle,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                env=self._process_environment(),
+            )
+        except OSError as exc:
+            self._cleanup_process_state()
+            return AdapterResult.failed(
+                f"{self.device.device_id}: failed to start Marvin launch: {exc}"
+            )
+
+        time.sleep(0.5)
+        if self._process.poll() is not None:
+            return AdapterResult.failed(
+                f"{self.device.device_id}: Marvin launch exited early.\n{self._diagnostic_summary()}"
+            )
+
+        return AdapterResult.ok(
+            f"{self.device.device_id}: Marvin launch started.",
+            metadata={
+                "pid": self._process.pid,
+                "log_path": str(self._log_path),
+                "command": self._launch_command,
+            },
+        )
+
+    def _restart_launch_for_ready_failure(self, reason: str) -> AdapterResult:
+        self._ready_relaunch_count += 1
+        if self.node is not None:
+            self.node.get_logger().warn(
+                f"{self.device.device_id}: Marvin not READY on first launch; "
+                f"performing auto-restart {self._ready_relaunch_count}. reason={reason}"
+            )
+
+        shutdown_result = self.shutdown()
+        if shutdown_result.is_failure():
+            return shutdown_result
+
+        backoff_sec = self._ready_relaunch_backoff_sec()
+        if backoff_sec > 0.0:
+            time.sleep(backoff_sec)
+
+        return self._start_launch_process()
+
     def _diagnostic_summary(self) -> str:
-        if self._process is None:
+        if self._managed_launch is not None:
+            status = (
+                "running"
+                if self._managed_launch.is_running()
+                else f"exited({self._managed_launch.launch_exit_code()})"
+            )
+        elif self._process is None:
             status = "not started"
         else:
             status = "running" if self._process.poll() is None else f"exited({self._process.returncode})"
@@ -927,6 +1338,8 @@ class MarvinAdapter(AdapterBase):
             f"command={command}",
             f"log_path={log_path}",
         ]
+        if self._managed_launch is not None:
+            summary.append(f"child_pids={self._managed_launch.metadata().get('child_pids', [])}")
         if tail:
             summary.append("log_tail:")
             summary.append(tail)
@@ -938,3 +1351,18 @@ class MarvinAdapter(AdapterBase):
         with self._log_path.open("r", encoding="utf-8", errors="replace") as handle:
             lines = handle.readlines()
         return "".join(lines[-max_lines:]).rstrip()
+
+    def _early_restart_reason_from_log(self) -> str:
+        log_tail = self._read_log_tail(max_lines=80)
+        if not log_tail:
+            return ""
+
+        if "SDK send failed 10 times consecutively" in log_tail:
+            return "sdk send failures exceeded retry budget during startup"
+        if "No frame update for" in log_tail:
+            return "hardware feedback frames stopped updating during startup"
+        if "Failed to activate controller" in log_tail:
+            return "controller activation failed during startup"
+        if "Unable to activate controller" in log_tail:
+            return "controller command interfaces became unavailable during startup"
+        return ""

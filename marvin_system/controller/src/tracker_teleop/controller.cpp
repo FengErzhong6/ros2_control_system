@@ -27,6 +27,10 @@ controller_interface::CallbackReturn TrackerTeleopController::on_init()
 
         auto_declare<double>("position_scale", 1.0);
         auto_declare<bool>("enable_ik_reference_logs", false);
+        auto_declare<bool>("enable_analysis_recording", false);
+        auto_declare<std::string>(
+            "analysis_record_path", "/tmp/tracker_teleop_analysis.csv");
+        auto_declare<double>("analysis_record_flush_period_sec", 0.05);
         auto_declare<double>("j4_bound", 0.0);
         auto_declare<double>("dh_d1", 0.0);
         auto_declare<std::vector<std::string>>("viz_base_frames", {"Base_L", "Base_R"});
@@ -299,6 +303,7 @@ TrackerTeleopController::on_activate(const rclcpp_lifecycle::State &)
 controller_interface::CallbackReturn
 TrackerTeleopController::on_deactivate(const rclcpp_lifecycle::State &)
 {
+    closeAnalysisRecording();
     resetTeleopRuntime(TeleopState::kDisarmed);
     cmd_interfaces_.fill(nullptr);
     state_interfaces_pos_.fill(nullptr);

@@ -19,11 +19,13 @@ devices:
     adapter: htc
     required: true
     depends_on: []
+    use_managed_launch: true
   - id: marvin_dual
     adapter: marvin
     required: true
     depends_on:
       - htc_tracker
+    use_managed_launch: true
 record_topics:
   - /cam_high/cam_high/color/image_raw
   - /cam_high/cam_high/color/camera_info

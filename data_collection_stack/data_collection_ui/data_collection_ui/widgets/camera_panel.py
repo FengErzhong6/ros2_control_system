@@ -131,10 +131,12 @@ class CameraTileWidget(QFrame):
 
     def _set_waiting_text(self) -> None:
         self._stats_label.setText(
+            f"Capture Topic: {self._capture_topic_text()}\n"
+            f"Capture FPS Target: {self._capture_fps_target_text()}\n"
             f"Preview Topic: {self._stream_config.preview_topic}\n"
             "Preview RX FPS: 0.0\n"
             "UI Display FPS: 0.0\n"
-            f"Preview Cap: {self._preview_cap_text()}\n"
+            f"Preview Publish Cap: {self._preview_cap_text()}\n"
             "Frame Age: n/a\n"
             "Resolution: waiting"
         )
@@ -150,13 +152,27 @@ class CameraTileWidget(QFrame):
             frame_age_text = f"{frame_age_sec * 1000.0:.1f} ms"
 
         self._stats_label.setText(
+            f"Capture Topic: {self._capture_topic_text()}\n"
+            f"Capture FPS Target: {self._capture_fps_target_text()}\n"
             f"Preview Topic: {snapshot.preview_topic}\n"
             f"Preview RX FPS: {snapshot.rx_fps:.1f}\n"
             f"UI Display FPS: {self._display_fps:.1f}\n"
-            f"Preview Cap: {self._preview_cap_text()}\n"
+            f"Preview Publish Cap: {self._preview_cap_text()}\n"
             f"Frame Age: {frame_age_text}\n"
             f"Resolution: {snapshot.image_msg.width}x{snapshot.image_msg.height}"
         )
+
+    def _capture_topic_text(self) -> str:
+        capture_topic = self._stream_config.capture_topic
+        if capture_topic is None or not capture_topic.strip():
+            return "n/a"
+        return capture_topic
+
+    def _capture_fps_target_text(self) -> str:
+        capture_fps_target = self._stream_config.capture_fps_target
+        if capture_fps_target is None:
+            return "auto"
+        return f"{capture_fps_target:.1f} Hz"
 
     def _preview_cap_text(self) -> str:
         preview_fps_limit = self._stream_config.preview_fps_limit

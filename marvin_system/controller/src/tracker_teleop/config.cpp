@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
 #include <functional>
 #include <string>
 #include <utility>
@@ -89,6 +90,10 @@ bool TrackerTeleopController::loadControllerParameters()
 
     node->get_parameter("position_scale", position_scale_);
     node->get_parameter("enable_ik_reference_logs", enable_ik_reference_logs_);
+    node->get_parameter("enable_analysis_recording", enable_analysis_recording_);
+    node->get_parameter("analysis_record_path", analysis_record_path_);
+    node->get_parameter(
+        "analysis_record_flush_period_sec", analysis_record_flush_period_sec_);
     node->get_parameter("j4_bound", j4_bound_);
     node->get_parameter("dh_d1", dh_d1_);
     node->get_parameter("smoothing_alpha", smoothing_alpha_);
@@ -145,6 +150,7 @@ bool TrackerTeleopController::loadControllerParameters()
     home_tolerance_rad_ = std::max(0.0, home_tolerance_deg) * kDeg2Rad;
 
     smoothing_alpha_ = std::clamp(smoothing_alpha_, 0.01, 1.0);
+    analysis_record_flush_period_sec_ = std::max(0.01, analysis_record_flush_period_sec_);
     tracker_interp_cycles_ = std::max(1, tracker_interp_cycles_);
     tracking_ik_config_.fk_accept_tol = std::max(1e-9, tracking_ik_config_.fk_accept_tol);
     tracking_ik_config_.fine_psi_range_deg = std::max(0.0, tracking_ik_config_.fine_psi_range_deg);
@@ -294,6 +300,11 @@ void TrackerTeleopController::logConfigurationSummary(double home_tolerance_deg)
         logger, "IK reference logs: %s",
         enable_ik_reference_logs_ ? "ON" : "OFF");
     RCLCPP_INFO(
+        logger, "Analysis recording: %s (path=%s flush=%.3f s)",
+        enable_analysis_recording_ ? "ON" : "OFF",
+        analysis_record_path_.c_str(),
+        analysis_record_flush_period_sec_);
+    RCLCPP_INFO(
         logger,
         "Tracking IK: fk_tol=%.3e fine[range=%.1f step=%.1f] fast[range=%.1f step=%.1f] "
         "expand[range=%.1f step=%.1f] score[desired=%.3f continuity=%.3f mag=%.3f psi=%.3f branch=%.3f]",
@@ -352,6 +363,10 @@ void TrackerTeleopController::resetTeleopRuntime(TeleopState teleop_state)
 
 void TrackerTeleopController::resetRuntimeState()
 {
+    analysis_record_active_.store(false, std::memory_order_relaxed);
+    analysis_record_queue_.write_index.store(0, std::memory_order_relaxed);
+    analysis_record_queue_.read_index.store(0, std::memory_order_relaxed);
+    analysis_record_queue_.dropped_count.store(0, std::memory_order_relaxed);
     for (auto &runtime : arm_state_) {
         runtime.last_joint_deg.fill(0.0);
         runtime.last_selected_ref_dir =
@@ -369,11 +384,178 @@ void TrackerTeleopController::resetRuntimeState()
         runtime.pending_diagnostics.sequence.store(0, std::memory_order_relaxed);
         runtime.pending_diagnostics.pending.store(false, std::memory_order_relaxed);
         runtime.pending_diagnostics.snapshot = ArmDiagnostics();
+        runtime.analysis_has_base_T_ee = false;
+        runtime.analysis_ik_result = IKResult::kNoTarget;
+        runtime.analysis_has_ik_solution = false;
+        runtime.analysis_ik_solution_rad.fill(0.0);
     }
     cmd_interfaces_.fill(nullptr);
     state_interfaces_pos_.fill(nullptr);
     resetTrackerState();
     resetTeleopRuntime(TeleopState::kDisarmed);
+}
+
+bool TrackerTeleopController::startAnalysisRecordingSession()
+{
+    if (!enable_analysis_recording_) {
+        return true;
+    }
+
+    if (analysis_record_path_.empty()) {
+        RCLCPP_ERROR(get_node()->get_logger(), "analysis_record_path is empty.");
+        return false;
+    }
+
+    std::error_code ec;
+    const std::filesystem::path output_path(analysis_record_path_);
+    if (output_path.has_parent_path()) {
+        std::filesystem::create_directories(output_path.parent_path(), ec);
+        if (ec) {
+            RCLCPP_ERROR(
+                get_node()->get_logger(),
+                "Failed to create analysis record directory '%s': %s",
+                output_path.parent_path().string().c_str(),
+                ec.message().c_str());
+            return false;
+        }
+    }
+
+    analysis_record_queue_.write_index.store(0, std::memory_order_relaxed);
+    analysis_record_queue_.read_index.store(0, std::memory_order_relaxed);
+    analysis_record_queue_.dropped_count.store(0, std::memory_order_relaxed);
+
+    if (analysis_record_stream_.is_open()) {
+        analysis_record_stream_.close();
+    }
+
+    analysis_record_stream_.open(output_path, std::ios::out | std::ios::trunc);
+    if (!analysis_record_stream_.is_open()) {
+        RCLCPP_ERROR(
+            get_node()->get_logger(),
+            "Failed to open analysis record file '%s'.",
+            output_path.string().c_str());
+        return false;
+    }
+
+    analysis_record_stream_.setf(std::ios::fixed);
+    analysis_record_stream_.precision(6);
+    analysis_record_stream_
+        << "sample_stamp_ns,target_stamp_ns,arm,tracker_fresh,tracker_input_changed,"
+        << "has_base_T_ee,ik_result,has_ik_solution,has_state_joint,"
+        << "interp_active,interp_step,interp_total_steps,"
+        << "base_T_ee_pos_x,base_T_ee_pos_y,base_T_ee_pos_z,"
+        << "base_T_ee_quat_x,base_T_ee_quat_y,base_T_ee_quat_z,base_T_ee_quat_w,"
+        << "ik_solution_joint1_deg,ik_solution_joint2_deg,ik_solution_joint3_deg,"
+        << "ik_solution_joint4_deg,ik_solution_joint5_deg,ik_solution_joint6_deg,"
+        << "ik_solution_joint7_deg,"
+        << "command_joint1_deg,command_joint2_deg,command_joint3_deg,"
+        << "command_joint4_deg,command_joint5_deg,command_joint6_deg,"
+        << "command_joint7_deg,"
+        << "state_joint1_deg,state_joint2_deg,state_joint3_deg,"
+        << "state_joint4_deg,state_joint5_deg,state_joint6_deg,"
+        << "state_joint7_deg\n";
+    analysis_record_stream_.flush();
+
+    RCLCPP_INFO(
+        get_node()->get_logger(),
+        "Analysis recorder writing to %s",
+        output_path.string().c_str());
+    return true;
+}
+
+void TrackerTeleopController::stopAnalysisRecordingSession()
+{
+    analysis_record_active_.store(false, std::memory_order_relaxed);
+    flushAnalysisRecording();
+
+    if (analysis_record_stream_.is_open()) {
+        analysis_record_stream_.close();
+    }
+}
+
+void TrackerTeleopController::closeAnalysisRecording()
+{
+    if (analysis_record_timer_) {
+        analysis_record_timer_.reset();
+    }
+    stopAnalysisRecordingSession();
+}
+
+void TrackerTeleopController::flushAnalysisRecording()
+{
+    if (!enable_analysis_recording_ || !analysis_record_stream_.is_open()) {
+        return;
+    }
+
+    auto &queue = analysis_record_queue_;
+    bool wrote_samples = false;
+    while (true) {
+        const size_t read_index = queue.read_index.load(std::memory_order_relaxed);
+        const size_t write_index = queue.write_index.load(std::memory_order_acquire);
+        if (read_index == write_index) {
+            break;
+        }
+
+        const auto &sample = queue.samples[read_index];
+        analysis_record_stream_
+            << sample.sample_stamp_ns << ','
+            << sample.target_stamp_ns << ','
+            << kSideLabels[sample.arm] << ','
+            << (sample.tracker_fresh ? 1 : 0) << ','
+            << (sample.tracker_input_changed ? 1 : 0) << ','
+            << (sample.has_base_T_ee ? 1 : 0) << ','
+            << static_cast<int>(sample.ik_result) << ','
+            << (sample.has_ik_solution ? 1 : 0) << ','
+            << (sample.has_state_joint ? 1 : 0) << ','
+            << (sample.interp_active ? 1 : 0) << ','
+            << sample.interp_step << ','
+            << sample.interp_total_steps << ','
+            << sample.base_t_ee_pos_x << ','
+            << sample.base_t_ee_pos_y << ','
+            << sample.base_t_ee_pos_z << ','
+            << sample.base_t_ee_quat_x << ','
+            << sample.base_t_ee_quat_y << ','
+            << sample.base_t_ee_quat_z << ','
+            << sample.base_t_ee_quat_w << ','
+            << sample.ik_solution_joint_deg[0] << ','
+            << sample.ik_solution_joint_deg[1] << ','
+            << sample.ik_solution_joint_deg[2] << ','
+            << sample.ik_solution_joint_deg[3] << ','
+            << sample.ik_solution_joint_deg[4] << ','
+            << sample.ik_solution_joint_deg[5] << ','
+            << sample.ik_solution_joint_deg[6] << ','
+            << sample.command_joint_deg[0] << ','
+            << sample.command_joint_deg[1] << ','
+            << sample.command_joint_deg[2] << ','
+            << sample.command_joint_deg[3] << ','
+            << sample.command_joint_deg[4] << ','
+            << sample.command_joint_deg[5] << ','
+            << sample.command_joint_deg[6] << ','
+            << sample.state_joint_deg[0] << ','
+            << sample.state_joint_deg[1] << ','
+            << sample.state_joint_deg[2] << ','
+            << sample.state_joint_deg[3] << ','
+            << sample.state_joint_deg[4] << ','
+            << sample.state_joint_deg[5] << ','
+            << sample.state_joint_deg[6] << '\n';
+
+        queue.read_index.store(
+            (read_index + 1) % kAnalysisRecordQueueCapacity,
+            std::memory_order_release);
+        wrote_samples = true;
+    }
+
+    const uint64_t dropped = queue.dropped_count.exchange(0, std::memory_order_acq_rel);
+    if (dropped > 0) {
+        RCLCPP_WARN(
+            get_node()->get_logger(),
+            "Dropped %llu analysis samples before file flush.",
+            static_cast<unsigned long long>(dropped));
+    }
+
+    if (wrote_samples) {
+        analysis_record_stream_.flush();
+    }
 }
 
 void TrackerTeleopController::createRosInterfaces()
@@ -410,6 +592,11 @@ void TrackerTeleopController::createRosInterfaces()
     diagnostics_timer_ = node->create_wall_timer(
         std::chrono::milliseconds(20),
         std::bind(&TrackerTeleopController::diagnosticsTimerCallback, this));
+    if (enable_analysis_recording_) {
+        analysis_record_timer_ = node->create_wall_timer(
+            std::chrono::duration<double>(analysis_record_flush_period_sec_),
+            std::bind(&TrackerTeleopController::flushAnalysisRecording, this));
+    }
 
     const auto set_armed_service_name =
         get_or_declare_string("set_armed_service_name", "~/set_armed");

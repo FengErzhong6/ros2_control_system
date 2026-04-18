@@ -41,6 +41,9 @@ tracker_teleop_controller:
 
     # ── 目标映射 / 末端跟踪 ───────────────────────────────────────────────
     enable_ik_reference_logs: false  # 是否打印详细 IK 参考/候选链日志
+    enable_analysis_recording: true
+    analysis_record_path: "/tmp/tracker_teleop_analysis.csv"
+    analysis_record_flush_period_sec: 0.05
     position_scale: 1.0        # chest_T_wrist 平移缩放因子
     base_x_scale: 1.0          # 基座 x 方向缩放因子
 

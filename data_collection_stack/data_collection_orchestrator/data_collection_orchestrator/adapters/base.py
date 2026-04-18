@@ -35,6 +35,7 @@ class AdapterBase:
     def __init__(self, device: DeviceSpec, node=None) -> None:
         self.device = device
         self.node = node
+        self.launch_manager = None if node is None else getattr(node, "launch_manager", None)
 
     def precheck(self) -> AdapterResult:
         return AdapterResult.ok(f"{self.device.device_id}: precheck passed (no-op)")

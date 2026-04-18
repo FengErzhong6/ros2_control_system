@@ -242,6 +242,76 @@ TrackerTeleopController::evaluateTrackerInputState(
     return state;
 }
 
+void TrackerTeleopController::enqueueAnalysisSample(
+    size_t arm,
+    const rclcpp::Time &sample_time,
+    bool tracker_input_changed)
+{
+    if (!enable_analysis_recording_ ||
+        !analysis_record_active_.load(std::memory_order_relaxed) ||
+        arm >= kArmCount) {
+        return;
+    }
+
+    const auto &runtime = arm_state_[arm];
+    auto &queue = analysis_record_queue_;
+    const size_t write_index = queue.write_index.load(std::memory_order_relaxed);
+    const size_t next_index = (write_index + 1) % kAnalysisRecordQueueCapacity;
+    const size_t read_index = queue.read_index.load(std::memory_order_acquire);
+    if (next_index == read_index) {
+        queue.dropped_count.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+
+    auto &sample = queue.samples[write_index];
+    sample.sample_stamp_ns = sample_time.nanoseconds();
+    sample.target_stamp_ns =
+        runtime.analysis_has_base_T_ee ?
+            rclcpp::Time(runtime.analysis_base_T_ee.header.stamp).nanoseconds() :
+            0;
+    sample.arm = static_cast<uint8_t>(arm);
+    sample.tracker_fresh = runtime.tracker_fresh;
+    sample.tracker_input_changed = tracker_input_changed;
+    sample.has_base_T_ee = runtime.analysis_has_base_T_ee;
+    sample.ik_result = static_cast<int8_t>(runtime.analysis_ik_result);
+    sample.has_ik_solution = runtime.analysis_has_ik_solution;
+    sample.interp_active = runtime.interp_active;
+    sample.interp_step = runtime.interp_step;
+    sample.interp_total_steps = runtime.interp_total_steps;
+
+    if (runtime.analysis_has_base_T_ee) {
+        sample.base_t_ee_pos_x = runtime.analysis_base_T_ee.pose.position.x;
+        sample.base_t_ee_pos_y = runtime.analysis_base_T_ee.pose.position.y;
+        sample.base_t_ee_pos_z = runtime.analysis_base_T_ee.pose.position.z;
+        sample.base_t_ee_quat_x = runtime.analysis_base_T_ee.pose.orientation.x;
+        sample.base_t_ee_quat_y = runtime.analysis_base_T_ee.pose.orientation.y;
+        sample.base_t_ee_quat_z = runtime.analysis_base_T_ee.pose.orientation.z;
+        sample.base_t_ee_quat_w = runtime.analysis_base_T_ee.pose.orientation.w;
+    } else {
+        sample.base_t_ee_pos_x = 0.0;
+        sample.base_t_ee_pos_y = 0.0;
+        sample.base_t_ee_pos_z = 0.0;
+        sample.base_t_ee_quat_x = 0.0;
+        sample.base_t_ee_quat_y = 0.0;
+        sample.base_t_ee_quat_z = 0.0;
+        sample.base_t_ee_quat_w = 1.0;
+    }
+
+    std::array<double, kJointsPerArm> state_joint_rad{};
+    sample.has_state_joint = readCurrentJointPositions(arm, state_joint_rad);
+
+    for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+        sample.ik_solution_joint_deg[joint] =
+            runtime.analysis_ik_solution_rad[joint] * kRad2Deg;
+        sample.command_joint_deg[joint] =
+            runtime.smoothed_joints_rad[joint] * kRad2Deg;
+        sample.state_joint_deg[joint] =
+            sample.has_state_joint ? state_joint_rad[joint] * kRad2Deg : 0.0;
+    }
+
+    queue.write_index.store(next_index, std::memory_order_release);
+}
+
 void TrackerTeleopController::holdCurrentPosition(size_t arm)
 {
     auto &runtime = arm_state_[arm];
@@ -396,6 +466,10 @@ void TrackerTeleopController::handleStaleTracker(
         queueDiagnostics(arm, diag);
     }
     runtime.tracker_fresh = false;
+    runtime.analysis_has_base_T_ee = false;
+    runtime.analysis_ik_result = IKResult::kNoTarget;
+    runtime.analysis_has_ik_solution = false;
+    runtime.analysis_ik_solution_rad.fill(0.0);
     holdCurrentPosition(arm);
 }
 
@@ -429,6 +503,18 @@ void TrackerTeleopController::handleFreshTrackerUpdate(size_t arm, const CachedT
         arm, base_T_ee, shoulder_v_elbow_arr, out_q_joints_rad, &diag);
     queueDiagnostics(arm, diag);
 
+    runtime.analysis_has_base_T_ee = true;
+    runtime.analysis_base_T_ee = base_T_ee;
+    runtime.analysis_ik_result = ik_result;
+    runtime.analysis_has_ik_solution =
+        ik_result == IKResult::kSuccess || ik_result == IKResult::kJointLimitClamped;
+    runtime.analysis_ik_solution_rad.fill(0.0);
+    if (runtime.analysis_has_ik_solution) {
+        for (size_t j = 0; j < kJointsPerArm; ++j) {
+            runtime.analysis_ik_solution_rad[j] = out_q_joints_rad[j];
+        }
+    }
+
     if (ik_result == IKResult::kSuccess ||
         ik_result == IKResult::kJointLimitClamped) {
         std::array<double, kJointsPerArm> goal_joints_rad{};
@@ -452,6 +538,7 @@ void TrackerTeleopController::processArmUpdate(
     if (!input_state.hand_fresh) {
         handleStaleTracker(arm, snap, input_state.tracker_input_changed);
         applySmoothedCommand(arm, dt);
+        enqueueAnalysisSample(arm, now, input_state.tracker_input_changed);
         return;
     }
 
@@ -463,6 +550,7 @@ void TrackerTeleopController::processArmUpdate(
     }
 
     applySmoothedCommand(arm, dt);
+    enqueueAnalysisSample(arm, now, input_state.tracker_input_changed);
 }
 
 }  // namespace marvin_system

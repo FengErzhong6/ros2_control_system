@@ -23,3 +23,10 @@ profiles:
     publish_tf: true
     tf_publish_rate: 0.0
     base_frame_id: "link"
+
+    # Harden cam_high against first-start RGB stream stalls by forcing a device
+    # reset before the driver fully configures streams.
+    driver_params:
+      initial_reset: true
+      wait_for_device_timeout: 15.0
+      reconnect_timeout: 6.0

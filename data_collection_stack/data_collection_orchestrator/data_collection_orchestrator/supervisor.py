@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
 from pathlib import Path
+import signal
+import threading
 import time
 from typing import Optional
 
@@ -29,6 +32,7 @@ from .adapters import AdapterResult, create_adapter
 from .command_server import CommandServer
 from .event_log import EventLog
 from .health_monitor import HealthMonitor
+from .managed_launch import LaunchManager
 from .models import ActiveSession, DeviceSpec, RecipeSpec, StartupPolicy, SupervisorConfig
 from .recipe_loader import discover_recipes, load_recipe
 from .runtime_manifest import RuntimeManifest
@@ -89,9 +93,15 @@ def _nonnegative_int(raw_value: object, default: int) -> int:
 
 
 class DataCollectionSupervisor(Node):
-    def __init__(self) -> None:
+    def __init__(self, *, launch_manager: LaunchManager | None = None) -> None:
         super().__init__("data_collection_supervisor")
 
+        self.launch_manager = launch_manager
+        self._state_lock = threading.RLock()
+        self._feedback_lock = threading.Lock()
+        self._command_lock = threading.Lock()
+        self._active_command_name = ""
+        self._active_command_started_monotonic = 0.0
         self._config = self._declare_config()
         self._runtime_manifest = RuntimeManifest()
         self._startup_policy = self._load_startup_policy()
@@ -195,42 +205,50 @@ class DataCollectionSupervisor(Node):
         )
 
     def _publish_state(self) -> None:
-        if not rclpy.ok():
-            return
-        self._state.stamp = self.get_clock().now().to_msg()
-        self._state.devices = list(self._devices.values())
-        active_session = self._session_manager.active_session
-        self._state.active_session_id = "" if active_session is None else active_session.session_id
+        with self._state_lock:
+            if not rclpy.ok():
+                return
+            self._state.stamp = self.get_clock().now().to_msg()
+            self._state.devices = list(self._devices.values())
+            active_session = self._session_manager.active_session
+            self._state.active_session_id = (
+                "" if active_session is None else active_session.session_id
+            )
+            state_snapshot = deepcopy(self._state)
+
         try:
-            self._publisher.publish(self._state)
+            self._publisher.publish(state_snapshot)
         except Exception:
             return
 
     def _set_system_state(self, system_state: str, summary: str) -> None:
-        self._state.system_state = system_state
-        self._state.summary = summary
-        self._state.allowed_commands = allowed_commands_for(system_state)
-        self._state.recipe_id = self._selected_recipe_id
-        self._event_log.record(f"{system_state}: {summary}")
-        self._runtime_manifest.set_context(
-            recipe_id=self._selected_recipe_id,
-            system_state=system_state,
-        )
+        with self._state_lock:
+            self._state.system_state = system_state
+            self._state.summary = summary
+            self._state.allowed_commands = allowed_commands_for(system_state)
+            self._state.recipe_id = self._selected_recipe_id
+            self._event_log.record(f"{system_state}: {summary}")
+            self._runtime_manifest.set_context(
+                recipe_id=self._selected_recipe_id,
+                system_state=system_state,
+            )
         self._publish_state()
 
     def _set_fault(self, summary: str, device_id: str = "") -> None:
-        fault = FaultEvent()
-        fault.stamp = self.get_clock().now().to_msg()
-        fault.fault_id = f"fault_{len(self._state.active_faults) + 1:04d}"
-        fault.device_id = device_id
-        fault.severity = FaultEvent.SEVERITY_FATAL
-        fault.summary = summary
-        fault.detail = summary
-        self._state.active_faults = [fault]
+        with self._state_lock:
+            fault = FaultEvent()
+            fault.stamp = self.get_clock().now().to_msg()
+            fault.fault_id = f"fault_{len(self._state.active_faults) + 1:04d}"
+            fault.device_id = device_id
+            fault.severity = FaultEvent.SEVERITY_FATAL
+            fault.summary = summary
+            fault.detail = summary
+            self._state.active_faults = [fault]
         self._set_system_state(SystemStates.FAULT, summary)
 
     def _clear_faults(self) -> None:
-        self._state.active_faults = []
+        with self._state_lock:
+            self._state.active_faults = []
 
     def _reset_recipe_runtime(self, shutdown_adapters: bool = False) -> None:
         if shutdown_adapters:
@@ -261,30 +279,31 @@ class DataCollectionSupervisor(Node):
         return recipe
 
     def _install_recipe(self, recipe: RecipeSpec) -> None:
-        runtime_devices = [self._apply_runtime_config(device) for device in recipe.devices]
-        self._current_recipe = RecipeSpec(
-            recipe_id=recipe.recipe_id,
-            path=recipe.path,
-            devices=runtime_devices,
-            record_topics=list(recipe.record_topics),
-        )
-        self._selected_recipe_id = recipe.recipe_id
-        self._device_specs = {device.device_id: device for device in runtime_devices}
-        self._devices = {
-            device.device_id: self._create_device_state(device)
-            for device in runtime_devices
-        }
-        self._adapters = {
-            device.device_id: create_adapter(device, node=self)
-            for device in runtime_devices
-        }
-        self._health_monitor.reset()
-        self._clear_faults()
-        self._runtime_manifest.clear()
-        self._runtime_manifest.set_context(
-            recipe_id=recipe.recipe_id,
-            system_state=self._state.system_state,
-        )
+        with self._state_lock:
+            runtime_devices = [self._apply_runtime_config(device) for device in recipe.devices]
+            self._current_recipe = RecipeSpec(
+                recipe_id=recipe.recipe_id,
+                path=recipe.path,
+                devices=runtime_devices,
+                record_topics=list(recipe.record_topics),
+            )
+            self._selected_recipe_id = recipe.recipe_id
+            self._device_specs = {device.device_id: device for device in runtime_devices}
+            self._devices = {
+                device.device_id: self._create_device_state(device)
+                for device in runtime_devices
+            }
+            self._adapters = {
+                device.device_id: create_adapter(device, node=self)
+                for device in runtime_devices
+            }
+            self._health_monitor.reset()
+            self._clear_faults()
+            self._runtime_manifest.clear()
+            self._runtime_manifest.set_context(
+                recipe_id=recipe.recipe_id,
+                system_state=self._state.system_state,
+            )
         self._publish_state()
 
     def _apply_runtime_config(self, device: DeviceSpec) -> DeviceSpec:
@@ -342,41 +361,47 @@ class DataCollectionSupervisor(Node):
         summary: str,
         ready: bool = False,
     ) -> None:
-        msg = self._devices[device_id]
-        msg.lifecycle_state = lifecycle_state
-        msg.health_state = health_state
-        msg.summary = summary
-        if ready:
-            msg.last_ready_stamp = self.get_clock().now().to_msg()
+        with self._state_lock:
+            msg = self._devices[device_id]
+            msg.lifecycle_state = lifecycle_state
+            msg.health_state = health_state
+            msg.summary = summary
+            if ready:
+                msg.last_ready_stamp = self.get_clock().now().to_msg()
         self._publish_state()
 
     def _update_device_health(self, device_id: str, health_state: int, summary: str) -> None:
-        msg = self._devices[device_id]
-        if msg.health_state == health_state and msg.summary == summary:
-            return
-        msg.health_state = health_state
-        msg.summary = summary
-        if health_state == DeviceState.HEALTH_OK:
-            msg.last_ready_stamp = self.get_clock().now().to_msg()
-        self._event_log.record(f"{device_id}: health={health_state} summary={summary}")
+        with self._state_lock:
+            msg = self._devices[device_id]
+            if msg.health_state == health_state and msg.summary == summary:
+                return
+            msg.health_state = health_state
+            msg.summary = summary
+            if health_state == DeviceState.HEALTH_OK:
+                msg.last_ready_stamp = self.get_clock().now().to_msg()
+            self._event_log.record(f"{device_id}: health={health_state} summary={summary}")
         self._publish_state()
 
     def _health_monitor_enabled(self) -> bool:
-        return self._state.system_state in {
-            SystemStates.READY,
-            SystemStates.ARMED,
-            SystemStates.RECORDING,
-            SystemStates.PAUSED,
-        }
+        with self._state_lock:
+            return self._state.system_state in {
+                SystemStates.READY,
+                SystemStates.ARMED,
+                SystemStates.RECORDING,
+                SystemStates.PAUSED,
+            }
 
     def _run_health_monitor(self) -> None:
         if self._current_recipe is None or not self._health_monitor_enabled():
             return
 
+        with self._state_lock:
+            fault_on_unhealthy = self._state.system_state == SystemStates.RECORDING
+
         reports = self._health_monitor.evaluate(
             self._current_recipe.devices,
             self._adapters,
-            fault_on_unhealthy=self._state.system_state == SystemStates.RECORDING,
+            fault_on_unhealthy=fault_on_unhealthy,
         )
         fatal_device_id = ""
         fatal_summary = ""
@@ -393,7 +418,9 @@ class DataCollectionSupervisor(Node):
                 fatal_device_id = device.device_id
                 fatal_summary = report.summary
 
-        if fatal_summary and self._state.system_state != SystemStates.FAULT:
+        with self._state_lock:
+            already_fault = self._state.system_state == SystemStates.FAULT
+        if fatal_summary and not already_fault:
             self._set_fault(fatal_summary, device_id=fatal_device_id)
 
     def _all_dependency_devices_ready(self, device: DeviceSpec) -> bool:
@@ -406,10 +433,13 @@ class DataCollectionSupervisor(Node):
         return True
 
     def _publish_feedback(self, goal_handle, action_type, detail: str) -> None:
-        feedback = action_type.Feedback()
-        feedback.current_state = self._state.system_state
-        feedback.detail = detail
-        goal_handle.publish_feedback(feedback)
+        with self._state_lock:
+            current_state = self._state.system_state
+        with self._feedback_lock:
+            feedback = action_type.Feedback()
+            feedback.current_state = current_state
+            feedback.detail = detail
+            goal_handle.publish_feedback(feedback)
 
     def _device_ready_timeout_sec(self, device: DeviceSpec) -> float:
         raw_timeout = device.config.get("ready_timeout_sec")
@@ -425,11 +455,12 @@ class DataCollectionSupervisor(Node):
         device: DeviceSpec,
         metadata: dict | None,
     ) -> None:
-        self._runtime_manifest.register_device(
-            device_id=device.device_id,
-            adapter=device.adapter,
-            metadata=metadata,
-        )
+        with self._state_lock:
+            self._runtime_manifest.register_device(
+                device_id=device.device_id,
+                adapter=device.adapter,
+                metadata=metadata,
+            )
 
     def _startup_layers(self) -> list[list[DeviceSpec]]:
         assert self._current_recipe is not None
@@ -465,12 +496,57 @@ class DataCollectionSupervisor(Node):
         return layers
 
     def _command_blocked(self, command: str) -> str | None:
-        if is_command_allowed(self._state.system_state, command):
+        with self._state_lock:
+            system_state = self._state.system_state
+            allowed_commands = list(self._state.allowed_commands)
+        with self._command_lock:
+            active_command_name = self._active_command_name
+            active_command_started_monotonic = self._active_command_started_monotonic
+        if active_command_name and active_command_name != command:
+            elapsed_sec = max(0.0, time.monotonic() - active_command_started_monotonic)
+            return (
+                f"{command} is temporarily blocked because {active_command_name} "
+                f"is already in progress ({elapsed_sec:.1f}s)."
+            )
+        if is_command_allowed(system_state, command):
             return None
         return (
-            f"{command} is not allowed while system_state={self._state.system_state}. "
-            f"allowed={self._state.allowed_commands}"
+            f"{command} is not allowed while system_state={system_state}. "
+            f"allowed={allowed_commands}"
         )
+
+    def try_begin_command(self, command: str) -> tuple[bool, str]:
+        with self._command_lock:
+            if self._active_command_name:
+                elapsed_sec = max(
+                    0.0, time.monotonic() - self._active_command_started_monotonic
+                )
+                return (
+                    False,
+                    f"{command} rejected because {self._active_command_name} is already "
+                    f"in progress ({elapsed_sec:.1f}s).",
+                )
+            self._active_command_name = command
+            self._active_command_started_monotonic = time.monotonic()
+        return True, ""
+
+    def finish_command(self, command: str, *, success: bool, detail: str = "") -> None:
+        with self._command_lock:
+            if self._active_command_name != command:
+                return
+            elapsed_sec = max(0.0, time.monotonic() - self._active_command_started_monotonic)
+            self._active_command_name = ""
+            self._active_command_started_monotonic = 0.0
+
+        outcome = "succeeded" if success else "failed"
+        message = f"{command} {outcome} in {elapsed_sec:.1f}s."
+        if detail:
+            message = f"{message} {detail}"
+        if success:
+            self.get_logger().info(message)
+        else:
+            self.get_logger().warn(message)
+        self._event_log.record(message)
 
     def _rollback_started_devices(self, started_device_ids: list[str]) -> str | None:
         started_device_id_set = set(started_device_ids)
@@ -542,7 +618,8 @@ class DataCollectionSupervisor(Node):
             if result.is_failure() and device.required and shutdown_failure is None:
                 shutdown_failure = result.summary
             if not result.is_failure():
-                self._runtime_manifest.unregister_device(device_id)
+                with self._state_lock:
+                    self._runtime_manifest.unregister_device(device_id)
             self._mark_device(
                 device_id,
                 DeviceState.LIFECYCLE_IDLE,
@@ -795,26 +872,51 @@ class DataCollectionSupervisor(Node):
             f"Starting layer {layer_index} [{layer_name}].",
         )
 
-        for device in layer:
-            failure = self._attempt_device_bringup(layer_index, device, goal_handle)
-            if failure is None:
-                started_device_ids.append(device.device_id)
-                continue
+        max_workers = max(1, len(layer))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            bringup_futures = {
+                device.device_id: executor.submit(
+                    self._attempt_device_bringup,
+                    layer_index,
+                    device,
+                    goal_handle,
+                )
+                for device in layer
+            }
+            bringup_failures: list[str] = []
+            for device in layer:
+                failure = bringup_futures[device.device_id].result()
+                if failure is None:
+                    started_device_ids.append(device.device_id)
+                    continue
+                bringup_failures.append(failure)
 
-            rollback_failure = self._shutdown_layer_devices(started_device_ids)
-            if rollback_failure is not None:
-                return f"{failure}\nLayer cleanup failure: {rollback_failure}"
-            return failure
+            if bringup_failures:
+                rollback_failure = self._shutdown_layer_devices(started_device_ids)
+                if rollback_failure is not None:
+                    return f"{bringup_failures[0]}\nLayer cleanup failure: {rollback_failure}"
+                return bringup_failures[0]
 
-        for device in layer:
-            failure = self._attempt_device_start(layer_index, device, goal_handle)
-            if failure is None:
-                continue
+            start_futures = {
+                device.device_id: executor.submit(
+                    self._attempt_device_start,
+                    layer_index,
+                    device,
+                    goal_handle,
+                )
+                for device in layer
+            }
+            start_failures: list[str] = []
+            for device in layer:
+                failure = start_futures[device.device_id].result()
+                if failure is not None:
+                    start_failures.append(failure)
 
-            rollback_failure = self._shutdown_layer_devices(started_device_ids)
-            if rollback_failure is not None:
-                return f"{failure}\nLayer cleanup failure: {rollback_failure}"
-            return failure
+            if start_failures:
+                rollback_failure = self._shutdown_layer_devices(started_device_ids)
+                if rollback_failure is not None:
+                    return f"{start_failures[0]}\nLayer cleanup failure: {rollback_failure}"
+                return start_failures[0]
 
         return None
 
@@ -982,6 +1084,21 @@ class DataCollectionSupervisor(Node):
         )
         return ended_session, None
 
+    def _reset_after_startup_failure(self, failure: str) -> None:
+        failure_head = failure.splitlines()[0].strip() if failure else "unknown startup failure"
+        self.get_logger().error(f"StartSystem failed: {failure_head}")
+        self._event_log.record(f"STARTUP_FAILED: {failure}")
+        self._set_system_state(
+            SystemStates.STOPPING,
+            "StartSystem failed during bringup. Disconnecting partial runtime.",
+        )
+        self._reset_recipe_runtime(shutdown_adapters=True)
+        self._clear_faults()
+        self._set_system_state(
+            SystemStates.IDLE,
+            f"StartSystem failed and runtime was disconnected: {failure_head}",
+        )
+
     def execute_start_system(self, goal_handle):
         request = goal_handle.request
         result = StartSystem.Result()
@@ -1016,10 +1133,12 @@ class DataCollectionSupervisor(Node):
 
         failure = self._bringup_devices(goal_handle)
         if failure is not None:
-            self._set_fault(failure)
+            self._reset_after_startup_failure(failure)
             goal_handle.abort()
             result.success = False
-            result.message = failure
+            result.message = (
+                f"{failure}\nStartup failed; runtime was disconnected automatically."
+            )
             return result
 
         self._set_system_state(
@@ -1247,7 +1366,8 @@ class DataCollectionSupervisor(Node):
         self, request: GetSystemState.Request, response: GetSystemState.Response
     ) -> GetSystemState.Response:
         del request
-        response.state = self._state
+        with self._state_lock:
+            response.state = deepcopy(self._state)
         return response
 
     def _handle_list_recipes(
@@ -1255,7 +1375,8 @@ class DataCollectionSupervisor(Node):
     ) -> ListRecipes.Response:
         del request
         response.recipe_ids = sorted(self._recipes.keys())
-        response.active_recipe_id = self._state.recipe_id
+        with self._state_lock:
+            response.active_recipe_id = self._state.recipe_id
         return response
 
     def _handle_acknowledge_fault(
@@ -1264,7 +1385,9 @@ class DataCollectionSupervisor(Node):
         response: AcknowledgeFault.Response,
     ) -> AcknowledgeFault.Response:
         fault_id = request.fault_id or "<latest>"
-        if self._state.system_state != SystemStates.FAULT:
+        with self._state_lock:
+            system_state = self._state.system_state
+        if system_state != SystemStates.FAULT:
             response.success = False
             response.message = f"No active fault to acknowledge: {fault_id}"
             return response
@@ -1286,16 +1409,99 @@ class DataCollectionSupervisor(Node):
 
 def main(args: list[str] | None = None) -> None:
     rclpy.init(args=args)
-    node = DataCollectionSupervisor()
+    launch_manager = LaunchManager()
+    node = DataCollectionSupervisor(launch_manager=launch_manager)
     executor = MultiThreadedExecutor(num_threads=6)
     executor.add_node(node)
+    executor_thread = threading.Thread(
+        target=executor.spin,
+        name="data_collection_supervisor_rclpy_spin",
+        daemon=True,
+    )
+    executor_thread.start()
+    shutdown_lock = threading.Lock()
+    shutdown_started = False
+    shutdown_request_lock = threading.Lock()
+    shutdown_request_thread: threading.Thread | None = None
+
+    def shutdown_once(reason: str) -> None:
+        nonlocal shutdown_started
+        with shutdown_lock:
+            if shutdown_started:
+                return
+            shutdown_started = True
+
+        try:
+            node.get_logger().warn(f"Shutdown requested via {reason}. Cleaning runtime.")
+        except Exception:
+            pass
+
+        try:
+            node.shutdown_runtime()
+        except Exception as exc:
+            try:
+                node.get_logger().error(f"Shutdown runtime cleanup failed: {exc}")
+            except Exception:
+                pass
+
+        try:
+            executor.shutdown()
+        except Exception:
+            pass
+        if executor_thread.is_alive():
+            executor_thread.join(timeout=2.0)
+
+        try:
+            launch_manager.shutdown()
+        except Exception:
+            pass
+
+        if rclpy.ok():
+            try:
+                rclpy.shutdown()
+            except Exception:
+                pass
+
+    def request_shutdown(reason: str) -> None:
+        nonlocal shutdown_request_thread
+        with shutdown_request_lock:
+            if shutdown_request_thread is not None and shutdown_request_thread.is_alive():
+                return
+            shutdown_request_thread = threading.Thread(
+                target=shutdown_once,
+                args=(reason,),
+                name="data_collection_supervisor_shutdown",
+                daemon=True,
+            )
+            shutdown_request_thread.start()
+
+    previous_sigint_handler = signal.getsignal(signal.SIGINT)
+    previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+
+    def _handle_signal(signum, frame) -> None:
+        del frame
+        try:
+            signal_name = signal.Signals(signum).name
+        except Exception:
+            signal_name = f"signal {signum}"
+        request_shutdown(signal_name)
+
     try:
-        executor.spin()
+        signal.signal(signal.SIGINT, _handle_signal)
+        signal.signal(signal.SIGTERM, _handle_signal)
+        launch_manager.run_forever()
     except KeyboardInterrupt:
-        pass
+        shutdown_once("KeyboardInterrupt")
     finally:
-        node.shutdown_runtime()
-        executor.shutdown()
-        node.destroy_node()
+        try:
+            signal.signal(signal.SIGINT, previous_sigint_handler)
+            signal.signal(signal.SIGTERM, previous_sigterm_handler)
+        except Exception:
+            pass
+        shutdown_once("process exit")
+        try:
+            node.destroy_node()
+        except Exception:
+            pass
         if rclpy.ok():
             rclpy.shutdown()

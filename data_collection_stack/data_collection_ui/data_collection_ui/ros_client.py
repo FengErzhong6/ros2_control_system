@@ -340,16 +340,19 @@ class RosClient:
             bringup_share = Path(get_package_share_directory("data_collection_bringup"))
         except PackageNotFoundError:
             bringup_share = Path(__file__).resolve().parents[2] / "data_collection_bringup"
-        try:
-            camera_share = Path(get_package_share_directory("camera_system"))
-        except PackageNotFoundError:
-            camera_share = Path(__file__).resolve().parents[3] / "camera_system"
+        camera_share = self._camera_system_share()
 
         return {
             "recipe_directory": bringup_share / "config" / "recipes",
             "cameras_config": camera_share / "bringup" / "config" / "cameras.yaml",
             "ui_config": bringup_share / "config" / "session" / "ui.yaml",
         }
+
+    def _camera_system_share(self) -> Path:
+        try:
+            return Path(get_package_share_directory("camera_system"))
+        except PackageNotFoundError:
+            return Path(__file__).resolve().parents[3] / "camera_system"
 
     def _load_runtime_config(self) -> UiRuntimeConfig:
         recipe_id = str(self._node.get_parameter("recipe_id").value)
@@ -428,7 +431,9 @@ class RosClient:
                     camera_id=camera_id,
                     title=str(camera_cfg.get("title", camera_id)),
                     preview_topic=preview_topic,
+                    capture_topic=self._capture_topic(camera_cfg),
                     preview_fps_limit=self._preview_fps_limit(camera_cfg),
+                    capture_fps_target=self._capture_fps_target(camera_cfg),
                 )
             )
         return stream_configs
@@ -466,6 +471,48 @@ class RosClient:
         if preview_fps <= 0.0:
             return None
         return preview_fps
+
+    def _capture_topic(self, camera_cfg: dict) -> str | None:
+        record_topics = camera_cfg.get("record_topics")
+        if not isinstance(record_topics, list):
+            return None
+
+        for topic in record_topics:
+            if not isinstance(topic, str):
+                continue
+            normalized = topic.strip()
+            if normalized and not normalized.endswith("/camera_info"):
+                return normalized
+        return None
+
+    def _capture_fps_target(self, camera_cfg: dict) -> float | None:
+        driver = str(camera_cfg.get("driver", "")).strip()
+        profile_name = str(camera_cfg.get("profile", "")).strip()
+        if not driver or not profile_name:
+            return None
+
+        camera_share = self._camera_system_share()
+        if driver == "realsense":
+            defaults_path = camera_share / "bringup" / "config" / "realsense_defaults.yaml"
+        elif driver == "orbbec":
+            defaults_path = camera_share / "bringup" / "config" / "orbbec_defaults.yaml"
+        else:
+            return None
+
+        profiles = _load_yaml_map(defaults_path).get("profiles", {})
+        if not isinstance(profiles, dict):
+            return None
+        profile_cfg = profiles.get(profile_name)
+        if not isinstance(profile_cfg, dict):
+            return None
+
+        try:
+            capture_fps = float(profile_cfg.get("color_fps", 0.0))
+        except (TypeError, ValueError):
+            return None
+        if capture_fps <= 0.0:
+            return None
+        return capture_fps
 
     def _on_system_state(self, msg: SystemState) -> None:
         previous_snapshot = self.system_state_snapshot()

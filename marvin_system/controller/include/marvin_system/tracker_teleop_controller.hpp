@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -99,6 +100,43 @@ private:
     double position_scale_{1.0};
     double base_x_scale_{1.0};
     bool enable_ik_reference_logs_{false};
+    bool enable_analysis_recording_{false};
+    std::string analysis_record_path_;
+    double analysis_record_flush_period_sec_{0.05};
+    std::atomic<bool> analysis_record_active_{false};
+    static constexpr size_t kAnalysisRecordQueueCapacity = 32768;
+    struct AnalysisRecordSample {
+        int64_t sample_stamp_ns{0};
+        int64_t target_stamp_ns{0};
+        uint8_t arm{0};
+        bool tracker_fresh{false};
+        bool tracker_input_changed{false};
+        bool has_base_T_ee{false};
+        int8_t ik_result{0};
+        bool has_ik_solution{false};
+        bool has_state_joint{false};
+        bool interp_active{false};
+        int32_t interp_step{0};
+        int32_t interp_total_steps{0};
+        double base_t_ee_pos_x{0.0};
+        double base_t_ee_pos_y{0.0};
+        double base_t_ee_pos_z{0.0};
+        double base_t_ee_quat_x{0.0};
+        double base_t_ee_quat_y{0.0};
+        double base_t_ee_quat_z{0.0};
+        double base_t_ee_quat_w{1.0};
+        std::array<double, kJointsPerArm> ik_solution_joint_deg{};
+        std::array<double, kJointsPerArm> command_joint_deg{};
+        std::array<double, kJointsPerArm> state_joint_deg{};
+    };
+    struct AnalysisRecordQueue {
+        std::array<AnalysisRecordSample, kAnalysisRecordQueueCapacity> samples{};
+        std::atomic<size_t> write_index{0};
+        std::atomic<size_t> read_index{0};
+        std::atomic<uint64_t> dropped_count{0};
+    } analysis_record_queue_{};
+    std::ofstream analysis_record_stream_;
+    rclcpp::TimerBase::SharedPtr analysis_record_timer_;
     inline static constexpr std::array<double, 3> kDefaultShoulderVElbow{
         {0.0, 0.0, -1.0}};
     double j4_bound_{0.0};
@@ -231,6 +269,11 @@ private:
         bool tracker_fresh{false};
         IKResult last_ik_result{IKResult::kNoTarget};
         bool marker_visible{false};
+        bool analysis_has_base_T_ee{false};
+        geometry_msgs::msg::PoseStamped analysis_base_T_ee;
+        IKResult analysis_ik_result{IKResult::kNoTarget};
+        bool analysis_has_ik_solution{false};
+        std::array<double, kJointsPerArm> analysis_ik_solution_rad{};
         PendingDiagnosticsSlot pending_diagnostics;
     };
     std::array<ArmRuntimeState, kArmCount> arm_state_;
@@ -258,6 +301,14 @@ private:
     void logConfigurationSummary(double home_tolerance_deg) const;
     void resetRuntimeState();
     void createRosInterfaces();
+    bool startAnalysisRecordingSession();
+    void stopAnalysisRecordingSession();
+    void closeAnalysisRecording();
+    void flushAnalysisRecording();
+    void enqueueAnalysisSample(
+        size_t arm,
+        const rclcpp::Time &sample_time,
+        bool tracker_input_changed);
 
     // Activation/runtime helpers
     bool bindJointInterfaces();

@@ -44,8 +44,49 @@ def _parse_nonnegative_float(value: str, *, name: str) -> float:
     return parsed
 
 
+def _parse_optional_bool(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if stripped == "":
+        return None
+    return _parse_bool(stripped)
+
+
+def _parse_optional_float(value: str | None, *, name: str) -> float | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if stripped == "":
+        return None
+    try:
+        return float(stripped)
+    except ValueError as exc:
+        raise RuntimeError(f"Launch argument '{name}' must be a float, got {value!r}") from exc
+
+
+def _parse_optional_string(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if stripped == "":
+        return None
+    return stripped
+
+
+def _merge_driver_params(params: dict, overrides: object, *, source: str) -> None:
+    if overrides is None:
+        return
+    if not isinstance(overrides, dict):
+        raise RuntimeError(f"Expected '{source}' to be a mapping, got {type(overrides).__name__}")
+    params.update(overrides)
+
+
 def _build_camera_params(
-    target_camera_name: str, cameras_cfg: dict, defaults_cfg: dict
+    target_camera_name: str,
+    cameras_cfg: dict,
+    defaults_cfg: dict,
+    launch_overrides: dict[str, object],
 ) -> tuple[str, dict, dict]:
     cameras = cameras_cfg.get("cameras", {})
     camera_cfg = cameras.get(target_camera_name)
@@ -100,6 +141,17 @@ def _build_camera_params(
         "tf_publish_rate": profile_cfg.get("tf_publish_rate", 0.0),
         "base_frame_id": profile_cfg.get("base_frame_id", "link"),
     }
+    _merge_driver_params(
+        params,
+        profile_cfg.get("driver_params"),
+        source=f"profile '{profile_name}' driver_params",
+    )
+    _merge_driver_params(
+        params,
+        camera_cfg.get("driver_params"),
+        source=f"camera '{target_camera_name}' driver_params",
+    )
+    params.update({key: value for key, value in launch_overrides.items() if value is not None})
     mock_params = {
         "frame_id": camera_cfg["frame_id"],
         "width": profile_cfg["color_width"],
@@ -158,12 +210,31 @@ def _launch_setup(context, *args, **kwargs):
         LaunchConfiguration("respawn_delay").perform(context),
         name="respawn_delay",
     )
+    launch_overrides = {
+        "initial_reset": _parse_optional_bool(
+            LaunchConfiguration("initial_reset").perform(context)
+        ),
+        "wait_for_device_timeout": _parse_optional_float(
+            LaunchConfiguration("wait_for_device_timeout").perform(context),
+            name="wait_for_device_timeout",
+        ),
+        "reconnect_timeout": _parse_optional_float(
+            LaunchConfiguration("reconnect_timeout").perform(context),
+            name="reconnect_timeout",
+        ),
+        "usb_port_id": _parse_optional_string(
+            LaunchConfiguration("usb_port_id").perform(context)
+        ),
+    }
 
     cameras_cfg = _load_yaml(cameras_config_path)
     defaults_cfg = _load_yaml(defaults_config_path)
 
     namespace, camera_params, mock_params = _build_camera_params(
-        target_camera_name, cameras_cfg, defaults_cfg
+        target_camera_name,
+        cameras_cfg,
+        defaults_cfg,
+        launch_overrides,
     )
     camera_cfg = cameras_cfg["cameras"][target_camera_name]
     camera_topic_prefix = f"/{namespace}/{namespace}"
@@ -247,6 +318,38 @@ def generate_launch_description():
             "respawn_delay",
             default_value="2.0",
             description="Delay in seconds before the RealSense driver node is restarted.",
+        ),
+        DeclareLaunchArgument(
+            "initial_reset",
+            default_value="",
+            description=(
+                "Optional RealSense driver override. Empty uses the profile/camera YAML setting; "
+                "true/false forces startup reset behavior."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "wait_for_device_timeout",
+            default_value="",
+            description=(
+                "Optional RealSense driver override in seconds. Empty uses the profile/camera YAML "
+                "setting; negative values mean wait indefinitely."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "reconnect_timeout",
+            default_value="",
+            description=(
+                "Optional RealSense driver override in seconds. Empty uses the profile/camera YAML "
+                "setting."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "usb_port_id",
+            default_value="",
+            description=(
+                "Optional RealSense driver override for binding a specific USB port, for example "
+                "4-1. Empty uses the profile/camera YAML setting."
+            ),
         ),
         OpaqueFunction(function=_launch_setup),
     ])

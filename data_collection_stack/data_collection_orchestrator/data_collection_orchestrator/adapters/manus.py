@@ -12,6 +12,7 @@ import time
 from ament_index_python.packages import get_package_share_directory
 from manus_system.msg import ManusGloveRawArray
 
+from ..managed_launch import ManagedLaunchSession
 from .base import AdapterBase, AdapterResult
 
 
@@ -25,6 +26,7 @@ class ManusAdapter(AdapterBase):
         super().__init__(device, node=node)
         self._process: subprocess.Popen | None = None
         self._log_handle = None
+        self._managed_launch: ManagedLaunchSession | None = None
         self._log_path: Path | None = None
         self._launch_command: list[str] = []
         self._last_message_monotonic = 0.0
@@ -71,54 +73,30 @@ class ManusAdapter(AdapterBase):
         )
 
     def bringup(self) -> AdapterResult:
+        if self._managed_launch is not None and self._managed_launch.is_running():
+            return AdapterResult.ok(f"{self.device.device_id}: MANUS bringup already running.")
         if self._process is not None and self._process.poll() is None:
             return AdapterResult.ok(f"{self.device.device_id}: MANUS bringup already running.")
 
-        self._cleanup_process_state()
-        log_dir = Path(tempfile.mkdtemp(prefix="manus_adapter_"))
-        self._log_path = log_dir / "launch.log"
-        self._log_handle = self._log_path.open("w", encoding="utf-8")
-        self._launch_command = self._build_command()
-
-        try:
-            self._process = subprocess.Popen(
-                self._launch_command,
-                stdout=self._log_handle,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-                env=self._process_environment(),
-            )
-        except OSError as exc:
-            self._cleanup_process_state()
-            return AdapterResult.failed(
-                f"{self.device.device_id}: failed to start MANUS launch: {exc}"
-            )
-
-        time.sleep(0.5)
-        if self._process.poll() is not None:
-            return AdapterResult.failed(
-                f"{self.device.device_id}: MANUS launch exited early.\n{self._diagnostic_summary()}"
-            )
-
-        return AdapterResult.ok(
-            f"{self.device.device_id}: MANUS launch started.",
-            metadata={
-                "pid": self._process.pid,
-                "log_path": str(self._log_path),
-                "command": self._launch_command,
-            },
-        )
+        self._last_message_monotonic = 0.0
+        return self._start_launch_process()
 
     def wait_ready(self, timeout_sec: float) -> AdapterResult:
         process = self._process
-        if process is None:
+        managed_launch = self._managed_launch
+        if process is None and managed_launch is None:
             return AdapterResult.failed(f"{self.device.device_id}: MANUS launch was not started.")
 
         ready_topic = self._ready_topic()
         deadline = time.monotonic() + self._ready_timeout_sec(timeout_sec)
 
         while time.monotonic() < deadline:
-            if process.poll() is not None:
+            launch_running = (
+                managed_launch.is_running()
+                if managed_launch is not None
+                else (process is not None and process.poll() is None)
+            )
+            if not launch_running:
                 return AdapterResult.failed(
                     f"{self.device.device_id}: MANUS launch exited before READY.\n"
                     f"{self._diagnostic_summary()}"
@@ -144,6 +122,23 @@ class ManusAdapter(AdapterBase):
         )
 
     def shutdown(self) -> AdapterResult:
+        managed_launch = self._managed_launch
+        if managed_launch is not None:
+            if not managed_launch.is_running():
+                exit_code = managed_launch.launch_exit_code()
+                self._cleanup_process_state()
+                return AdapterResult.ok(
+                    f"{self.device.device_id}: MANUS launch already exited with code {exit_code}."
+                )
+
+            if not managed_launch.shutdown(timeout_sec=12.0):
+                return AdapterResult.failed(
+                    f"{self.device.device_id}: managed MANUS launch did not stop within timeout."
+                )
+
+            self._cleanup_process_state()
+            return AdapterResult.ok(f"{self.device.device_id}: MANUS launch stopped.")
+
         process = self._process
         if process is None:
             self._cleanup_process_state()
@@ -158,16 +153,23 @@ class ManusAdapter(AdapterBase):
 
         if not self._signal_process_group(process, signal.SIGINT, timeout_sec=8.0):
             self._signal_process_group(process, signal.SIGTERM, timeout_sec=4.0)
-        if process.poll() is None:
+        if not self._wait_for_process_group_exit(process.pid, timeout_sec=2.0):
+            self._signal_process_group(process, signal.SIGTERM, timeout_sec=4.0)
+        if not self._wait_for_process_group_exit(process.pid, timeout_sec=2.0):
             self._signal_process_group(process, signal.SIGKILL, timeout_sec=2.0)
+        self._wait_for_process_group_exit(process.pid, timeout_sec=1.0)
 
         self._cleanup_process_state()
         return AdapterResult.ok(f"{self.device.device_id}: MANUS launch stopped.")
 
     def diagnose(self) -> AdapterResult:
-        if self._process is None:
+        if self._managed_launch is None and self._process is None:
             return AdapterResult.failed(f"{self.device.device_id}: MANUS launch not started.")
-        if self._process.poll() is not None:
+        if self._managed_launch is not None and not self._managed_launch.is_running():
+            return AdapterResult.failed(
+                f"{self.device.device_id}: MANUS launch exited with code {self._managed_launch.launch_exit_code()}."
+            )
+        if self._managed_launch is None and self._process.poll() is not None:
             return AdapterResult.failed(
                 f"{self.device.device_id}: MANUS launch exited with code {self._process.returncode}."
             )
@@ -206,6 +208,8 @@ class ManusAdapter(AdapterBase):
                 "log_path": None if self._log_path is None else str(self._log_path),
             }
         )
+        if self._managed_launch is not None:
+            metadata.update(self._managed_launch.metadata())
         return metadata
 
     def record_topics(self) -> list[str]:
@@ -258,6 +262,107 @@ class ManusAdapter(AdapterBase):
         for key, value in self._launch_arguments().items():
             command.append(f"{key}:={self._value_to_string(value)}")
         return command
+
+    def _runtime_arguments(self) -> dict[str, object]:
+        arguments = self._launch_arguments()
+        arguments.setdefault("config_file", str(self._config_file_path()))
+        arguments.setdefault("user_name", self._user_name())
+        return arguments
+
+    def _launch_file_path(self) -> str:
+        launch_file = self._launch_file()
+        launch_path = Path(launch_file).expanduser()
+        if launch_path.is_absolute() or "/" in launch_file:
+            return str(launch_path)
+
+        package_share = Path(get_package_share_directory(self._launch_package()))
+        candidates = [
+            package_share / "launch" / launch_file,
+            package_share / "bringup" / "launch" / launch_file,
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate)
+        return str(candidates[0])
+
+    def _matches_manus_process(self, process_name: str, cmd: list[str]) -> bool:
+        executable_markers = {"manus_raw_publisher_node", "manus_raw_publisher_node.exe"}
+        if process_name in executable_markers:
+            return True
+        joined = " ".join(cmd)
+        return any(marker in joined for marker in executable_markers)
+
+    def _start_launch_process(self) -> AdapterResult:
+        self._cleanup_process_state()
+        self._launch_command = self._build_command()
+
+        use_managed_launch = bool(self.device.config.get("use_managed_launch", False))
+        if use_managed_launch and self.launch_manager is not None:
+            managed_launch = ManagedLaunchSession(
+                launch_manager=self.launch_manager,
+                label=f"{self.device.device_id}_manus",
+                launch_file_path=self._launch_file_path(),
+                launch_arguments=self._runtime_arguments(),
+                process_matcher=self._matches_manus_process,
+                logger=None if self.node is None else self.node.get_logger(),
+            )
+            self._managed_launch = managed_launch
+            self._log_path = Path(managed_launch.log_path)
+            try:
+                managed_launch.start()
+            except Exception as exc:
+                self._cleanup_process_state()
+                return AdapterResult.failed(
+                    f"{self.device.device_id}: failed to start managed MANUS launch: {exc}"
+                )
+
+            managed_launch.wait_started(timeout_sec=2.0)
+            if not managed_launch.is_running():
+                return AdapterResult.failed(
+                    f"{self.device.device_id}: MANUS launch exited early.\n{self._diagnostic_summary()}"
+                )
+
+            return AdapterResult.ok(
+                f"{self.device.device_id}: MANUS launch started.",
+                metadata={
+                    **managed_launch.metadata(),
+                    "log_path": str(self._log_path),
+                    "command": self._launch_command,
+                },
+            )
+
+        log_dir = Path(tempfile.mkdtemp(prefix="manus_adapter_"))
+        self._log_path = log_dir / "launch.log"
+        self._log_handle = self._log_path.open("w", encoding="utf-8")
+
+        try:
+            self._process = subprocess.Popen(
+                self._launch_command,
+                stdout=self._log_handle,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                env=self._process_environment(),
+            )
+        except OSError as exc:
+            self._cleanup_process_state()
+            return AdapterResult.failed(
+                f"{self.device.device_id}: failed to start MANUS launch: {exc}"
+            )
+
+        time.sleep(0.5)
+        if self._process.poll() is not None:
+            return AdapterResult.failed(
+                f"{self.device.device_id}: MANUS launch exited early.\n{self._diagnostic_summary()}"
+            )
+
+        return AdapterResult.ok(
+            f"{self.device.device_id}: MANUS launch started.",
+            metadata={
+                "pid": self._process.pid,
+                "log_path": str(self._log_path),
+                "command": self._launch_command,
+            },
+        )
 
     def _value_to_string(self, value: object) -> str:
         if isinstance(value, bool):
@@ -339,14 +444,38 @@ class ManusAdapter(AdapterBase):
             time.sleep(0.2)
         return process.poll() is not None
 
+    def _wait_for_process_group_exit(self, pgid: int, timeout_sec: float) -> bool:
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                return True
+            time.sleep(0.2)
+
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        return False
+
     def _cleanup_process_state(self) -> None:
+        if self._managed_launch is not None:
+            self._managed_launch.close()
+            self._managed_launch = None
         if self._log_handle is not None:
             self._log_handle.close()
             self._log_handle = None
         self._process = None
 
     def _diagnostic_summary(self) -> str:
-        if self._process is None:
+        if self._managed_launch is not None:
+            status = (
+                "running"
+                if self._managed_launch.is_running()
+                else f"exited({self._managed_launch.launch_exit_code()})"
+            )
+        elif self._process is None:
             status = "not started"
         else:
             status = "running" if self._process.poll() is None else f"exited({self._process.returncode})"
@@ -359,6 +488,8 @@ class ManusAdapter(AdapterBase):
             f"command={command}",
             f"log_path={log_path}",
         ]
+        if self._managed_launch is not None:
+            summary.append(f"child_pids={self._managed_launch.metadata().get('child_pids', [])}")
         if tail:
             summary.append("log_tail:")
             summary.append(tail)

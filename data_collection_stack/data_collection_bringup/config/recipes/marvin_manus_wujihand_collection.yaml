@@ -4,10 +4,12 @@ devices:
     adapter: htc
     required: true
     depends_on: []
+    use_managed_launch: true
   - id: manus_glove
     adapter: manus
     required: true
     depends_on: []
+    use_managed_launch: true
   - id: wujihand
     adapter: wujihand
     required: false
@@ -18,6 +20,7 @@ devices:
     depends_on:
       - htc_tracker
       - manus_glove
+    use_managed_launch: true
     launch_arguments:
       use_gripper_L: true
       use_gripper_R: true

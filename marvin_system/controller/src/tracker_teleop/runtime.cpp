@@ -188,6 +188,28 @@ void TrackerTeleopController::setTeleopState(
         return;
     }
 
+    if (enable_analysis_recording_) {
+        const bool was_enabled = old_state == TeleopState::kEnabled;
+        const bool is_enabled = new_state == TeleopState::kEnabled;
+        if (!was_enabled && is_enabled) {
+            if (startAnalysisRecordingSession()) {
+                analysis_record_active_.store(true, std::memory_order_relaxed);
+                RCLCPP_INFO(
+                    get_node()->get_logger(),
+                    "Analysis recording started on teleop ENABLED transition.");
+            } else {
+                RCLCPP_ERROR(
+                    get_node()->get_logger(),
+                    "Failed to start analysis recording on teleop ENABLED transition.");
+            }
+        } else if (was_enabled && !is_enabled) {
+            stopAnalysisRecordingSession();
+            RCLCPP_INFO(
+                get_node()->get_logger(),
+                "Analysis recording stopped on teleop exit from ENABLED.");
+        }
+    }
+
     RCLCPP_WARN(
         get_node()->get_logger(),
         "Tracker teleop state: %s -> %s (%s)",
