@@ -11,18 +11,22 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
 
 #include "control_msgs/action/follow_joint_trajectory.hpp"
+#include "control_msgs/msg/dynamic_joint_state.hpp"
 #include "controller_manager_msgs/srv/list_controllers.hpp"
 #include "controller_manager_msgs/srv/switch_controller.hpp"
 #include "geometry_msgs/msg/pose.hpp"
+#include "marvin_system/srv/set_control_profile.hpp"
 #include "marvin_system/srv/get_motion_mode.hpp"
 #include "marvin_system/srv/get_motion_status.hpp"
 #include "marvin_system/srv/set_motion_mode.hpp"
+#include "marvin_system/teleop_diagnostics.hpp"
 #include "moveit/collision_detection/collision_common.hpp"
 #include "moveit/move_group_interface/move_group_interface.hpp"
 #include "moveit/planning_scene/planning_scene.hpp"
@@ -63,6 +67,8 @@ constexpr char kControllerStateMissing[] = "missing";
 constexpr char kControllerStateUnconfigured[] = "unconfigured";
 constexpr char kControllerStateInactive[] = "inactive";
 constexpr char kControllerStateActive[] = "active";
+constexpr int kSdkArmStatePosition = 1;
+constexpr int kSdkArmStateTorq = 3;
 
 const std::array<const char *, kJointsPerArm> kLeftJointNames{
     {"Joint1_L", "Joint2_L", "Joint3_L", "Joint4_L", "Joint5_L", "Joint6_L", "Joint7_L"}};
@@ -265,6 +271,14 @@ public:
             this, "move_group_wait_sec", 10.0);
         teleop_service_timeout_sec_ = get_param_or_declare<double>(
             this, "teleop_service_timeout_sec", 5.0);
+        transient_service_max_attempts_ = std::max<int64_t>(
+            1, get_param_or_declare<int64_t>(this, "transient_service_max_attempts", 3));
+        transient_service_retry_backoff_sec_ = std::max(
+            0.0, get_param_or_declare<double>(this, "transient_service_retry_backoff_sec", 0.25));
+        control_profile_observation_grace_sec_ = std::max(
+            0.0,
+            get_param_or_declare<double>(
+                this, "control_profile_observation_grace_sec", 2.0));
         legacy_go_home_timeout_sec_ = get_param_or_declare<double>(
             this, "legacy_go_home_timeout_sec", 10.0);
         legacy_go_home_settle_timeout_sec_ = get_param_or_declare<double>(
@@ -281,6 +295,8 @@ public:
             this, "execute_trajectory", true);
         controller_switch_timeout_sec_ = get_param_or_declare<double>(
             this, "controller_switch_timeout_sec", 5.0);
+        controller_state_settle_timeout_sec_ = std::max(
+            0.0, get_param_or_declare<double>(this, "controller_state_settle_timeout_sec", 2.0));
         planning_pipeline_id_ = get_param_or_declare<std::string>(
             this, "planning_pipeline_id", "ompl");
         planner_id_ = get_param_or_declare<std::string>(
@@ -297,7 +313,27 @@ public:
             this, "primary_controller_name", "tracker_teleop_controller");
         collision_guard_service_name_ = get_param_or_declare<std::string>(
             this, "collision_guard_service_name", "");
+        control_profile_service_name_ = get_param_or_declare<std::string>(
+            this, "control_profile_service_name", "");
+        dynamic_joint_state_topic_ = get_param_or_declare<std::string>(
+            this, "dynamic_joint_state_topic", "/dynamic_joint_states");
+        teleop_use_joint_impedance_ = get_param_or_declare<bool>(
+            this, "teleop_use_joint_impedance", true);
+        teleop_disable_collision_guard_ = get_param_or_declare<bool>(
+            this, "teleop_disable_collision_guard", false);
         use_mock_hardware_ = get_param_or_declare<bool>(this, "use_mock_hardware", false);
+        allow_unsafe_legacy_backend_ = get_param_or_declare<bool>(
+            this, "allow_unsafe_legacy_backend", false);
+        go_home_preflight_enabled_ = get_param_or_declare<bool>(
+            this, "go_home_preflight_enabled", true);
+        if (!use_mock_hardware_ &&
+            backend_ == "legacy" &&
+            !allow_unsafe_legacy_backend_) {
+            throw std::runtime_error(
+                "Refusing to start marvin_motion_server with backend=legacy on real hardware. "
+                "Use backend=moveit, or set allow_unsafe_legacy_backend:=true only for "
+                "explicit debugging.");
+        }
         go_home_pose_sequence_ = get_string_array_param(this, "go_home_pose_sequence");
         if (go_home_pose_sequence_.empty()) {
             go_home_pose_sequence_ = {home_pose_id_};
@@ -382,6 +418,12 @@ public:
                 rclcpp::ServicesQoS(),
                 callback_group_);
         }
+        if (!control_profile_service_name_.empty()) {
+            control_profile_client_ = this->create_client<srv::SetControlProfile>(
+                control_profile_service_name_,
+                rclcpp::ServicesQoS(),
+                callback_group_);
+        }
         if (!recovery_command_topic_.empty()) {
             recovery_command_publisher_ =
                 this->create_publisher<std_msgs::msg::Float64MultiArray>(
@@ -404,6 +446,16 @@ public:
             "/joint_states",
             rclcpp::SensorDataQoS(),
             std::bind(&MarvinMotionServer::handle_joint_state, this, std::placeholders::_1));
+        if (!dynamic_joint_state_topic_.empty()) {
+            dynamic_joint_state_subscription_ =
+                this->create_subscription<control_msgs::msg::DynamicJointState>(
+                    dynamic_joint_state_topic_,
+                    rclcpp::SensorDataQoS(),
+                    std::bind(
+                        &MarvinMotionServer::handle_dynamic_joint_state,
+                        this,
+                        std::placeholders::_1));
+        }
         gripper_collision_timer_ = this->create_wall_timer(
             kGripperCollisionSyncPeriod,
             std::bind(&MarvinMotionServer::handle_gripper_collision_timer, this),
@@ -460,7 +512,9 @@ public:
             "Motion layer ready. backend=%s go_home=%s set_mode=%s set_enabled=%s "
             "legacy_fallback=%s return_mode=%s planning_group=%s execute=%s "
             "initial_mode=%s teleop_services=%s primary_controller=%s trajectory_controller=%s "
-            "collision_guard_service=%s go_home_sequence=%zu recovery=%s recovery_topic=%s scene_objects=%zu",
+            "collision_guard_service=%s control_profile_service=%s teleop_impedance=%s "
+            "teleop_collision_guard_off=%s "
+            "go_home_sequence=%zu recovery=%s recovery_topic=%s scene_objects=%zu",
             backend_.c_str(),
             go_home_service_name_.c_str(),
             set_mode_service_name_.c_str(),
@@ -474,6 +528,9 @@ public:
             primary_controller_name_.c_str(),
             trajectory_controller_name_.c_str(),
             collision_guard_service_name_.c_str(),
+            control_profile_service_name_.c_str(),
+            to_bool_string(teleop_use_joint_impedance_).c_str(),
+            to_bool_string(teleop_disable_collision_guard_).c_str(),
             go_home_pose_sequence_.size(),
             to_bool_string(recovery_enabled_).c_str(),
             recovery_command_topic_.c_str(),
@@ -516,6 +573,18 @@ private:
         bool motion_busy{false};
         bool controller_interlock_ok{true};
         std::string message;
+    };
+
+    struct DynamicHardwareObservation {
+        bool left_anchor_seen{false};
+        bool right_anchor_seen{false};
+        int active_control_profile{0};
+        int requested_control_profile{0};
+        int left_sdk_cur_state{0};
+        int right_sdk_cur_state{0};
+        int left_sdk_err_code{0};
+        int right_sdk_err_code{0};
+        rclcpp::Time stamp{0, 0, RCL_ROS_TIME};
     };
 
     std::vector<double> get_named_pose_values(const std::string &pose_id, const std::string &side) const
@@ -565,6 +634,56 @@ private:
                 }
             }
         }
+    }
+
+    void handle_dynamic_joint_state(const control_msgs::msg::DynamicJointState &msg)
+    {
+        DynamicHardwareObservation observation;
+        observation.stamp = msg.header.stamp;
+
+        for (size_t i = 0; i < msg.joint_names.size() && i < msg.interface_values.size(); ++i) {
+            const auto &joint_name = msg.joint_names[i];
+            const auto &iface_values = msg.interface_values[i];
+            std::unordered_map<std::string, double> values;
+            for (size_t j = 0;
+                 j < iface_values.interface_names.size() && j < iface_values.values.size();
+                 ++j) {
+                values[iface_values.interface_names[j]] = iface_values.values[j];
+            }
+
+            if (joint_name == kLeftJointNames[0]) {
+                observation.left_anchor_seen = true;
+                if (const auto it = values.find(kActiveControlProfileStateInterface);
+                    it != values.end()) {
+                    observation.active_control_profile = static_cast<int>(std::lround(it->second));
+                }
+                if (const auto it = values.find(kRequestedControlProfileStateInterface);
+                    it != values.end()) {
+                    observation.requested_control_profile = static_cast<int>(std::lround(it->second));
+                }
+                if (const auto it = values.find(kSdkCurrentStateStateInterface);
+                    it != values.end()) {
+                    observation.left_sdk_cur_state = static_cast<int>(std::lround(it->second));
+                }
+                if (const auto it = values.find(kSdkErrorCodeStateInterface);
+                    it != values.end()) {
+                    observation.left_sdk_err_code = static_cast<int>(std::lround(it->second));
+                }
+            } else if (joint_name == kRightJointNames[0]) {
+                observation.right_anchor_seen = true;
+                if (const auto it = values.find(kSdkCurrentStateStateInterface);
+                    it != values.end()) {
+                    observation.right_sdk_cur_state = static_cast<int>(std::lround(it->second));
+                }
+                if (const auto it = values.find(kSdkErrorCodeStateInterface);
+                    it != values.end()) {
+                    observation.right_sdk_err_code = static_cast<int>(std::lround(it->second));
+                }
+            }
+        }
+
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        latest_dynamic_observation_ = observation;
     }
 
     bool wait_for_joint_feedback(std::string &error_message) const
@@ -1312,6 +1431,136 @@ private:
         return fallback_mode;
     }
 
+    DynamicHardwareObservation latest_dynamic_observation_copy() const
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return latest_dynamic_observation_;
+    }
+
+    bool dynamic_observation_has_hardware_error(const DynamicHardwareObservation &observation) const
+    {
+        return observation.left_anchor_seen &&
+               observation.right_anchor_seen &&
+               (observation.left_sdk_err_code != 0 || observation.right_sdk_err_code != 0);
+    }
+
+    std::string dynamic_hardware_error_message(const DynamicHardwareObservation &observation) const
+    {
+        return "Hardware error present: left_err=" +
+               std::to_string(observation.left_sdk_err_code) +
+               ", right_err=" + std::to_string(observation.right_sdk_err_code) + ".";
+    }
+
+    bool dynamic_observation_matches_control_profile(
+        const DynamicHardwareObservation &observation,
+        ControlProfile profile,
+        bool require_errors_clear = true) const
+    {
+        const auto expected_state =
+            profile == ControlProfile::kJointImpedance ? kSdkArmStateTorq : kSdkArmStatePosition;
+        const bool has_anchors = observation.left_anchor_seen && observation.right_anchor_seen;
+        const bool profile_matches =
+            observation.active_control_profile == static_cast<int>(profile) &&
+            observation.requested_control_profile == static_cast<int>(profile);
+        const bool state_matches =
+            observation.left_sdk_cur_state == expected_state &&
+            observation.right_sdk_cur_state == expected_state;
+        const bool errors_clear =
+            observation.left_sdk_err_code == 0 && observation.right_sdk_err_code == 0;
+        return has_anchors && profile_matches && state_matches &&
+               (!require_errors_clear || errors_clear);
+    }
+
+    bool wait_for_control_profile_observation(
+        ControlProfile profile,
+        double timeout_sec,
+        std::string &error_message) const
+    {
+        const auto deadline =
+            std::chrono::steady_clock::now() +
+            std::chrono::duration<double>(std::max(0.0, timeout_sec));
+        DynamicHardwareObservation last_observation;
+        bool observation_seen = false;
+        while (true) {
+            const auto observation = latest_dynamic_observation_copy();
+            if (observation.left_anchor_seen || observation.right_anchor_seen) {
+                last_observation = observation;
+                observation_seen = true;
+            }
+            if (dynamic_observation_matches_control_profile(observation, profile)) {
+                return true;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+
+        if (observation_seen && dynamic_observation_has_hardware_error(last_observation)) {
+            error_message = dynamic_hardware_error_message(last_observation);
+            return false;
+        }
+        if (!observation_seen) {
+            error_message =
+                "No /dynamic_joint_states feedback available to confirm control profile " +
+                std::string(control_profile_to_string(profile)) + ".";
+            return false;
+        }
+        error_message =
+            "Hardware observation did not confirm control profile " +
+            std::string(control_profile_to_string(profile)) + " within timeout.";
+        return false;
+    }
+
+    bool controller_states_match(
+        const ControllerStates &states,
+        bool primary_active,
+        bool trajectory_active) const
+    {
+        const bool primary_ok = primary_active
+                                    ? states.primary_exists && states.primary_active
+                                    : !states.primary_active;
+        const bool trajectory_ok = trajectory_active
+                                       ? states.trajectory_exists && states.trajectory_active
+                                       : !states.trajectory_active;
+        return primary_ok && trajectory_ok;
+    }
+
+    bool wait_for_controller_state(
+        bool primary_active,
+        bool trajectory_active,
+        ControllerStates &states,
+        std::string &error_message)
+    {
+        const auto deadline =
+            std::chrono::steady_clock::now() +
+            std::chrono::duration<double>(std::max(0.0, controller_state_settle_timeout_sec_));
+        std::string last_error;
+        while (true) {
+            ControllerStates snapshot;
+            if (fetch_controller_states(snapshot, last_error)) {
+                states = snapshot;
+                if (controller_states_match(snapshot, primary_active, trajectory_active)) {
+                    return true;
+                }
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+
+        if (controller_states_match(states, primary_active, trajectory_active)) {
+            return true;
+        }
+        if (!last_error.empty()) {
+            error_message = last_error;
+            return false;
+        }
+        error_message = "Controllers did not reach the requested state before timeout.";
+        return false;
+    }
+
     bool wait_for_client_service(
         const std::string &service_name,
         const rclcpp::ClientBase::SharedPtr &client,
@@ -1340,25 +1589,44 @@ private:
         bool value,
         std::string &error_message)
     {
-        if (!wait_for_client_service(service_name, client, teleop_service_timeout_sec_, error_message)) {
-            return false;
+        std::string last_error;
+        for (int64_t attempt = 1; attempt <= transient_service_max_attempts_; ++attempt) {
+            if (!wait_for_client_service(
+                    service_name, client, teleop_service_timeout_sec_, last_error)) {
+                if (attempt < transient_service_max_attempts_) {
+                    std::this_thread::sleep_for(
+                        std::chrono::duration<double>(transient_service_retry_backoff_sec_));
+                    continue;
+                }
+                error_message = last_error;
+                return false;
+            }
+
+            auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
+            request->data = value;
+            auto future = client->async_send_request(request);
+            const auto status =
+                future.wait_for(std::chrono::duration<double>(teleop_service_timeout_sec_));
+            if (status != std::future_status::ready) {
+                last_error = "Service timed out: " + service_name;
+            } else {
+                const auto response = future.get();
+                if (response && response->success) {
+                    return true;
+                }
+                last_error = response
+                                 ? service_name + " rejected request: " + response->message
+                                 : "Service returned no response: " + service_name;
+            }
+
+            if (attempt < transient_service_max_attempts_) {
+                std::this_thread::sleep_for(
+                    std::chrono::duration<double>(transient_service_retry_backoff_sec_));
+            }
         }
 
-        auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
-        request->data = value;
-        auto future = client->async_send_request(request);
-        const auto status = future.wait_for(std::chrono::duration<double>(teleop_service_timeout_sec_));
-        if (status != std::future_status::ready) {
-            error_message = "Service timed out: " + service_name;
-            return false;
-        }
-
-        const auto response = future.get();
-        if (!response->success) {
-            error_message = service_name + " rejected request: " + response->message;
-            return false;
-        }
-        return true;
+        error_message = last_error;
+        return false;
     }
 
     bool call_teleop_set_armed(bool value, std::string &error_message)
@@ -1416,6 +1684,125 @@ private:
             collision_guard_service_name_,
             value,
             error_message);
+    }
+
+    std::optional<ControlProfile> desired_control_profile_for_mode(
+        const std::string &normalized_mode) const
+    {
+        if (normalized_mode == kModeTeleop) {
+            return teleop_use_joint_impedance_ ?
+                std::optional<ControlProfile>(ControlProfile::kJointImpedance) :
+                std::optional<ControlProfile>(ControlProfile::kPositionFollow);
+        }
+        if (normalized_mode == kModeSafeHold || normalized_mode == kModeMotion) {
+            return ControlProfile::kPositionFollow;
+        }
+        return std::nullopt;
+    }
+
+    bool call_control_profile(ControlProfile profile, std::string &error_message)
+    {
+        if (control_profile_service_name_.empty()) {
+            return true;
+        }
+        if (!control_profile_client_) {
+            error_message =
+                "Control profile service client is not configured: " + control_profile_service_name_;
+            return false;
+        }
+        std::string observation_error;
+        if (wait_for_control_profile_observation(profile, 0.0, observation_error)) {
+            return true;
+        }
+
+        std::string last_error;
+        for (int64_t attempt = 1; attempt <= transient_service_max_attempts_; ++attempt) {
+            if (!wait_for_client_service(
+                    control_profile_service_name_,
+                    control_profile_client_,
+                    teleop_service_timeout_sec_,
+                    last_error)) {
+                if (attempt < transient_service_max_attempts_) {
+                    std::this_thread::sleep_for(
+                        std::chrono::duration<double>(transient_service_retry_backoff_sec_));
+                    continue;
+                }
+                error_message = last_error;
+                return false;
+            }
+
+            auto request = std::make_shared<srv::SetControlProfile::Request>();
+            request->profile = control_profile_to_string(profile);
+            auto future = control_profile_client_->async_send_request(request);
+            const auto status =
+                future.wait_for(std::chrono::duration<double>(teleop_service_timeout_sec_));
+            if (status != std::future_status::ready) {
+                if (wait_for_control_profile_observation(
+                        profile, control_profile_observation_grace_sec_, observation_error)) {
+                    RCLCPP_WARN(
+                        get_logger(),
+                        "Control profile service %s timed out, but hardware observation confirmed %s.",
+                        control_profile_service_name_.c_str(),
+                        control_profile_to_string(profile));
+                    return true;
+                }
+                last_error = "Service timed out: " + control_profile_service_name_;
+            } else {
+                const auto response = future.get();
+                if (!response) {
+                    last_error =
+                        "Control profile request returned no response: " +
+                        control_profile_service_name_;
+                } else if (!response->success) {
+                    if (wait_for_control_profile_observation(
+                            profile, control_profile_observation_grace_sec_, observation_error)) {
+                        RCLCPP_WARN(
+                            get_logger(),
+                            "Control profile service %s reported failure, but hardware observation confirmed %s.",
+                            control_profile_service_name_.c_str(),
+                            control_profile_to_string(profile));
+                        return true;
+                    }
+                    last_error =
+                        control_profile_service_name_ + " rejected request: " + response->message;
+                } else if (wait_for_control_profile_observation(
+                               profile,
+                               teleop_service_timeout_sec_ + control_profile_observation_grace_sec_,
+                               observation_error)) {
+                    return true;
+                } else {
+                    last_error = observation_error;
+                }
+            }
+
+            if (attempt < transient_service_max_attempts_) {
+                std::this_thread::sleep_for(
+                    std::chrono::duration<double>(transient_service_retry_backoff_sec_));
+            }
+        }
+
+        error_message = last_error;
+        return false;
+    }
+
+    bool ensure_mode_control_profile(const std::string &normalized_mode, std::string &error_message)
+    {
+        const auto desired_profile = desired_control_profile_for_mode(normalized_mode);
+        if (!desired_profile.has_value()) {
+            return true;
+        }
+        return call_control_profile(*desired_profile, error_message);
+    }
+
+    bool prepare_legacy_go_home(std::string &error_message)
+    {
+        if (!ensure_primary_controller_active(error_message)) {
+            return false;
+        }
+        if (!call_teleop_set_enabled(false, error_message)) {
+            return false;
+        }
+        return call_control_profile(ControlProfile::kPositionFollow, error_message);
     }
 
     bool fetch_controller_states(
@@ -1528,7 +1915,7 @@ private:
             error_message = "Primary controller is not loaded: " + primary_controller_name_;
             return false;
         }
-        if (states.primary_active && !states.trajectory_active) {
+        if (controller_states_match(states, true, false)) {
             return true;
         }
 
@@ -1540,14 +1927,16 @@ private:
         if (states.trajectory_active) {
             deactivate.push_back(trajectory_controller_name_);
         }
-        if (!switch_controllers(activate, deactivate, error_message)) {
+        std::string switch_error;
+        if (!switch_controllers(activate, deactivate, switch_error) &&
+            !wait_for_controller_state(true, false, states, error_message)) {
+            error_message = switch_error.empty() ? error_message : switch_error;
             return false;
         }
-
-        if (!fetch_controller_states(states, error_message)) {
+        if (!wait_for_controller_state(true, false, states, error_message)) {
             return false;
         }
-        if (!states.primary_active || states.trajectory_active) {
+        if (!controller_states_match(states, true, false)) {
             error_message =
                 "Failed to activate primary controller and deactivate trajectory controller.";
             return false;
@@ -1571,7 +1960,7 @@ private:
                 "Trajectory controller is not loaded: " + trajectory_controller_name_;
             return false;
         }
-        if (states.trajectory_active && !states.primary_active) {
+        if (controller_states_match(states, false, true)) {
             return true;
         }
 
@@ -1583,14 +1972,16 @@ private:
         if (states.primary_active) {
             deactivate.push_back(primary_controller_name_);
         }
-        if (!switch_controllers(activate, deactivate, error_message)) {
+        std::string switch_error;
+        if (!switch_controllers(activate, deactivate, switch_error) &&
+            !wait_for_controller_state(false, true, states, error_message)) {
+            error_message = switch_error.empty() ? error_message : switch_error;
             return false;
         }
-
-        if (!fetch_controller_states(states, error_message)) {
+        if (!wait_for_controller_state(false, true, states, error_message)) {
             return false;
         }
-        if (!states.trajectory_active || states.primary_active) {
+        if (!controller_states_match(states, false, true)) {
             error_message =
                 "Failed to activate trajectory controller and deactivate primary controller.";
             return false;
@@ -1610,10 +2001,17 @@ private:
             if (!ensure_primary_controller_active(error_message)) {
                 return false;
             }
+            if (!ensure_mode_control_profile(kModeSafeHold, error_message)) {
+                return false;
+            }
             if (!call_teleop_set_enabled(false, error_message)) {
                 return false;
             }
             if (!call_teleop_set_armed(false, error_message)) {
+                return false;
+            }
+            if (teleop_disable_collision_guard_ &&
+                !call_collision_guard_set_enabled(true, error_message)) {
                 return false;
             }
             update_cached_mode_and_state(
@@ -1626,7 +2024,14 @@ private:
             if (!ensure_primary_controller_active(error_message)) {
                 return false;
             }
+            if (teleop_disable_collision_guard_ &&
+                !call_collision_guard_set_enabled(false, error_message)) {
+                return false;
+            }
             if (!call_teleop_set_enabled(false, error_message)) {
+                return false;
+            }
+            if (!ensure_mode_control_profile(kModeTeleop, error_message)) {
                 return false;
             }
             if (!call_teleop_set_armed(true, error_message)) {
@@ -1650,6 +2055,9 @@ private:
                 if (!call_teleop_set_armed(false, error_message)) {
                     return false;
                 }
+            }
+            if (!ensure_mode_control_profile(kModeMotion, error_message)) {
+                return false;
             }
             if (!ensure_trajectory_controller_active(error_message)) {
                 return false;
@@ -2239,6 +2647,18 @@ private:
             return false;
         }
 
+        const auto observation = latest_dynamic_observation_copy();
+        if (dynamic_observation_has_hardware_error(observation)) {
+            status.success = false;
+            status.mode = kModeFault;
+            status.primary_controller_state = controllers.primary_state;
+            status.trajectory_controller_state = controllers.trajectory_state;
+            status.message = dynamic_hardware_error_message(observation);
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            current_mode_ = kModeFault;
+            return false;
+        }
+
         status.primary_controller_state = controllers.primary_state;
         status.trajectory_controller_state = controllers.trajectory_state;
         status.controller_interlock_ok =
@@ -2380,6 +2800,17 @@ private:
             return;
         }
 
+        if (go_home_preflight_enabled_) {
+            MotionStatusSnapshot preflight_status;
+            if (!collect_status(preflight_status)) {
+                response->success = false;
+                response->message =
+                    "GoHome rejected because motion status is unhealthy: " +
+                    preflight_status.message;
+                return;
+            }
+        }
+
         set_busy(true);
 
         const auto finish = [this](const std::string &mode) {
@@ -2396,7 +2827,7 @@ private:
         bool used_legacy_fallback_after_moveit_failure = false;
         bool wait_for_legacy_home_completion = false;
         if (backend_ == "legacy") {
-            if (transition_to_mode(kModeTeleop, error_message)) {
+            if (prepare_legacy_go_home(error_message)) {
                 go_home_ok = handle_legacy_go_home(error_message);
                 wait_for_legacy_home_completion = go_home_ok;
             }
@@ -2470,11 +2901,11 @@ private:
                         get_logger(),
                         "MoveIt home failed (%s). Falling back to legacy tracker go_home.",
                         error_message.c_str());
-                    std::string fallback_mode_error;
-                    if (!transition_to_mode(kModeTeleop, fallback_mode_error)) {
+                    std::string fallback_prep_error;
+                    if (!prepare_legacy_go_home(fallback_prep_error)) {
                         error_message +=
-                            " Legacy fallback unavailable because TELEOP mode restore failed: " +
-                            fallback_mode_error;
+                            " Legacy fallback unavailable because go_home preparation failed: " +
+                            fallback_prep_error;
                     } else {
                         std::string legacy_error;
                         if (handle_legacy_go_home(legacy_error)) {
@@ -2501,6 +2932,14 @@ private:
                     completion_error)) {
                 go_home_ok = false;
                 error_message = completion_error;
+            }
+        }
+
+        if (go_home_ok) {
+            const auto observation = latest_dynamic_observation_copy();
+            if (dynamic_observation_has_hardware_error(observation)) {
+                go_home_ok = false;
+                error_message = dynamic_hardware_error_message(observation);
             }
         }
 
@@ -2588,6 +3027,7 @@ private:
     rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr tracker_set_armed_client_;
     rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr tracker_set_enabled_client_;
     rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr collision_guard_client_;
+    rclcpp::Client<srv::SetControlProfile>::SharedPtr control_profile_client_;
     rclcpp::Client<controller_manager_msgs::srv::SwitchController>::SharedPtr
         switch_controller_client_;
     rclcpp::Client<controller_manager_msgs::srv::ListControllers>::SharedPtr
@@ -2595,6 +3035,8 @@ private:
     rclcpp_action::Client<FollowJointTrajectory>::SharedPtr trajectory_action_client_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr teleop_state_subscription_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_subscription_;
+    rclcpp::Subscription<control_msgs::msg::DynamicJointState>::SharedPtr
+        dynamic_joint_state_subscription_;
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr recovery_command_publisher_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
         gripper_collision_marker_publisher_;
@@ -2618,6 +3060,9 @@ private:
     double planning_time_sec_{5.0};
     double move_group_wait_sec_{10.0};
     double teleop_service_timeout_sec_{5.0};
+    int64_t transient_service_max_attempts_{3};
+    double transient_service_retry_backoff_sec_{0.25};
+    double control_profile_observation_grace_sec_{2.0};
     double legacy_go_home_timeout_sec_{10.0};
     double legacy_go_home_settle_timeout_sec_{20.0};
     double legacy_home_tolerance_rad_{0.5 * M_PI / 180.0};
@@ -2626,6 +3071,7 @@ private:
     double max_acceleration_scaling_{0.2};
     bool execute_trajectory_{true};
     double controller_switch_timeout_sec_{5.0};
+    double controller_state_settle_timeout_sec_{2.0};
     std::string planning_pipeline_id_;
     std::string planner_id_;
     std::string scene_frame_id_;
@@ -2634,7 +3080,13 @@ private:
     std::string trajectory_controller_name_;
     std::string primary_controller_name_;
     std::string collision_guard_service_name_;
+    std::string control_profile_service_name_;
+    std::string dynamic_joint_state_topic_{"/dynamic_joint_states"};
+    bool teleop_use_joint_impedance_{true};
+    bool teleop_disable_collision_guard_{false};
     bool use_mock_hardware_{false};
+    bool allow_unsafe_legacy_backend_{false};
+    bool go_home_preflight_enabled_{true};
     std::vector<std::string> go_home_pose_sequence_;
     bool recovery_enabled_{true};
     std::string recovery_command_topic_;
@@ -2656,6 +3108,7 @@ private:
     mutable std::mutex state_mutex_;
     std::string current_mode_{kModeSafeHold};
     std::string latest_teleop_state_{kTeleopStateUnknown};
+    DynamicHardwareObservation latest_dynamic_observation_{};
     bool motion_busy_{false};
     mutable std::mutex joint_state_mutex_;
     std::array<double, kTotalTrackedJoints> joint_positions_rad_{};

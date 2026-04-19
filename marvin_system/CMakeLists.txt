@@ -41,8 +41,11 @@ endforeach()
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/GetMotionMode.srv"
   "srv/GetMotionStatus.srv"
+  "srv/SetControlProfile.srv"
   "srv/SetMotionMode.srv"
 )
+
+rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
 set(MARVIN_SDK_LIBRARY
   "${PROJECT_SOURCE_DIR}/third_party/marvinSDK/libMarvinSDK.so"
@@ -83,6 +86,7 @@ target_link_libraries(marvin_system_hardware PUBLIC
   pluginlib::pluginlib
   rclcpp::rclcpp
   rclcpp_lifecycle::rclcpp_lifecycle
+  "${cpp_typesupport_target}"
   ${MARVIN_SDK_LIBRARY}
   ${OMNIPICKER_SDK_LIBRARY}
 )
@@ -144,6 +148,7 @@ add_library(
 target_compile_features(marvin_system_tracker_teleop_controller PUBLIC cxx_std_17)
 target_include_directories(marvin_system_tracker_teleop_controller PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/controller/include>
+  $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/hardware/include>
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/third_party/marvinKine>
   $<INSTALL_INTERFACE:include>
 )
@@ -215,7 +220,6 @@ ament_target_dependencies(motion_server
   tf2_ros
   trajectory_msgs
 )
-rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 target_link_libraries(motion_server "${cpp_typesupport_target}")
 
 add_executable(ik_solution_explorer

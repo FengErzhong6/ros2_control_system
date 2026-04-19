@@ -1,6 +1,8 @@
 #include "wujihand_system/wujihand.hpp"
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <iomanip>
@@ -17,12 +19,6 @@
 #include "rclcpp/rclcpp.hpp"
 
 namespace {
-// help functions to get joint and interface names
-inline std::string joint_name_from_index(const size_t finger_idx, const size_t joint_idx)
-{
-    return "finger" + std::to_string(finger_idx) + "_joint" + std::to_string(joint_idx);
-}
-
 inline constexpr size_t flat_index(const size_t finger_idx, const size_t joint_idx)
 {
     // Wuji hand is fixed 5x4 (20 joints). Keep this helper local to avoid depending on
@@ -30,9 +26,41 @@ inline constexpr size_t flat_index(const size_t finger_idx, const size_t joint_i
     return finger_idx * 4U + joint_idx;
 }
 
-inline std::string position_if_name_from_index(const size_t finger_idx, const size_t joint_idx)
+std::string trim_copy(std::string value)
 {
-    return joint_name_from_index(finger_idx, joint_idx) + "/" + hardware_interface::HW_IF_POSITION;
+    const auto is_not_space = [](unsigned char ch) { return !std::isspace(ch); };
+    value.erase(
+        value.begin(),
+        std::find_if(value.begin(), value.end(), is_not_space)
+    );
+    value.erase(
+        std::find_if(value.rbegin(), value.rend(), is_not_space).base(),
+        value.end()
+    );
+    return value;
+}
+
+std::string to_lower_copy(std::string value)
+{
+    std::transform(
+        value.begin(),
+        value.end(),
+        value.begin(),
+        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); }
+    );
+    return value;
+}
+
+const char *handedness_to_string(const uint8_t handedness)
+{
+    switch(handedness){
+        case 0:
+            return "right";
+        case 1:
+            return "left";
+        default:
+            return "unknown";
+    }
 }
 }  // namespace
 
@@ -99,7 +127,36 @@ void WujiHandHardware::io_thread_main()
                     case IoRequestType::Configure: {
                         io_error_.store(false, std::memory_order_relaxed);
                         controller_.reset();
-                        hand_ = std::make_unique<wujihandcpp::device::Hand>();
+                        hand_ = usb_serial_number_.empty()
+                            ? std::make_unique<wujihandcpp::device::Hand>()
+                            : std::make_unique<wujihandcpp::device::Hand>(usb_serial_number_.c_str());
+
+                        const auto actual_handedness =
+                            hand_->read<wujihandcpp::data::hand::Handedness>();
+                        RCLCPP_INFO(
+                            get_logger(),
+                            "Configured Wuji hand: usb_serial_number=%s handedness=%s(%u)",
+                            usb_serial_number_.empty() ? "<auto>" : usb_serial_number_.c_str(),
+                            handedness_to_string(actual_handedness),
+                            static_cast<unsigned int>(actual_handedness)
+                        );
+
+                        if(
+                            expected_handedness_.has_value()
+                            && actual_handedness != expected_handedness_.value()
+                        ){
+                            RCLCPP_ERROR(
+                                get_logger(),
+                                "Connected hand handedness mismatch: expected=%s(%u), actual=%s(%u).",
+                                handedness_to_string(expected_handedness_.value()),
+                                static_cast<unsigned int>(expected_handedness_.value()),
+                                handedness_to_string(actual_handedness),
+                                static_cast<unsigned int>(actual_handedness)
+                            );
+                            hand_.reset();
+                            result = hardware_interface::CallbackReturn::ERROR;
+                            break;
+                        }
                         result = hardware_interface::CallbackReturn::SUCCESS;
                         break;
                     }
@@ -274,6 +331,8 @@ hardware_interface::CallbackReturn WujiHandHardware::on_init(
     // Example:
     // <param name="low_pass_cutoff_frequency">5.0</param>
     low_pass_cutoff_frequency_ = 5.0;
+    usb_serial_number_.clear();
+    expected_handedness_.reset();
     {
         const auto it = info_.hardware_parameters.find("low_pass_cutoff_frequency");
         if(it != info_.hardware_parameters.end()){
@@ -290,15 +349,73 @@ hardware_interface::CallbackReturn WujiHandHardware::on_init(
             }
         }
     }
+    {
+        const auto it = info_.hardware_parameters.find("usb_serial_number");
+        if(it != info_.hardware_parameters.end()){
+            usb_serial_number_ = trim_copy(it->second);
+        }
+    }
+    {
+        const auto it = info_.hardware_parameters.find("expected_handedness");
+        if(it != info_.hardware_parameters.end()){
+            const auto normalized = to_lower_copy(trim_copy(it->second));
+            if(normalized.empty()){
+                expected_handedness_.reset();
+            } else if(normalized == "right" || normalized == "0"){
+                expected_handedness_ = 0;
+            } else if(normalized == "left" || normalized == "1"){
+                expected_handedness_ = 1;
+            } else {
+                RCLCPP_ERROR(
+                    get_logger(),
+                    "Invalid expected_handedness='%s'. Supported values: left, right, 0, 1.",
+                    it->second.c_str()
+                );
+                return hardware_interface::CallbackReturn::ERROR;
+            }
+        }
+    }
 
     // Log the info about the hw here
     RCLCPP_INFO(get_logger(), "The update rate of wujihand controller manager is %dHz.", info_.rw_rate);
     RCLCPP_INFO(get_logger(), "Using low_pass_cutoff_frequency = %.3f", low_pass_cutoff_frequency_);
+    if(!usb_serial_number_.empty()){
+        RCLCPP_INFO(get_logger(), "Using usb_serial_number = %s", usb_serial_number_.c_str());
+    } else {
+        RCLCPP_WARN(
+            get_logger(),
+            "No usb_serial_number configured. Real hardware startup requires a unique connected Wuji hand."
+        );
+    }
+    if(expected_handedness_.has_value()){
+        RCLCPP_INFO(
+            get_logger(),
+            "Using expected_handedness = %s",
+            handedness_to_string(expected_handedness_.value())
+        );
+    }
 
     // check joint configurations in URDF
+    if(info_.joints.size() != kTotalJoints){
+        RCLCPP_FATAL(
+            get_logger(),
+            "Expected exactly %zu joints in ros2_control description, got %zu.",
+            kTotalJoints,
+            info_.joints.size()
+        );
+        return hardware_interface::CallbackReturn::ERROR;
+    }
+
     bool all_have_velocity = true;
     bool any_have_velocity = false;
-    for(const auto &joint : info_.joints){
+    for(size_t index = 0; index < info_.joints.size(); ++index){
+        const auto &joint = info_.joints[index];
+        joint_names_[index] = joint.name;
+        position_interface_names_[index] =
+            joint.name + "/" + hardware_interface::HW_IF_POSITION;
+        velocity_interface_names_[index] =
+            joint.name + "/" + hardware_interface::HW_IF_VELOCITY;
+
         // wujihand has exactly one state and command interface on each joint
         if(joint.command_interfaces.size() != 1){
             RCLCPP_FATAL(
@@ -395,22 +512,19 @@ hardware_interface::CallbackReturn WujiHandHardware::on_activate(
     const uint8_t sidx = state_active_.load(std::memory_order_acquire);
     for(size_t f = 0; f < kFingerCount; ++f){
         for(size_t j = 0; j < kJointCount; ++j){
-            const double pos = state_frames_[sidx].data[flat_index(f, j)];
-            const auto if_name = position_if_name_from_index(f, j);
-            set_state(if_name, pos);
-            set_command(if_name, pos);
+            const size_t flat = flat_index(f, j);
+            const double pos = state_frames_[sidx].data[flat];
+            set_state(position_interface_names_[flat], pos);
+            set_command(position_interface_names_[flat], pos);
 
-                last_position_[flat_index(f, j)] = pos;
-                if(has_velocity_state_){
-                    set_state(
-                        joint_name_from_index(f, j) + "/" + hardware_interface::HW_IF_VELOCITY,
-                        0.0
-                    );
-                }
+            last_position_[flat] = pos;
+            if(has_velocity_state_){
+                set_state(velocity_interface_names_[flat], 0.0);
+            }
         }
     }
 
-        last_position_valid_ = true;
+    last_position_valid_ = true;
 
     activated_.store(true, std::memory_order_relaxed);
     return hardware_interface::CallbackReturn::SUCCESS;
@@ -453,17 +567,11 @@ hardware_interface::return_type WujiHandHardware::read(
         for(size_t j = 0; j < kJointCount; ++j){
             const size_t flat = flat_index(f, j);
             const double pos = frame.data[flat];
-            set_state(
-                position_if_name_from_index(f, j),
-                pos
-            );
+            set_state(position_interface_names_[flat], pos);
 
             if(has_velocity_state_){
                 const double vel = can_diff ? ((pos - last_position_[flat]) / dt) : 0.0;
-                set_state(
-                    joint_name_from_index(f, j) + "/" + hardware_interface::HW_IF_VELOCITY,
-                    vel
-                );
+                set_state(velocity_interface_names_[flat], vel);
             }
 
             last_position_[flat] = pos;
@@ -489,8 +597,9 @@ hardware_interface::return_type WujiHandHardware::write(
     // Write a full coherent command frame, then publish it with a release store.
     for(size_t f = 0; f < kFingerCount; ++f){
         for(size_t j = 0; j < kJointCount; ++j){
-            cmd_frames_[back].data[flat_index(f, j)] =
-                get_command<double>(position_if_name_from_index(f, j));
+            const size_t flat = flat_index(f, j);
+            cmd_frames_[back].data[flat] =
+                get_command<double>(position_interface_names_[flat]);
         }
     }
     cmd_frames_[back].frame_id = cmd_frame_id_.fetch_add(1, std::memory_order_relaxed) + 1;

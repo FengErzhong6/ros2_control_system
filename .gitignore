@@ -1,4 +1,6 @@
 .vscode
+.pytest_cache/
+.venv_ros2/
 build
 install
 log

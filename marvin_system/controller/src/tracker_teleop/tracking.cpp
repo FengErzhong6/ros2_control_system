@@ -299,12 +299,27 @@ void TrackerTeleopController::enqueueAnalysisSample(
 
     std::array<double, kJointsPerArm> state_joint_rad{};
     sample.has_state_joint = readCurrentJointPositions(arm, state_joint_rad);
+    const SdkObservationState sdk_observation = readSdkObservationState(arm);
+    sample.has_control_profile = sdk_observation.has_control_profile;
+    sample.active_control_profile = sdk_observation.active_control_profile;
+    sample.requested_control_profile = sdk_observation.requested_control_profile;
+    sample.has_sdk_diag = sdk_observation.has_sdk_diag;
+    sample.sdk_cur_state = sdk_observation.sdk_cur_state;
+    sample.sdk_cmd_state = sdk_observation.sdk_cmd_state;
+    sample.sdk_err_code = sdk_observation.sdk_err_code;
+    sample.sdk_in_frame_serial = sdk_observation.sdk_in_frame_serial;
+    sample.sdk_out_frame_serial = sdk_observation.sdk_out_frame_serial;
+    sample.has_sdk_command_joint = sdk_observation.has_sdk_command_joint;
 
     for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
         sample.ik_solution_joint_deg[joint] =
             runtime.analysis_ik_solution_rad[joint] * kRad2Deg;
         sample.command_joint_deg[joint] =
             runtime.smoothed_joints_rad[joint] * kRad2Deg;
+        sample.sdk_command_joint_deg[joint] =
+            sample.has_sdk_command_joint ?
+                sdk_observation.sdk_command_joints_rad[joint] * kRad2Deg :
+                0.0;
         sample.state_joint_deg[joint] =
             sample.has_state_joint ? state_joint_rad[joint] * kRad2Deg : 0.0;
     }
@@ -320,6 +335,35 @@ void TrackerTeleopController::holdCurrentPosition(size_t arm)
         runtime.target_joints_rad[j] = runtime.smoothed_joints_rad[j];
     }
     runtime.has_valid_target = true;
+}
+
+bool TrackerTeleopController::syncCommandStateToMeasuredPose(size_t arm)
+{
+    if (arm >= kArmCount) {
+        return false;
+    }
+
+    std::array<double, kJointsPerArm> joints_rad{};
+    if (!readCurrentJointPositions(arm, joints_rad)) {
+        return false;
+    }
+
+    auto &runtime = arm_state_[arm];
+    runtime.smoothed_joints_rad = joints_rad;
+    runtime.target_joints_rad = joints_rad;
+    runtime.interp_start_joints_rad = joints_rad;
+    runtime.interp_goal_joints_rad = joints_rad;
+    runtime.interp_step = 0;
+    runtime.interp_total_steps = 0;
+    runtime.interp_active = false;
+    runtime.has_valid_target = true;
+    for (size_t j = 0; j < kJointsPerArm; ++j) {
+        runtime.last_joint_deg[j] = joints_rad[j] * kRad2Deg;
+        if (cmd_interfaces_[arm * kJointsPerArm + j]) {
+            (void)cmd_interfaces_[arm * kJointsPerArm + j]->set_value(joints_rad[j]);
+        }
+    }
+    return true;
 }
 
 void TrackerTeleopController::cancelTrackerInterpolation(size_t arm)
@@ -341,6 +385,27 @@ void TrackerTeleopController::startTrackerInterpolation(
     runtime.interp_step = 0;
     runtime.interp_total_steps = std::max(1, tracker_interp_cycles_);
     runtime.interp_active = true;
+}
+
+std::array<double, kJointsPerArm> TrackerTeleopController::lowPassFilterIkTarget(
+    size_t arm, const std::array<double, kJointsPerArm> &raw_joints_rad) const
+{
+    if (arm >= kArmCount || smoothing_alpha_ >= 1.0) {
+        return raw_joints_rad;
+    }
+
+    const auto &runtime = arm_state_[arm];
+    if (!runtime.has_valid_target) {
+        return raw_joints_rad;
+    }
+
+    std::array<double, kJointsPerArm> filtered_joints_rad{};
+    for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+        const double previous_target = runtime.target_joints_rad[joint];
+        filtered_joints_rad[joint] =
+            previous_target + (raw_joints_rad[joint] - previous_target) * smoothing_alpha_;
+    }
+    return filtered_joints_rad;
 }
 
 void TrackerTeleopController::holdAllArms(double dt)
@@ -517,10 +582,14 @@ void TrackerTeleopController::handleFreshTrackerUpdate(size_t arm, const CachedT
 
     if (ik_result == IKResult::kSuccess ||
         ik_result == IKResult::kJointLimitClamped) {
-        std::array<double, kJointsPerArm> goal_joints_rad{};
+        std::array<double, kJointsPerArm> raw_goal_joints_rad{};
         for (size_t j = 0; j < kJointsPerArm; ++j) {
-            goal_joints_rad[j] = out_q_joints_rad[j];
-            runtime.target_joints_rad[j] = out_q_joints_rad[j];
+            raw_goal_joints_rad[j] = out_q_joints_rad[j];
+        }
+
+        const auto goal_joints_rad = lowPassFilterIkTarget(arm, raw_goal_joints_rad);
+        for (size_t j = 0; j < kJointsPerArm; ++j) {
+            runtime.target_joints_rad[j] = goal_joints_rad[j];
         }
         runtime.has_valid_target = true;
         startTrackerInterpolation(arm, goal_joints_rad);

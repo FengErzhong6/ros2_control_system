@@ -2,6 +2,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -35,6 +36,7 @@ def generate_launch_description():
             DeclareLaunchArgument("trackers_config", default_value=default_trackers_config),
             DeclareLaunchArgument("manus_config", default_value=default_manus_config),
             DeclareLaunchArgument("manus_user_name", default_value=""),
+            DeclareLaunchArgument("mock_manus", default_value="false"),
             DeclareLaunchArgument("supervisor_sigterm_timeout_sec", default_value="20.0"),
             DeclareLaunchArgument("supervisor_sigkill_timeout_sec", default_value="20.0"),
             Node(
@@ -54,6 +56,10 @@ def generate_launch_description():
                         "trackers_config": LaunchConfiguration("trackers_config"),
                         "manus_config": LaunchConfiguration("manus_config"),
                         "manus_user_name": LaunchConfiguration("manus_user_name"),
+                        "mock_manus": ParameterValue(
+                            LaunchConfiguration("mock_manus"),
+                            value_type=bool,
+                        ),
                     }
                 ],
             ),

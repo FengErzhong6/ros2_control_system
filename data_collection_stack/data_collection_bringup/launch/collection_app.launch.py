@@ -45,6 +45,10 @@ def generate_launch_description():
                 "trackers_config": LaunchConfiguration("trackers_config"),
                 "manus_config": LaunchConfiguration("manus_config"),
                 "manus_user_name": LaunchConfiguration("manus_user_name"),
+                "mock_manus": ParameterValue(
+                    LaunchConfiguration("mock_manus"),
+                    value_type=bool,
+                ),
                 "marvin_mock_grippers": ParameterValue(
                     LaunchConfiguration("marvin_mock_grippers"),
                     value_type=bool,
@@ -80,6 +84,7 @@ def generate_launch_description():
             DeclareLaunchArgument("trackers_config", default_value=default_trackers_config),
             DeclareLaunchArgument("manus_config", default_value=default_manus_config),
             DeclareLaunchArgument("manus_user_name", default_value=""),
+            DeclareLaunchArgument("mock_manus", default_value="false"),
             DeclareLaunchArgument("marvin_mock_grippers", default_value="false"),
             DeclareLaunchArgument("startup_policy_config", default_value=default_startup_policy),
             DeclareLaunchArgument("fault_policy_config", default_value=default_fault_policy),

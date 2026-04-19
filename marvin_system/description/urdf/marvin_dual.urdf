@@ -20,8 +20,17 @@
   <xacro:arg name="use_gripper_R" default="true" />
   <xacro:arg name="mock_grippers" default="false" />
   <xacro:arg name="use_mock_hardware" default="false" />
-  <xacro:arg name="joint_vel_ratio" default="80" />
-  <xacro:arg name="joint_acc_ratio" default="80" />
+  <xacro:arg name="joint_vel_ratio" default="100" />
+  <xacro:arg name="joint_acc_ratio" default="100" />
+  <xacro:arg name="joint_impedance_enabled" default="true" />
+  <xacro:arg name="joint_impedance_k_left" default="2 2 2 2 2 1 1" />
+  <xacro:arg name="joint_impedance_d_left" default="0.4 0.4 0.4 0.4 0.4 0.4 0.4" />
+  <xacro:arg name="joint_impedance_k_right" default="2 2 2 2 2 1 1" />
+  <xacro:arg name="joint_impedance_d_right" default="0.4 0.4 0.4 0.4 0.4 0.4 0.4" />
+  <xacro:arg name="tool_kine_left" default="0 0 0 0 0 0" />
+  <xacro:arg name="tool_dyn_left" default="0 0 0 0 0 0 0 0 0 0" />
+  <xacro:arg name="tool_kine_right" default="0 0 0 0 0 0" />
+  <xacro:arg name="tool_dyn_right" default="0 0 0 0 0 0 0 0 0 0" />
   <xacro:arg name="gripper_velocity" default="255" />
   <xacro:arg name="gripper_acceleration" default="255" />
   <xacro:arg name="collision_guard_enabled" default="false" />
@@ -147,6 +156,15 @@
     use_mock_hardware="$(arg use_mock_hardware)"
     joint_vel_ratio="$(arg joint_vel_ratio)"
     joint_acc_ratio="$(arg joint_acc_ratio)"
+    joint_impedance_enabled="$(arg joint_impedance_enabled)"
+    joint_impedance_k_left="$(arg joint_impedance_k_left)"
+    joint_impedance_d_left="$(arg joint_impedance_d_left)"
+    joint_impedance_k_right="$(arg joint_impedance_k_right)"
+    joint_impedance_d_right="$(arg joint_impedance_d_right)"
+    tool_kine_left="$(arg tool_kine_left)"
+    tool_dyn_left="$(arg tool_dyn_left)"
+    tool_kine_right="$(arg tool_kine_right)"
+    tool_dyn_right="$(arg tool_dyn_right)"
     gripper_velocity="$(arg gripper_velocity)"
     gripper_acceleration="$(arg gripper_acceleration)"
     collision_guard_enabled="$(arg collision_guard_enabled)"

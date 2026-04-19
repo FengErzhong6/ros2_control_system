@@ -4,9 +4,13 @@
 #include <atomic>
 #include <array>
 #include <chrono>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 
+#include "marvin_system/srv/set_control_profile.hpp"
 #include "marvin_system/collision_guard.hpp"
+#include "marvin_system/teleop_diagnostics.hpp"
 #include "marvin_system/omnipicker.hpp"
 #include "marvin_system/workspace_guard.hpp"
 
@@ -44,6 +48,7 @@ public:
         const rclcpp::Time &time, const rclcpp::Duration &period) override;
 
 private:
+    void update_sdk_observation_states(const DCSS &dcss);
     void start_gripper_worker();
     void stop_gripper_worker();
     void gripper_worker_loop();
@@ -54,6 +59,14 @@ private:
     static constexpr size_t kJointsPerArm = 7;
     static constexpr size_t kArmCount = 2;
     static constexpr size_t kTotalJoints = kJointsPerArm * kArmCount;
+
+    bool process_control_profile_transition();
+    bool send_position_hold_command(
+        const std::array<std::array<double, kJointsPerArm>, kArmCount> &hold_deg,
+        bool request_position_state);
+    bool send_joint_impedance_hold_command(
+        const std::array<std::array<double, kJointsPerArm>, kArmCount> &hold_deg,
+        bool request_torque_state);
 
     bool activated_{false};
     bool connected_{false};
@@ -70,7 +83,66 @@ private:
     int activation_max_attempts_{2};
     int no_frame_timeout_ms_{800};
     int home_timeout_ms_{30000};
+    int profile_switch_timeout_ms_{5000};
+    int profile_switch_stabilize_cycles_{1};
+    int profile_switch_post_monitor_ms_{500};
+    int profile_switch_initial_resend_delay_ms_{80};
+    int profile_switch_resend_interval_ms_{20};
+    bool joint_impedance_profile_enabled_{true};
     bool mock_grippers_{false};
+    std::array<std::array<double, 6>, kArmCount> tool_kine_{};
+    std::array<std::array<double, 10>, kArmCount> tool_dyn_{};
+    std::array<std::array<double, kJointsPerArm>, kArmCount> joint_impedance_k_{};
+    std::array<std::array<double, kJointsPerArm>, kArmCount> joint_impedance_d_{};
+    std::atomic<ControlProfile> active_control_profile_{ControlProfile::kUnknown};
+    std::atomic<ControlProfile> requested_control_profile_{ControlProfile::kUnknown};
+    enum class ControlProfileTransitionPhase : int8_t {
+        kIdle = 0,
+        kRequested = 1,
+        kCaptureHold = 2,
+        kSendSwitchPacket = 3,
+        kWaitArmState = 4,
+        kStabilize = 5,
+        kCompleted = 6,
+        kFailed = 7,
+    };
+    mutable std::mutex control_profile_mutex_;
+    std::condition_variable control_profile_cv_;
+    ControlProfileTransitionPhase control_profile_transition_phase_{
+        ControlProfileTransitionPhase::kIdle};
+    bool control_profile_transition_active_{false};
+    bool control_profile_request_pending_{false};
+    uint64_t control_profile_request_sequence_{0};
+    uint64_t control_profile_completed_sequence_{0};
+    uint64_t control_profile_inflight_sequence_{0};
+    uint64_t control_profile_resend_count_{0};
+    ControlProfile control_profile_pending_target_{ControlProfile::kUnknown};
+    ControlProfile control_profile_source_profile_{ControlProfile::kUnknown};
+    std::array<std::array<double, kJointsPerArm>, kArmCount> control_profile_hold_deg_{};
+    std::chrono::steady_clock::time_point control_profile_transition_started_at_{};
+    std::chrono::steady_clock::time_point control_profile_last_packet_sent_at_{};
+    std::chrono::steady_clock::time_point control_profile_last_progress_log_at_{};
+    bool control_profile_diag_snapshot_valid_{false};
+    std::array<int, kArmCount> control_profile_diag_last_cur_state_{};
+    std::array<int, kArmCount> control_profile_diag_last_cmd_state_{};
+    std::array<int, kArmCount> control_profile_diag_last_err_code_{};
+    std::array<int, kArmCount> control_profile_diag_last_in_frame_serial_{};
+    std::array<int, kArmCount> control_profile_diag_last_out_frame_serial_{};
+    int control_profile_stabilize_cycles_remaining_{0};
+    bool control_profile_post_monitor_active_{false};
+    ControlProfile control_profile_post_monitor_source_{ControlProfile::kUnknown};
+    ControlProfile control_profile_post_monitor_target_{ControlProfile::kUnknown};
+    std::chrono::steady_clock::time_point control_profile_post_monitor_started_at_{};
+    std::chrono::steady_clock::time_point control_profile_post_monitor_deadline_{};
+    std::chrono::steady_clock::time_point control_profile_post_monitor_last_log_at_{};
+    bool control_profile_post_monitor_snapshot_valid_{false};
+    std::array<int, kArmCount> control_profile_post_monitor_last_cur_state_{};
+    std::array<int, kArmCount> control_profile_post_monitor_last_cmd_state_{};
+    std::array<int, kArmCount> control_profile_post_monitor_last_err_code_{};
+    std::array<int, kArmCount> control_profile_post_monitor_last_in_frame_serial_{};
+    std::array<int, kArmCount> control_profile_post_monitor_last_out_frame_serial_{};
+    std::string control_profile_last_message_{"No control profile request has been processed."};
+    rclcpp::Service<marvin_system::srv::SetControlProfile>::SharedPtr control_profile_service_;
 
     bool has_home_position_{false};
     std::array<std::array<double, kJointsPerArm>, kArmCount> home_position_deg_{};
@@ -121,6 +193,11 @@ private:
     std::thread collision_guard_thread_{};
     std::atomic<bool> collision_guard_stop_{false};
     std::array<std::atomic<double>, kTotalJoints> current_feedback_deg_{};
+    std::array<std::atomic<int>, kArmCount> current_sdk_cur_state_{};
+    std::array<std::atomic<int>, kArmCount> current_sdk_cmd_state_{};
+    std::array<std::atomic<int>, kArmCount> current_sdk_err_code_{};
+    std::array<std::atomic<int>, kArmCount> current_sdk_in_frame_serial_{};
+    std::array<std::atomic<int>, kArmCount> current_sdk_out_frame_serial_{};
     std::array<std::atomic<double>, kTotalJoints> collision_guard_target_deg_{};
     std::array<std::atomic<double>, kTotalJoints> collision_guard_approved_deg_{};
     std::atomic<bool> current_feedback_valid_{false};

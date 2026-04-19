@@ -4,7 +4,16 @@
   <xacro:macro name="marvin_dual_ros2_control"
                params="name
                        use_mock_hardware:=false
-                       joint_vel_ratio:=80  joint_acc_ratio:=80
+                       joint_vel_ratio:=100  joint_acc_ratio:=100
+                       joint_impedance_enabled:=true
+                       joint_impedance_k_left:='2 2 2 2 2 1 1'
+                       joint_impedance_d_left:='0.4 0.4 0.4 0.4 0.4 0.4 0.4'
+                       joint_impedance_k_right:='2 2 2 2 2 1 1'
+                       joint_impedance_d_right:='0.4 0.4 0.4 0.4 0.4 0.4 0.4'
+                       tool_kine_left:='0 0 0 0 0 0'
+                       tool_dyn_left:='0 0 0 0 0 0 0 0 0 0'
+                       tool_kine_right:='0 0 0 0 0 0'
+                       tool_dyn_right:='0 0 0 0 0 0 0 0 0 0'
                        gripper_velocity:=255  gripper_acceleration:=255
                        gripper_command_rate_hz:=50.0  gripper_command_epsilon:=0.001
                        collision_guard_enabled:=false
@@ -31,6 +40,15 @@
           <param name="ip">192.168.1.190</param>
           <param name="joint_vel_ratio">${joint_vel_ratio}</param>
           <param name="joint_acc_ratio">${joint_acc_ratio}</param>
+          <param name="joint_impedance_enabled">${joint_impedance_enabled}</param>
+          <param name="joint_impedance_k_left">${joint_impedance_k_left}</param>
+          <param name="joint_impedance_d_left">${joint_impedance_d_left}</param>
+          <param name="joint_impedance_k_right">${joint_impedance_k_right}</param>
+          <param name="joint_impedance_d_right">${joint_impedance_d_right}</param>
+          <param name="tool_kine_left">${tool_kine_left}</param>
+          <param name="tool_dyn_left">${tool_dyn_left}</param>
+          <param name="tool_kine_right">${tool_kine_right}</param>
+          <param name="tool_dyn_right">${tool_dyn_right}</param>
           <param name="gripper_velocity">${gripper_velocity}</param>
           <param name="gripper_acceleration">${gripper_acceleration}</param>
           <param name="gripper_command_rate_hz">${gripper_command_rate_hz}</param>
@@ -38,6 +56,10 @@
           <param name="mock_grippers">${mock_grippers}</param>
           <param name="connect_timeout_ms">1500</param>
           <param name="state_timeout_ms">8000</param>
+          <param name="profile_switch_timeout_ms">5000</param>
+          <param name="profile_switch_post_monitor_ms">500</param>
+          <param name="profile_switch_initial_resend_delay_ms">80</param>
+          <param name="profile_switch_resend_interval_ms">20</param>
           <param name="activation_retry_settle_ms">2000</param>
           <param name="activation_max_attempts">3</param>
           <param name="no_frame_timeout_ms">800</param>
@@ -83,6 +105,14 @@
         </command_interface>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
+        <state_interface name="sdk_command_position"/>
+        <state_interface name="active_control_profile"/>
+        <state_interface name="requested_control_profile"/>
+        <state_interface name="sdk_cur_state"/>
+        <state_interface name="sdk_cmd_state"/>
+        <state_interface name="sdk_err_code"/>
+        <state_interface name="sdk_in_frame_serial"/>
+        <state_interface name="sdk_out_frame_serial"/>
       </joint>
       <joint name="Joint2_L">
         <command_interface name="position">
@@ -92,6 +122,7 @@
         </command_interface>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
+        <state_interface name="sdk_command_position"/>
       </joint>
       <joint name="Joint3_L">
         <command_interface name="position">
@@ -101,6 +132,7 @@
         </command_interface>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
+        <state_interface name="sdk_command_position"/>
       </joint>
       <joint name="Joint4_L">
         <command_interface name="position">
@@ -110,6 +142,7 @@
         </command_interface>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
+        <state_interface name="sdk_command_position"/>
       </joint>
       <joint name="Joint5_L">
         <command_interface name="position">
@@ -119,6 +152,7 @@
         </command_interface>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
+        <state_interface name="sdk_command_position"/>
       </joint>
       <joint name="Joint6_L">
         <command_interface name="position">
@@ -128,6 +162,7 @@
         </command_interface>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
+        <state_interface name="sdk_command_position"/>
       </joint>
       <joint name="Joint7_L">
         <command_interface name="position">
@@ -137,6 +172,7 @@
         </command_interface>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
+        <state_interface name="sdk_command_position"/>
       </joint>
 
       <!-- Right arm (SDK arm B, index 1) — joints 7..13 -->
@@ -148,6 +184,12 @@
         </command_interface>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
+        <state_interface name="sdk_command_position"/>
+        <state_interface name="sdk_cur_state"/>
+        <state_interface name="sdk_cmd_state"/>
+        <state_interface name="sdk_err_code"/>
+        <state_interface name="sdk_in_frame_serial"/>
+        <state_interface name="sdk_out_frame_serial"/>
       </joint>
       <joint name="Joint2_R">
         <command_interface name="position">
@@ -157,6 +199,7 @@
         </command_interface>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
+        <state_interface name="sdk_command_position"/>
       </joint>
       <joint name="Joint3_R">
         <command_interface name="position">
@@ -166,6 +209,7 @@
         </command_interface>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
+        <state_interface name="sdk_command_position"/>
       </joint>
       <joint name="Joint4_R">
         <command_interface name="position">
@@ -175,6 +219,7 @@
         </command_interface>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
+        <state_interface name="sdk_command_position"/>
       </joint>
       <joint name="Joint5_R">
         <command_interface name="position">
@@ -184,6 +229,7 @@
         </command_interface>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
+        <state_interface name="sdk_command_position"/>
       </joint>
       <joint name="Joint6_R">
         <command_interface name="position">
@@ -193,6 +239,7 @@
         </command_interface>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
+        <state_interface name="sdk_command_position"/>
       </joint>
       <joint name="Joint7_R">
         <command_interface name="position">
@@ -202,6 +249,7 @@
         </command_interface>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
+        <state_interface name="sdk_command_position"/>
       </joint>
 
       <!-- Optional: OmniPicker gripper on left arm -->

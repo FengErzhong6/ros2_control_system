@@ -1,0 +1,123 @@
+controller_manager:
+  ros__parameters:
+    update_rate: 250  # Hz
+
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    forward_position_controller:
+      type: forward_command_controller/ForwardCommandController
+
+    rl_controller:
+      type: wujihand_system/RLController
+
+forward_position_controller:
+  ros__parameters:
+    interface_name: position
+    joints:
+      - right_finger1_joint1
+      - right_finger1_joint2
+      - right_finger1_joint3
+      - right_finger1_joint4
+      - right_finger2_joint1
+      - right_finger2_joint2
+      - right_finger2_joint3
+      - right_finger2_joint4
+      - right_finger3_joint1
+      - right_finger3_joint2
+      - right_finger3_joint3
+      - right_finger3_joint4
+      - right_finger4_joint1
+      - right_finger4_joint2
+      - right_finger4_joint3
+      - right_finger4_joint4
+      - right_finger5_joint1
+      - right_finger5_joint2
+      - right_finger5_joint3
+      - right_finger5_joint4
+
+rl_controller:
+  ros__parameters:
+    joints:
+      - right_finger1_joint1
+      - right_finger1_joint2
+      - right_finger1_joint3
+      - right_finger1_joint4
+      - right_finger2_joint1
+      - right_finger2_joint2
+      - right_finger2_joint3
+      - right_finger2_joint4
+      - right_finger3_joint1
+      - right_finger3_joint2
+      - right_finger3_joint3
+      - right_finger3_joint4
+      - right_finger4_joint1
+      - right_finger4_joint2
+      - right_finger4_joint3
+      - right_finger4_joint4
+      - right_finger5_joint1
+      - right_finger5_joint2
+      - right_finger5_joint3
+      - right_finger5_joint4
+    command_interfaces:
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+    state_interfaces:
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - position
+      - velocity
+      - velocity
+      - velocity
+      - velocity
+      - velocity
+      - velocity
+      - velocity
+      - velocity
+      - velocity
+      - velocity
+      - velocity
+      - velocity
+      - velocity
+      - velocity
+      - velocity
+      - velocity
+      - velocity
+      - velocity
+      - velocity
+      - velocity

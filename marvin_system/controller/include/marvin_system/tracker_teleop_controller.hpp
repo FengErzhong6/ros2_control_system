@@ -26,6 +26,7 @@
 #include "tf2_ros/transform_listener.h"
 
 #include "TrackingIk.h"
+#include "marvin_system/teleop_diagnostics.hpp"
 #include "marvin_system/marvin_kine_utils.hpp"
 
 namespace marvin_system {
@@ -57,6 +58,15 @@ private:
 
     std::array<hardware_interface::LoanedCommandInterface *, kTotalJoints> cmd_interfaces_{};
     std::array<hardware_interface::LoanedStateInterface *, kTotalJoints> state_interfaces_pos_{};
+    std::array<hardware_interface::LoanedStateInterface *, kTotalJoints>
+        state_interfaces_sdk_cmd_pos_{};
+    std::array<hardware_interface::LoanedStateInterface *, kArmCount> state_interfaces_sdk_cur_state_{};
+    std::array<hardware_interface::LoanedStateInterface *, kArmCount> state_interfaces_sdk_cmd_state_{};
+    std::array<hardware_interface::LoanedStateInterface *, kArmCount> state_interfaces_sdk_err_code_{};
+    std::array<hardware_interface::LoanedStateInterface *, kArmCount> state_interfaces_sdk_in_frame_serial_{};
+    std::array<hardware_interface::LoanedStateInterface *, kArmCount> state_interfaces_sdk_out_frame_serial_{};
+    hardware_interface::LoanedStateInterface *state_interface_active_control_profile_{nullptr};
+    hardware_interface::LoanedStateInterface *state_interface_requested_control_profile_{nullptr};
 
     // Kinematics
     bool kine_initialized_{false};
@@ -115,6 +125,16 @@ private:
         int8_t ik_result{0};
         bool has_ik_solution{false};
         bool has_state_joint{false};
+        bool has_sdk_command_joint{false};
+        bool has_control_profile{false};
+        int32_t active_control_profile{0};
+        int32_t requested_control_profile{0};
+        bool has_sdk_diag{false};
+        int32_t sdk_cur_state{0};
+        int32_t sdk_cmd_state{0};
+        int32_t sdk_err_code{0};
+        int32_t sdk_in_frame_serial{0};
+        int32_t sdk_out_frame_serial{0};
         bool interp_active{false};
         int32_t interp_step{0};
         int32_t interp_total_steps{0};
@@ -127,6 +147,7 @@ private:
         double base_t_ee_quat_w{1.0};
         std::array<double, kJointsPerArm> ik_solution_joint_deg{};
         std::array<double, kJointsPerArm> command_joint_deg{};
+        std::array<double, kJointsPerArm> sdk_command_joint_deg{};
         std::array<double, kJointsPerArm> state_joint_deg{};
     };
     struct AnalysisRecordQueue {
@@ -288,6 +309,20 @@ private:
         bool arm_fresh{false};
     };
 
+    struct SdkObservationState {
+        bool has_control_profile{false};
+        int active_control_profile{0};
+        int requested_control_profile{0};
+        bool has_sdk_diag{false};
+        int sdk_cur_state{0};
+        int sdk_cmd_state{0};
+        int sdk_err_code{0};
+        int sdk_in_frame_serial{0};
+        int sdk_out_frame_serial{0};
+        bool has_sdk_command_joint{false};
+        std::array<double, kJointsPerArm> sdk_command_joints_rad{};
+    };
+
     // Configuration helpers
     bool readJointNames();
     bool initializeKinematics();
@@ -337,9 +372,12 @@ private:
     TrackerInputState evaluateTrackerInputState(
         size_t arm, const CachedTrackerData &snap, const rclcpp::Time &now);
     void holdCurrentPosition(size_t arm);
+    bool syncCommandStateToMeasuredPose(size_t arm);
     void cancelTrackerInterpolation(size_t arm);
     void startTrackerInterpolation(
         size_t arm, const std::array<double, kJointsPerArm> &goal_joints_rad);
+    std::array<double, kJointsPerArm> lowPassFilterIkTarget(
+        size_t arm, const std::array<double, kJointsPerArm> &raw_joints_rad) const;
     void applySmoothedCommand(size_t arm, double dt);
     void fillArmTargetFromTracker(
         size_t arm, const CachedTrackerData &snap,
@@ -354,6 +392,9 @@ private:
     void logArmDiagnostics(size_t arm, const ArmDiagnostics &diag);
     bool readCurrentJointPositions(
         size_t arm, std::array<double, kJointsPerArm> &joints_rad) const;
+    bool readCurrentSdkCommandPositions(
+        size_t arm, std::array<double, kJointsPerArm> &joints_rad) const;
+    SdkObservationState readSdkObservationState(size_t arm) const;
     bool computeCurrentUpperArmDir(
         size_t arm, std::array<double, 3> &upper_arm_dir) const;
     void handleSetArmed(
@@ -374,6 +415,8 @@ private:
     bool isHomeJointReached(size_t arm, size_t joint) const;
     static const char *teleopStateToString(TeleopState state);
     static const char *ikResultToString(IKResult result);
+    static const char *controlProfileCodeToString(int code);
+    static const char *sdkArmStateCodeToString(int code);
 };
 
 }  // namespace marvin_system

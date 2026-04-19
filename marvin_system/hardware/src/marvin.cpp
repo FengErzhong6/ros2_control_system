@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <thread>
 
@@ -90,6 +91,63 @@ std::string param_str(const std::unordered_map<std::string, std::string> &m,
     return (it != m.end()) ? it->second : def;
 }
 
+template <size_t N>
+bool parse_fixed_double_array(
+    const std::string &text,
+    std::array<double, N> &out)
+{
+    std::istringstream stream(text);
+    for (size_t i = 0; i < N; ++i) {
+        if (!(stream >> out[i])) {
+            return false;
+        }
+    }
+    double extra = 0.0;
+    if (stream >> extra) {
+        return false;
+    }
+    return true;
+}
+
+const char *target_arm_state_name(marvin_system::ControlProfile profile)
+{
+    switch (profile) {
+    case marvin_system::ControlProfile::kPositionFollow:
+        return "POSITION";
+    case marvin_system::ControlProfile::kJointImpedance:
+        return "TORQ";
+    case marvin_system::ControlProfile::kUnknown:
+    default:
+        return "UNKNOWN";
+    }
+}
+
+int target_arm_state_code(marvin_system::ControlProfile profile)
+{
+    switch (profile) {
+    case marvin_system::ControlProfile::kPositionFollow:
+        return ARM_STATE_POSITION;
+    case marvin_system::ControlProfile::kJointImpedance:
+        return ARM_STATE_TORQ;
+    case marvin_system::ControlProfile::kUnknown:
+    default:
+        return -1;
+    }
+}
+
+int target_arm_transition_state_code(marvin_system::ControlProfile profile)
+{
+    switch (profile) {
+    case marvin_system::ControlProfile::kPositionFollow:
+        return ARM_STATE_TRANS_TO_POSITION;
+    case marvin_system::ControlProfile::kJointImpedance:
+        return ARM_STATE_TRANS_TO_TORQ;
+    case marvin_system::ControlProfile::kUnknown:
+    default:
+        return -1;
+    }
+}
+
 inline std::string pos_if(const std::string &jn)
 {
     return jn + "/" + hardware_interface::HW_IF_POSITION;
@@ -103,6 +161,12 @@ inline std::string vel_if(const std::string &jn)
 inline std::string eff_if(const std::string &jn)
 {
     return jn + "/" + hardware_interface::HW_IF_EFFORT;
+}
+
+inline std::string sdk_cmd_if(const std::string &jn)
+{
+    return marvin_system::joint_state_if(
+        jn, marvin_system::kSdkCommandPositionStateInterface);
 }
 
 const char *arm_state_name(ArmState state)
@@ -140,6 +204,574 @@ const char *arm_state_name(ArmState state)
 // ===========================================================================
 
 namespace marvin_system {
+
+void MarvinHardware::update_sdk_observation_states(const DCSS &dcss)
+{
+    if (info_.joints.size() < kTotalJoints) {
+        return;
+    }
+
+    const auto &left_anchor_joint = info_.joints[0].name;
+
+    set_state(
+        joint_state_if(left_anchor_joint, kActiveControlProfileStateInterface),
+        static_cast<double>(static_cast<int>(
+            active_control_profile_.load(std::memory_order_relaxed))));
+    set_state(
+        joint_state_if(left_anchor_joint, kRequestedControlProfileStateInterface),
+        static_cast<double>(static_cast<int>(
+            requested_control_profile_.load(std::memory_order_relaxed))));
+
+    for (size_t arm = 0; arm < kArmCount; ++arm) {
+        const auto &anchor_joint =
+            info_.joints[arm == 0 ? 0 : kJointsPerArm].name;
+        set_state(
+            joint_state_if(anchor_joint, kSdkCurrentStateStateInterface),
+            static_cast<double>(dcss.m_State[arm].m_CurState));
+        set_state(
+            joint_state_if(anchor_joint, kSdkCommandStateStateInterface),
+            static_cast<double>(dcss.m_State[arm].m_CmdState));
+        set_state(
+            joint_state_if(anchor_joint, kSdkErrorCodeStateInterface),
+            static_cast<double>(dcss.m_State[arm].m_ERRCode));
+        set_state(
+            joint_state_if(anchor_joint, kSdkInFrameSerialStateInterface),
+            static_cast<double>(dcss.m_In[arm].m_InFrameSerial));
+        set_state(
+            joint_state_if(anchor_joint, kSdkOutFrameSerialStateInterface),
+            static_cast<double>(dcss.m_Out[arm].m_OutFrameSerial));
+
+        const auto &out = dcss.m_Out[arm];
+        for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+            const size_t index = arm * kJointsPerArm + joint;
+            set_state(
+                sdk_cmd_if(info_.joints[index].name),
+                static_cast<double>(out.m_FB_Joint_Cmd[joint]) * kDeg2Rad);
+        }
+    }
+}
+
+bool MarvinHardware::send_position_hold_command(
+    const std::array<std::array<double, kJointsPerArm>, kArmCount> &hold_deg,
+    bool request_position_state)
+{
+    double hold_a[kJointsPerArm];
+    double hold_b[kJointsPerArm];
+    for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+        hold_a[joint] = hold_deg[0][joint];
+        hold_b[joint] = hold_deg[1][joint];
+    }
+
+    OnClearSet();
+    bool ok = true;
+    if (request_position_state) {
+        ok = ok && OnSetTargetState_A(1);
+        ok = ok && OnSetJointLmt_A(joint_vel_ratio_, joint_acc_ratio_);
+        ok = ok && OnSetTargetState_B(1);
+        ok = ok && OnSetJointLmt_B(joint_vel_ratio_, joint_acc_ratio_);
+    }
+    ok = ok && OnSetJointCmdPos_A(hold_a);
+    ok = ok && OnSetJointCmdPos_B(hold_b);
+    return ok && OnSetSend();
+}
+
+bool MarvinHardware::send_joint_impedance_hold_command(
+    const std::array<std::array<double, kJointsPerArm>, kArmCount> &hold_deg,
+    bool request_torque_state)
+{
+    double hold_a[kJointsPerArm];
+    double hold_b[kJointsPerArm];
+    double tool_kine_a[6];
+    double tool_kine_b[6];
+    double tool_dyn_a[10];
+    double tool_dyn_b[10];
+    double joint_k_a[kJointsPerArm];
+    double joint_k_b[kJointsPerArm];
+    double joint_d_a[kJointsPerArm];
+    double joint_d_b[kJointsPerArm];
+
+    for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+        hold_a[joint] = hold_deg[0][joint];
+        hold_b[joint] = hold_deg[1][joint];
+        joint_k_a[joint] = joint_impedance_k_[0][joint];
+        joint_k_b[joint] = joint_impedance_k_[1][joint];
+        joint_d_a[joint] = joint_impedance_d_[0][joint];
+        joint_d_b[joint] = joint_impedance_d_[1][joint];
+    }
+    for (size_t i = 0; i < 6; ++i) {
+        tool_kine_a[i] = tool_kine_[0][i];
+        tool_kine_b[i] = tool_kine_[1][i];
+    }
+    for (size_t i = 0; i < 10; ++i) {
+        tool_dyn_a[i] = tool_dyn_[0][i];
+        tool_dyn_b[i] = tool_dyn_[1][i];
+    }
+
+    OnClearSet();
+    bool ok = true;
+    if (request_torque_state) {
+        ok = ok && OnSetTool_A(tool_kine_a, tool_dyn_a);
+        ok = ok && OnSetTool_B(tool_kine_b, tool_dyn_b);
+        ok = ok && OnSetJointKD_A(joint_k_a, joint_d_a);
+        ok = ok && OnSetJointKD_B(joint_k_b, joint_d_b);
+        ok = ok && OnSetJointLmt_A(joint_vel_ratio_, joint_acc_ratio_);
+        ok = ok && OnSetJointLmt_B(joint_vel_ratio_, joint_acc_ratio_);
+        ok = ok && OnSetImpType_A(1);
+        ok = ok && OnSetImpType_B(1);
+        ok = ok && OnSetTargetState_A(3);
+        ok = ok && OnSetTargetState_B(3);
+    }
+    ok = ok && OnSetJointCmdPos_A(hold_a);
+    ok = ok && OnSetJointCmdPos_B(hold_b);
+    return ok && OnSetSend();
+}
+
+bool MarvinHardware::process_control_profile_transition()
+{
+    std::unique_lock<std::mutex> lock(control_profile_mutex_);
+    if (!control_profile_request_pending_) {
+        return false;
+    }
+
+    auto build_arm_status_summary = [this]() {
+        const auto now = Clock::now();
+        std::ostringstream stream;
+        stream << "A[state="
+               << arm_state_code_to_string(current_sdk_cur_state_[0].load(std::memory_order_relaxed))
+               << '(' << current_sdk_cur_state_[0].load(std::memory_order_relaxed) << ')'
+               << " cmd=" << current_sdk_cmd_state_[0].load(std::memory_order_relaxed)
+               << " err=" << current_sdk_err_code_[0].load(std::memory_order_relaxed)
+               << " in=" << current_sdk_in_frame_serial_[0].load(std::memory_order_relaxed)
+               << " out=" << current_sdk_out_frame_serial_[0].load(std::memory_order_relaxed)
+               << " frame_age_ms="
+               << std::chrono::duration_cast<std::chrono::milliseconds>(
+                      now - last_frame_time_[0])
+                      .count()
+               << "] B[state="
+               << arm_state_code_to_string(current_sdk_cur_state_[1].load(std::memory_order_relaxed))
+               << '(' << current_sdk_cur_state_[1].load(std::memory_order_relaxed) << ')'
+               << " cmd=" << current_sdk_cmd_state_[1].load(std::memory_order_relaxed)
+               << " err=" << current_sdk_err_code_[1].load(std::memory_order_relaxed)
+               << " in=" << current_sdk_in_frame_serial_[1].load(std::memory_order_relaxed)
+               << " out=" << current_sdk_out_frame_serial_[1].load(std::memory_order_relaxed)
+               << " frame_age_ms="
+               << std::chrono::duration_cast<std::chrono::milliseconds>(
+                      now - last_frame_time_[1])
+                      .count()
+               << ']';
+        return stream.str();
+    };
+
+    auto build_hold_target_summary = [this]() {
+        std::ostringstream stream;
+        stream << "hold_deg_L=[";
+        for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+            if (joint > 0) {
+                stream << ' ';
+            }
+            stream << control_profile_hold_deg_[0][joint];
+        }
+        stream << "] hold_deg_R=[";
+        for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+            if (joint > 0) {
+                stream << ' ';
+            }
+            stream << control_profile_hold_deg_[1][joint];
+        }
+        stream << ']';
+        return stream.str();
+    };
+
+    auto diagnostic_transition_active = [this]() {
+        return control_profile_source_profile_ == ControlProfile::kJointImpedance &&
+               control_profile_pending_target_ == ControlProfile::kPositionFollow;
+    };
+
+    auto maybe_log_diagnostic_progress_locked =
+        [this, &build_arm_status_summary, &diagnostic_transition_active](
+            const char *phase,
+            bool force) {
+        if (!diagnostic_transition_active()) {
+            return;
+        }
+
+        const auto now = Clock::now();
+        bool changed = !control_profile_diag_snapshot_valid_;
+        for (size_t arm = 0; arm < kArmCount && !changed; ++arm) {
+            changed =
+                control_profile_diag_last_cur_state_[arm] !=
+                    current_sdk_cur_state_[arm].load(std::memory_order_relaxed) ||
+                control_profile_diag_last_cmd_state_[arm] !=
+                    current_sdk_cmd_state_[arm].load(std::memory_order_relaxed) ||
+                control_profile_diag_last_err_code_[arm] !=
+                    current_sdk_err_code_[arm].load(std::memory_order_relaxed) ||
+                control_profile_diag_last_in_frame_serial_[arm] !=
+                    current_sdk_in_frame_serial_[arm].load(std::memory_order_relaxed) ||
+                control_profile_diag_last_out_frame_serial_[arm] !=
+                    current_sdk_out_frame_serial_[arm].load(std::memory_order_relaxed);
+        }
+        if (!force &&
+            !changed &&
+            control_profile_last_progress_log_at_ != Clock::time_point{} &&
+            (now - control_profile_last_progress_log_at_) < std::chrono::milliseconds(250)) {
+            return;
+        }
+
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    now - control_profile_transition_started_at_)
+                                    .count();
+        RCLCPP_WARN(
+            get_logger(),
+            "Diagnostic JOINT_IMPEDANCE->POSITION_FOLLOW progress: phase=%s elapsed=%lldms "
+            "resend=%llu %s",
+            phase,
+            static_cast<long long>(elapsed_ms),
+            static_cast<unsigned long long>(control_profile_resend_count_),
+            build_arm_status_summary().c_str());
+
+        for (size_t arm = 0; arm < kArmCount; ++arm) {
+            control_profile_diag_last_cur_state_[arm] =
+                current_sdk_cur_state_[arm].load(std::memory_order_relaxed);
+            control_profile_diag_last_cmd_state_[arm] =
+                current_sdk_cmd_state_[arm].load(std::memory_order_relaxed);
+            control_profile_diag_last_err_code_[arm] =
+                current_sdk_err_code_[arm].load(std::memory_order_relaxed);
+            control_profile_diag_last_in_frame_serial_[arm] =
+                current_sdk_in_frame_serial_[arm].load(std::memory_order_relaxed);
+            control_profile_diag_last_out_frame_serial_[arm] =
+                current_sdk_out_frame_serial_[arm].load(std::memory_order_relaxed);
+        }
+        control_profile_diag_snapshot_valid_ = true;
+        control_profile_last_progress_log_at_ = now;
+    };
+
+    auto complete_locked =
+        [this, &lock, &build_arm_status_summary, &diagnostic_transition_active](
+            bool success,
+            const std::string &message) {
+        const auto completed_at = Clock::now();
+        const bool diagnostic = diagnostic_transition_active();
+        const auto elapsed_ms =
+            control_profile_transition_started_at_ == Clock::time_point{} ?
+                0LL :
+                static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           completed_at - control_profile_transition_started_at_)
+                                           .count());
+        if (diagnostic || !success) {
+            RCLCPP_WARN(
+                get_logger(),
+                "Control profile transition finished: success=%s source=%s target=%s "
+                "elapsed=%lldms resend=%llu message=%s %s",
+                success ? "true" : "false",
+                control_profile_to_string(control_profile_source_profile_),
+                control_profile_to_string(control_profile_pending_target_),
+                elapsed_ms,
+                static_cast<unsigned long long>(control_profile_resend_count_),
+                message.c_str(),
+                build_arm_status_summary().c_str());
+        }
+        if (success &&
+            control_profile_source_profile_ == ControlProfile::kJointImpedance &&
+            control_profile_pending_target_ == ControlProfile::kPositionFollow) {
+            control_profile_post_monitor_active_ = true;
+            control_profile_post_monitor_source_ = control_profile_source_profile_;
+            control_profile_post_monitor_target_ = control_profile_pending_target_;
+            control_profile_post_monitor_started_at_ = completed_at;
+            control_profile_post_monitor_deadline_ =
+                completed_at + std::chrono::milliseconds(profile_switch_post_monitor_ms_);
+            control_profile_post_monitor_last_log_at_ = Clock::time_point{};
+            control_profile_post_monitor_snapshot_valid_ = false;
+        } else if (!success) {
+            control_profile_post_monitor_active_ = false;
+            control_profile_post_monitor_source_ = ControlProfile::kUnknown;
+            control_profile_post_monitor_target_ = ControlProfile::kUnknown;
+            control_profile_post_monitor_started_at_ = Clock::time_point{};
+            control_profile_post_monitor_deadline_ = Clock::time_point{};
+            control_profile_post_monitor_last_log_at_ = Clock::time_point{};
+            control_profile_post_monitor_snapshot_valid_ = false;
+        }
+        control_profile_transition_phase_ =
+            success ? ControlProfileTransitionPhase::kCompleted :
+                      ControlProfileTransitionPhase::kFailed;
+        control_profile_transition_active_ = false;
+        control_profile_request_pending_ = false;
+        if (!success) {
+            requested_control_profile_.store(
+                active_control_profile_.load(std::memory_order_relaxed),
+                std::memory_order_relaxed);
+        }
+        control_profile_last_message_ = message;
+        control_profile_completed_sequence_ = control_profile_inflight_sequence_;
+        lock.unlock();
+        control_profile_cv_.notify_all();
+    };
+
+    auto fail_locked = [&](const std::string &message) {
+        complete_locked(false, message);
+    };
+
+    switch (control_profile_transition_phase_) {
+    case ControlProfileTransitionPhase::kRequested:
+        control_profile_transition_phase_ = ControlProfileTransitionPhase::kCaptureHold;
+        control_profile_last_message_ =
+            std::string("Accepted control profile request for ") +
+            control_profile_to_string(control_profile_pending_target_) +
+            "; capturing current feedback hold target.";
+        return true;
+    case ControlProfileTransitionPhase::kCaptureHold:
+        if (control_profile_pending_target_ == ControlProfile::kUnknown) {
+            fail_locked("Control profile transition target is UNKNOWN.");
+            return true;
+        }
+        if (control_profile_pending_target_ == ControlProfile::kJointImpedance &&
+            !joint_impedance_profile_enabled_) {
+            fail_locked("Joint impedance profile is disabled by configuration.");
+            return true;
+        }
+        if (!current_feedback_valid_.load(std::memory_order_relaxed)) {
+            fail_locked(
+                "Current joint feedback is unavailable; cannot capture a no-jump hold target.");
+            return true;
+        }
+        for (size_t arm = 0; arm < kArmCount; ++arm) {
+            for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+                const size_t index = arm * kJointsPerArm + joint;
+                control_profile_hold_deg_[arm][joint] =
+                    current_feedback_deg_[index].load(std::memory_order_relaxed);
+            }
+        }
+        control_profile_transition_started_at_ = Clock::now();
+        control_profile_last_packet_sent_at_ = Clock::time_point{};
+        control_profile_last_progress_log_at_ = Clock::time_point{};
+        control_profile_stabilize_cycles_remaining_ =
+            std::max(1, profile_switch_stabilize_cycles_);
+        control_profile_transition_phase_ = ControlProfileTransitionPhase::kSendSwitchPacket;
+        control_profile_last_message_ =
+            std::string("Captured current feedback hold target; sending ") +
+            control_profile_to_string(control_profile_pending_target_) +
+            " switch packet.";
+        if (diagnostic_transition_active()) {
+            RCLCPP_WARN(
+                get_logger(),
+                "Diagnostic JOINT_IMPEDANCE->POSITION_FOLLOW captured hold target: %s %s",
+                build_hold_target_summary().c_str(),
+                build_arm_status_summary().c_str());
+        }
+        return true;
+    case ControlProfileTransitionPhase::kSendSwitchPacket: {
+        const ControlProfile target_profile = control_profile_pending_target_;
+        const auto hold_deg = control_profile_hold_deg_;
+        lock.unlock();
+        const bool ok =
+            target_profile == ControlProfile::kJointImpedance ?
+                send_joint_impedance_hold_command(hold_deg, true) :
+                send_position_hold_command(hold_deg, true);
+        lock.lock();
+        if (!control_profile_request_pending_) {
+            return true;
+        }
+        if (!ok) {
+            fail_locked(
+                std::string("Failed to send switch packet while starting the ") +
+                control_profile_to_string(control_profile_pending_target_) +
+                " transition. " + build_arm_status_summary());
+            return true;
+        }
+        RCLCPP_INFO(
+            get_logger(),
+            "Control profile switch packet sent: target=%s %s",
+            control_profile_to_string(target_profile),
+            build_arm_status_summary().c_str());
+        control_profile_last_packet_sent_at_ = Clock::now();
+        maybe_log_diagnostic_progress_locked("send_switch_packet", true);
+        control_profile_transition_phase_ = ControlProfileTransitionPhase::kWaitArmState;
+        control_profile_last_message_ =
+            std::string("Switch packet sent; waiting for both arms to report ") +
+            target_arm_state_name(control_profile_pending_target_) +
+            ".";
+        return true;
+    }
+    case ControlProfileTransitionPhase::kWaitArmState: {
+        const ControlProfile target_profile = control_profile_pending_target_;
+        if ((Clock::now() - control_profile_transition_started_at_) >
+            std::chrono::milliseconds(profile_switch_timeout_ms_)) {
+            fail_locked(
+                std::string("Timed out waiting for both arms to reach ") +
+                target_arm_state_name(target_profile) +
+                " during control profile transition. " + build_arm_status_summary());
+            return true;
+        }
+
+        for (size_t arm = 0; arm < kArmCount; ++arm) {
+            if (current_sdk_err_code_[arm].load(std::memory_order_relaxed) != 0) {
+                fail_locked(
+                    "SDK reported a non-zero error code during control profile transition. " +
+                    build_arm_status_summary());
+                return true;
+            }
+        }
+
+        const int target_state_code = target_arm_state_code(target_profile);
+        bool all_position = true;
+        for (size_t arm = 0; arm < kArmCount; ++arm) {
+            all_position =
+                all_position &&
+                current_sdk_cur_state_[arm].load(std::memory_order_relaxed) == target_state_code;
+        }
+        maybe_log_diagnostic_progress_locked("wait_arm_state", false);
+
+        if (!all_position) {
+            const auto hold_deg = control_profile_hold_deg_;
+            const auto now = Clock::now();
+            const bool paced_position_restore =
+                control_profile_source_profile_ == ControlProfile::kJointImpedance &&
+                target_profile == ControlProfile::kPositionFollow;
+            bool any_arm_in_transition_state = false;
+            bool resend_switch_packet = false;
+            if (paced_position_restore) {
+                const auto elapsed_since_start =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - control_profile_transition_started_at_);
+                const int transition_state_code = target_arm_transition_state_code(target_profile);
+                for (size_t arm = 0; arm < kArmCount; ++arm) {
+                    any_arm_in_transition_state =
+                        any_arm_in_transition_state ||
+                        current_sdk_cur_state_[arm].load(std::memory_order_relaxed) ==
+                            transition_state_code;
+                }
+                const bool initial_delay_elapsed =
+                    elapsed_since_start >=
+                    std::chrono::milliseconds(profile_switch_initial_resend_delay_ms_);
+                const bool resend_interval_elapsed =
+                    control_profile_last_packet_sent_at_ == Clock::time_point{} ||
+                    (now - control_profile_last_packet_sent_at_) >=
+                        std::chrono::milliseconds(profile_switch_resend_interval_ms_);
+                resend_switch_packet =
+                    initial_delay_elapsed &&
+                    resend_interval_elapsed &&
+                    !any_arm_in_transition_state;
+            } else {
+                resend_switch_packet =
+                    control_profile_last_packet_sent_at_ == Clock::time_point{} ||
+                    (now - control_profile_last_packet_sent_at_) >=
+                        std::chrono::milliseconds(profile_switch_resend_interval_ms_);
+            }
+            lock.unlock();
+            const bool ok =
+                target_profile == ControlProfile::kJointImpedance ?
+                    send_joint_impedance_hold_command(hold_deg, resend_switch_packet) :
+                    send_position_hold_command(hold_deg, resend_switch_packet);
+            lock.lock();
+            if (!control_profile_request_pending_) {
+                return true;
+            }
+            if (!ok) {
+                fail_locked(
+                    std::string("Failed to maintain hold command while waiting for ") +
+                    target_arm_state_name(target_profile) +
+                    " during control profile transition. " + build_arm_status_summary());
+                return true;
+            }
+            if (resend_switch_packet) {
+                control_profile_resend_count_++;
+                control_profile_last_packet_sent_at_ = now;
+                maybe_log_diagnostic_progress_locked("wait_arm_state_resend", true);
+            } else if (diagnostic_transition_active() && any_arm_in_transition_state) {
+                maybe_log_diagnostic_progress_locked(
+                    "wait_arm_state_hold_only_transition_seen", false);
+            }
+            return true;
+        }
+
+        control_profile_transition_phase_ = ControlProfileTransitionPhase::kStabilize;
+        control_profile_last_message_ =
+            std::string("Both arms reached ") +
+            target_arm_state_name(target_profile) +
+            "; entering stabilization hold.";
+        maybe_log_diagnostic_progress_locked("enter_stabilize", true);
+        return true;
+    }
+    case ControlProfileTransitionPhase::kStabilize: {
+        const ControlProfile target_profile = control_profile_pending_target_;
+        if ((Clock::now() - control_profile_transition_started_at_) >
+            std::chrono::milliseconds(profile_switch_timeout_ms_)) {
+            fail_locked(
+                "Timed out while stabilizing the hold target during control profile transition. " +
+                build_arm_status_summary());
+            return true;
+        }
+
+        const int target_state_code = target_arm_state_code(target_profile);
+        for (size_t arm = 0; arm < kArmCount; ++arm) {
+            if (current_sdk_err_code_[arm].load(std::memory_order_relaxed) != 0) {
+                fail_locked(
+                    "SDK reported a non-zero error code during stabilization. " +
+                    build_arm_status_summary());
+                return true;
+            }
+            if (current_sdk_cur_state_[arm].load(std::memory_order_relaxed) != target_state_code) {
+                fail_locked(
+                    std::string("An arm left ") +
+                    target_arm_state_name(target_profile) +
+                    " during stabilization. " + build_arm_status_summary());
+                return true;
+            }
+        }
+        maybe_log_diagnostic_progress_locked("stabilize", false);
+
+        const auto hold_deg = control_profile_hold_deg_;
+        lock.unlock();
+        const bool ok =
+            target_profile == ControlProfile::kJointImpedance ?
+                send_joint_impedance_hold_command(hold_deg, false) :
+                send_position_hold_command(hold_deg, false);
+        lock.lock();
+        if (!control_profile_request_pending_) {
+            return true;
+        }
+        if (!ok) {
+            fail_locked(
+                std::string("Failed to maintain hold command during ") +
+                control_profile_to_string(target_profile) +
+                " stabilization. " + build_arm_status_summary());
+            return true;
+        }
+
+        control_profile_stabilize_cycles_remaining_--;
+        if (control_profile_stabilize_cycles_remaining_ > 0) {
+            return true;
+        }
+
+        requested_control_profile_.store(
+            target_profile, std::memory_order_relaxed);
+        active_control_profile_.store(
+            target_profile, std::memory_order_relaxed);
+        complete_locked(
+            true,
+            std::string("Phase 3 transition completed with no-jump hold stabilization: ") +
+            control_profile_to_string(target_profile) + ".");
+        return true;
+    }
+    case ControlProfileTransitionPhase::kCompleted:
+    case ControlProfileTransitionPhase::kFailed:
+        control_profile_transition_active_ = false;
+        control_profile_request_pending_ = false;
+        control_profile_completed_sequence_ = control_profile_inflight_sequence_;
+        lock.unlock();
+        control_profile_cv_.notify_all();
+        return true;
+    case ControlProfileTransitionPhase::kIdle:
+    default:
+        control_profile_transition_active_ = false;
+        control_profile_request_pending_ = false;
+        control_profile_last_message_ =
+            "Control profile transition state became idle unexpectedly.";
+        control_profile_completed_sequence_ = control_profile_inflight_sequence_;
+        lock.unlock();
+        control_profile_cv_.notify_all();
+        return true;
+    }
+}
 
 MarvinHardware::~MarvinHardware()
 {
@@ -449,6 +1081,13 @@ hardware_interface::CallbackReturn MarvinHardware::on_init(
         collision_guard_target_deg_[i].store(0.0, std::memory_order_relaxed);
         collision_guard_approved_deg_[i].store(0.0, std::memory_order_relaxed);
     }
+    for (size_t arm = 0; arm < kArmCount; ++arm) {
+        current_sdk_cur_state_[arm].store(ARM_STATE_IDLE, std::memory_order_relaxed);
+        current_sdk_cmd_state_[arm].store(0, std::memory_order_relaxed);
+        current_sdk_err_code_[arm].store(0, std::memory_order_relaxed);
+        current_sdk_in_frame_serial_[arm].store(0, std::memory_order_relaxed);
+        current_sdk_out_frame_serial_[arm].store(0, std::memory_order_relaxed);
+    }
     current_feedback_valid_.store(false, std::memory_order_relaxed);
     collision_guard_approved_valid_.store(false, std::memory_order_relaxed);
 
@@ -508,6 +1147,136 @@ hardware_interface::CallbackReturn MarvinHardware::on_init(
         RCLCPP_WARN(get_logger(), "Effort state declared on some joints only; disabled.");
 
     if (const auto node = get_node()) {
+        control_profile_service_ = node->create_service<marvin_system::srv::SetControlProfile>(
+            "~/set_control_profile",
+            [this](
+                const std::shared_ptr<marvin_system::srv::SetControlProfile::Request> request,
+                std::shared_ptr<marvin_system::srv::SetControlProfile::Response> response) {
+                const ControlProfile target_profile =
+                    control_profile_from_string(request->profile);
+                if (target_profile == ControlProfile::kUnknown) {
+                    response->success = false;
+                    response->message = "Unsupported control profile: " + request->profile;
+                    response->active_profile = control_profile_to_string(
+                        active_control_profile_.load(std::memory_order_relaxed));
+                    response->requested_profile =
+                        control_profile_to_string(
+                            requested_control_profile_.load(std::memory_order_relaxed));
+                    response->transition_active = false;
+                    return;
+                }
+
+                if (target_profile == ControlProfile::kJointImpedance &&
+                    !joint_impedance_profile_enabled_) {
+                    response->success = false;
+                    response->message =
+                        "Joint impedance profile is disabled by configuration.";
+                    response->active_profile = control_profile_to_string(
+                        active_control_profile_.load(std::memory_order_relaxed));
+                    response->requested_profile =
+                        control_profile_to_string(
+                            requested_control_profile_.load(std::memory_order_relaxed));
+                    response->transition_active = false;
+                    return;
+                }
+
+                if (!activated_) {
+                    response->success = false;
+                    response->message =
+                        "Control profile request rejected because hardware is not activated.";
+                    response->active_profile = control_profile_to_string(
+                        active_control_profile_.load(std::memory_order_relaxed));
+                    response->requested_profile =
+                        control_profile_to_string(
+                            requested_control_profile_.load(std::memory_order_relaxed));
+                    response->transition_active = false;
+                    return;
+                }
+
+                uint64_t request_sequence = 0;
+                {
+                    std::lock_guard<std::mutex> lock(control_profile_mutex_);
+                    if (control_profile_transition_active_ || control_profile_request_pending_) {
+                        response->success = false;
+                        response->message =
+                            "Another control profile transition is already in progress.";
+                        response->active_profile = control_profile_to_string(
+                            active_control_profile_.load(std::memory_order_relaxed));
+                        response->requested_profile =
+                            control_profile_to_string(
+                                requested_control_profile_.load(std::memory_order_relaxed));
+                        response->transition_active = true;
+                        return;
+                    }
+
+                    requested_control_profile_.store(target_profile, std::memory_order_relaxed);
+                    control_profile_pending_target_ = target_profile;
+                    control_profile_source_profile_ =
+                        active_control_profile_.load(std::memory_order_relaxed);
+                    control_profile_transition_active_ = true;
+                    control_profile_request_pending_ = true;
+                    control_profile_transition_phase_ = ControlProfileTransitionPhase::kRequested;
+                    control_profile_inflight_sequence_ = ++control_profile_request_sequence_;
+                    control_profile_resend_count_ = 0;
+                    control_profile_last_progress_log_at_ = Clock::time_point{};
+                    control_profile_diag_snapshot_valid_ = false;
+                    request_sequence = control_profile_inflight_sequence_;
+                    control_profile_last_message_ =
+                        std::string("Accepted control profile request: ") +
+                        control_profile_to_string(target_profile);
+                    RCLCPP_INFO(
+                        get_logger(),
+                        "Control profile request accepted: source=%s target=%s timeout=%dms",
+                        control_profile_to_string(control_profile_source_profile_),
+                        control_profile_to_string(target_profile),
+                        profile_switch_timeout_ms_);
+                }
+
+                std::unique_lock<std::mutex> lock(control_profile_mutex_);
+                const bool completed = control_profile_cv_.wait_for(
+                    lock,
+                    std::chrono::milliseconds(profile_switch_timeout_ms_),
+                    [this, request_sequence]() {
+                        return control_profile_completed_sequence_ >= request_sequence;
+                    });
+
+                response->active_profile = control_profile_to_string(
+                    active_control_profile_.load(std::memory_order_relaxed));
+                response->requested_profile =
+                    control_profile_to_string(
+                        requested_control_profile_.load(std::memory_order_relaxed));
+                response->transition_active = control_profile_transition_active_;
+
+                if (!completed) {
+                    if (control_profile_completed_sequence_ < request_sequence &&
+                        control_profile_inflight_sequence_ == request_sequence) {
+                        control_profile_transition_phase_ = ControlProfileTransitionPhase::kFailed;
+                        control_profile_transition_active_ = false;
+                        control_profile_request_pending_ = false;
+                        requested_control_profile_.store(
+                            active_control_profile_.load(std::memory_order_relaxed),
+                            std::memory_order_relaxed);
+                        control_profile_last_message_ =
+                            "Timed out waiting for control profile transition to finish.";
+                        control_profile_completed_sequence_ = request_sequence;
+                        control_profile_cv_.notify_all();
+                    }
+                    response->success = false;
+                    response->message = control_profile_last_message_;
+                    response->active_profile = control_profile_to_string(
+                        active_control_profile_.load(std::memory_order_relaxed));
+                    response->requested_profile = control_profile_to_string(
+                        requested_control_profile_.load(std::memory_order_relaxed));
+                    response->transition_active = false;
+                    return;
+                }
+
+                response->success =
+                    active_control_profile_.load(std::memory_order_relaxed) == target_profile &&
+                    control_profile_transition_phase_ != ControlProfileTransitionPhase::kFailed;
+                response->message = control_profile_last_message_;
+            });
+
         workspace_guard_service_ = node->create_service<std_srvs::srv::SetBool>(
             "~/set_workspace_guard_enabled",
             [this](
@@ -634,6 +1403,33 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
     collision_guard_.disarm();
     current_feedback_valid_.store(false, std::memory_order_relaxed);
     collision_guard_approved_valid_.store(false, std::memory_order_relaxed);
+    active_control_profile_.store(ControlProfile::kUnknown, std::memory_order_relaxed);
+    requested_control_profile_.store(ControlProfile::kUnknown, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(control_profile_mutex_);
+        control_profile_transition_phase_ = ControlProfileTransitionPhase::kIdle;
+        control_profile_transition_active_ = false;
+        control_profile_request_pending_ = false;
+        control_profile_request_sequence_ = 0;
+        control_profile_completed_sequence_ = 0;
+        control_profile_inflight_sequence_ = 0;
+        control_profile_resend_count_ = 0;
+        control_profile_pending_target_ = ControlProfile::kUnknown;
+        control_profile_source_profile_ = ControlProfile::kUnknown;
+        control_profile_stabilize_cycles_remaining_ = 0;
+        control_profile_last_packet_sent_at_ = Clock::time_point{};
+        control_profile_last_progress_log_at_ = Clock::time_point{};
+        control_profile_diag_snapshot_valid_ = false;
+        control_profile_post_monitor_active_ = false;
+        control_profile_post_monitor_source_ = ControlProfile::kUnknown;
+        control_profile_post_monitor_target_ = ControlProfile::kUnknown;
+        control_profile_post_monitor_started_at_ = Clock::time_point{};
+        control_profile_post_monitor_deadline_ = Clock::time_point{};
+        control_profile_post_monitor_last_log_at_ = Clock::time_point{};
+        control_profile_post_monitor_snapshot_valid_ = false;
+        control_profile_last_message_ =
+            "Control profile transition framework reset during configure.";
+    }
     mock_grippers_ = false;
     for (auto &slot : grippers_) {
         slot.mock = false;
@@ -648,6 +1444,8 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
 
     joint_vel_ratio_     = param_int(p, "joint_vel_ratio",     30,   1, 100);
     joint_acc_ratio_     = param_int(p, "joint_acc_ratio",     30,   1, 100);
+    joint_impedance_profile_enabled_ =
+        param_bool(p, "joint_impedance_enabled", true);
     gripper_velocity_    = param_int(p, "gripper_velocity",    255,  0, 255);
     gripper_acceleration_= param_int(p, "gripper_acceleration",255,  0, 255);
     gripper_command_rate_hz_ = param_double(
@@ -657,11 +1455,59 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
     mock_grippers_ = param_bool(p, "mock_grippers", false);
     connect_timeout_ms_ = param_int(p, "connect_timeout_ms", 1500, 100, 30000);
     state_timeout_ms_ = param_int(p, "state_timeout_ms", 8000, 100, 30000);
+    profile_switch_timeout_ms_ = param_int(
+        p, "profile_switch_timeout_ms", 5000, 100, 10000);
+    profile_switch_stabilize_cycles_ = param_int(
+        p, "profile_switch_stabilize_cycles", 1, 1, 1000);
+    profile_switch_post_monitor_ms_ = param_int(
+        p, "profile_switch_post_monitor_ms", 500, 0, 5000);
+    profile_switch_initial_resend_delay_ms_ = param_int(
+        p, "profile_switch_initial_resend_delay_ms", 80, 0, 5000);
+    profile_switch_resend_interval_ms_ = param_int(
+        p, "profile_switch_resend_interval_ms", 20, 1, 1000);
     activation_retry_settle_ms_ = param_int(
         p, "activation_retry_settle_ms", 1500, 0, 10000);
     activation_max_attempts_ = param_int(
         p, "activation_max_attempts", 2, 1, 5);
     no_frame_timeout_ms_ = param_int(p, "no_frame_timeout_ms", 800, 50, 10000);
+
+    if (!parse_fixed_double_array(
+            param_str(p, "joint_impedance_k_left", "2 2 2 2 2 1 1"),
+            joint_impedance_k_[0]) ||
+        !parse_fixed_double_array(
+            param_str(p, "joint_impedance_d_left", "0.4 0.4 0.4 0.4 0.4 0.4 0.4"),
+            joint_impedance_d_[0]) ||
+        !parse_fixed_double_array(
+            param_str(p, "joint_impedance_k_right", "2 2 2 2 2 1 1"),
+            joint_impedance_k_[1]) ||
+        !parse_fixed_double_array(
+            param_str(p, "joint_impedance_d_right", "0.4 0.4 0.4 0.4 0.4 0.4 0.4"),
+            joint_impedance_d_[1])) {
+        RCLCPP_ERROR(
+            get_logger(),
+            "Failed to parse joint impedance K/D parameters. "
+            "Expected 7 whitespace-separated values per arm.");
+        return hardware_interface::CallbackReturn::ERROR;
+    }
+
+    if (!parse_fixed_double_array(
+            param_str(p, "tool_kine_left", "0 0 0 0 0 0"),
+            tool_kine_[0]) ||
+        !parse_fixed_double_array(
+            param_str(p, "tool_dyn_left", "0 0 0 0 0 0 0 0 0 0"),
+            tool_dyn_[0]) ||
+        !parse_fixed_double_array(
+            param_str(p, "tool_kine_right", "0 0 0 0 0 0"),
+            tool_kine_[1]) ||
+        !parse_fixed_double_array(
+            param_str(p, "tool_dyn_right", "0 0 0 0 0 0 0 0 0 0"),
+            tool_dyn_[1])) {
+        RCLCPP_ERROR(
+            get_logger(),
+            "Failed to parse tool kinematics/dynamics parameters. "
+            "Expected 6 kine values and 10 dyn values per arm.");
+        return hardware_interface::CallbackReturn::ERROR;
+    }
 
     Ip4 ip{};
     const auto ip_str = param_str(p, "ip", "192.168.1.190");
@@ -829,10 +1675,18 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
 
     RCLCPP_INFO(get_logger(),
                 "Configured dual-arm system (joint_vel=%d%%, joint_acc=%d%%, "
+                "joint_impedance=%s, profile_switch_timeout_ms=%d, stabilize_cycles=%d, "
+                "post_monitor_ms=%d, initial_resend_delay_ms=%d, resend_interval_ms=%d, "
                 "gripper_velocity=%d, gripper_acceleration=%d, grippers=%zu, "
                 "collision_guard=%s, mock_grippers=%s).",
                 joint_vel_ratio_,
                 joint_acc_ratio_,
+                joint_impedance_profile_enabled_ ? "enabled" : "disabled",
+                profile_switch_timeout_ms_,
+                profile_switch_stabilize_cycles_,
+                profile_switch_post_monitor_ms_,
+                profile_switch_initial_resend_delay_ms_,
+                profile_switch_resend_interval_ms_,
                 gripper_velocity_,
                 gripper_acceleration_,
                 gripper_count_,
@@ -1349,6 +2203,16 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
     // Seed ros2_control state & command interfaces from current feedback.
     OnGetBuf(&dcss);
     for (size_t arm = 0; arm < kArmCount; ++arm) {
+        current_sdk_cur_state_[arm].store(
+            dcss.m_State[arm].m_CurState, std::memory_order_relaxed);
+        current_sdk_cmd_state_[arm].store(
+            dcss.m_State[arm].m_CmdState, std::memory_order_relaxed);
+        current_sdk_err_code_[arm].store(
+            dcss.m_State[arm].m_ERRCode, std::memory_order_relaxed);
+        current_sdk_in_frame_serial_[arm].store(
+            dcss.m_In[arm].m_InFrameSerial, std::memory_order_relaxed);
+        current_sdk_out_frame_serial_[arm].store(
+            dcss.m_Out[arm].m_OutFrameSerial, std::memory_order_relaxed);
         const auto &out = dcss.m_Out[arm];
         for (size_t j = 0; j < kJointsPerArm; ++j) {
             const size_t idx = arm * kJointsPerArm + j;
@@ -1372,6 +2236,31 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
     }
     current_feedback_valid_.store(true, std::memory_order_relaxed);
     collision_guard_approved_valid_.store(true, std::memory_order_relaxed);
+    active_control_profile_.store(ControlProfile::kPositionFollow, std::memory_order_relaxed);
+    requested_control_profile_.store(ControlProfile::kPositionFollow, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(control_profile_mutex_);
+        control_profile_transition_phase_ = ControlProfileTransitionPhase::kIdle;
+        control_profile_transition_active_ = false;
+        control_profile_request_pending_ = false;
+        control_profile_resend_count_ = 0;
+        control_profile_pending_target_ = ControlProfile::kUnknown;
+        control_profile_source_profile_ = ControlProfile::kUnknown;
+        control_profile_stabilize_cycles_remaining_ = 0;
+        control_profile_last_packet_sent_at_ = Clock::time_point{};
+        control_profile_last_progress_log_at_ = Clock::time_point{};
+        control_profile_diag_snapshot_valid_ = false;
+        control_profile_post_monitor_active_ = false;
+        control_profile_post_monitor_source_ = ControlProfile::kUnknown;
+        control_profile_post_monitor_target_ = ControlProfile::kUnknown;
+        control_profile_post_monitor_started_at_ = Clock::time_point{};
+        control_profile_post_monitor_deadline_ = Clock::time_point{};
+        control_profile_post_monitor_last_log_at_ = Clock::time_point{};
+        control_profile_post_monitor_snapshot_valid_ = false;
+        control_profile_last_message_ =
+            "Hardware activated in POSITION_FOLLOW profile.";
+    }
+    update_sdk_observation_states(dcss);
 
     // Seed gripper state & command (query_states blocks briefly, OK during activation)
     for (size_t g = 0; g < gripper_count_; ++g) {
@@ -1597,6 +2486,37 @@ hardware_interface::CallbackReturn MarvinHardware::on_deactivate(
         }
     }
 
+    requested_control_profile_.store(
+        ControlProfile::kPositionFollow, std::memory_order_relaxed);
+    active_control_profile_.store(
+        holding_position ? ControlProfile::kPositionFollow : ControlProfile::kUnknown,
+        std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(control_profile_mutex_);
+        control_profile_transition_phase_ = ControlProfileTransitionPhase::kIdle;
+        control_profile_transition_active_ = false;
+        control_profile_request_pending_ = false;
+        control_profile_resend_count_ = 0;
+        control_profile_pending_target_ = ControlProfile::kUnknown;
+        control_profile_source_profile_ = ControlProfile::kUnknown;
+        control_profile_stabilize_cycles_remaining_ = 0;
+        control_profile_last_packet_sent_at_ = Clock::time_point{};
+        control_profile_last_progress_log_at_ = Clock::time_point{};
+        control_profile_diag_snapshot_valid_ = false;
+        control_profile_post_monitor_active_ = false;
+        control_profile_post_monitor_source_ = ControlProfile::kUnknown;
+        control_profile_post_monitor_target_ = ControlProfile::kUnknown;
+        control_profile_post_monitor_started_at_ = Clock::time_point{};
+        control_profile_post_monitor_deadline_ = Clock::time_point{};
+        control_profile_post_monitor_last_log_at_ = Clock::time_point{};
+        control_profile_post_monitor_snapshot_valid_ = false;
+        control_profile_last_message_ = holding_position ?
+            "Hardware deactivated while keeping POSITION_FOLLOW hold." :
+            "Hardware deactivated before any control profile transition completed.";
+        control_profile_completed_sequence_ = control_profile_inflight_sequence_;
+    }
+    control_profile_cv_.notify_all();
+
     if (gripper_count_ > 0)
         RCLCPP_INFO(get_logger(), "%zu gripper(s) holding last commanded position.",
                      gripper_count_);
@@ -1624,6 +2544,32 @@ hardware_interface::CallbackReturn MarvinHardware::on_cleanup(
     workspace_guard_.disarm();
     collision_guard_.disarm();
     current_feedback_valid_.store(false, std::memory_order_relaxed);
+    active_control_profile_.store(ControlProfile::kUnknown, std::memory_order_relaxed);
+    requested_control_profile_.store(ControlProfile::kUnknown, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(control_profile_mutex_);
+        control_profile_transition_phase_ = ControlProfileTransitionPhase::kIdle;
+        control_profile_transition_active_ = false;
+        control_profile_request_pending_ = false;
+        control_profile_resend_count_ = 0;
+        control_profile_pending_target_ = ControlProfile::kUnknown;
+        control_profile_source_profile_ = ControlProfile::kUnknown;
+        control_profile_stabilize_cycles_remaining_ = 0;
+        control_profile_last_packet_sent_at_ = Clock::time_point{};
+        control_profile_last_progress_log_at_ = Clock::time_point{};
+        control_profile_diag_snapshot_valid_ = false;
+        control_profile_post_monitor_active_ = false;
+        control_profile_post_monitor_source_ = ControlProfile::kUnknown;
+        control_profile_post_monitor_target_ = ControlProfile::kUnknown;
+        control_profile_post_monitor_started_at_ = Clock::time_point{};
+        control_profile_post_monitor_deadline_ = Clock::time_point{};
+        control_profile_post_monitor_last_log_at_ = Clock::time_point{};
+        control_profile_post_monitor_snapshot_valid_ = false;
+        control_profile_last_message_ =
+            "Hardware cleanup reset the control profile transition skeleton.";
+        control_profile_completed_sequence_ = control_profile_inflight_sequence_;
+    }
+    control_profile_cv_.notify_all();
 
     // Disconnect grippers BEFORE releasing Marvin link (they need it to send close cmd)
     for (size_t g = 0; g < gripper_count_; ++g) {
@@ -1659,9 +2605,62 @@ hardware_interface::return_type MarvinHardware::read(
         return hardware_interface::return_type::ERROR;
     }
 
+    bool transition_active_snapshot = false;
+    {
+        std::lock_guard<std::mutex> lock(control_profile_mutex_);
+        transition_active_snapshot =
+            control_profile_transition_active_ || control_profile_request_pending_;
+    }
+    const int effective_no_frame_timeout_ms =
+        transition_active_snapshot ?
+            std::max(no_frame_timeout_ms_, profile_switch_timeout_ms_) :
+            no_frame_timeout_ms_;
+
+    auto build_post_monitor_summary = [&dcss]() {
+        std::ostringstream stream;
+        for (size_t arm = 0; arm < kArmCount; ++arm) {
+            if (arm > 0) {
+                stream << ' ';
+            }
+            stream << (arm == 0 ? "A" : "B")
+                   << "[state="
+                   << arm_state_name(static_cast<ArmState>(dcss.m_State[arm].m_CurState))
+                   << '(' << dcss.m_State[arm].m_CurState << ')'
+                   << " cmd=" << dcss.m_State[arm].m_CmdState
+                   << " err=" << dcss.m_State[arm].m_ERRCode
+                   << " in=" << dcss.m_In[arm].m_InFrameSerial
+                   << " out=" << dcss.m_Out[arm].m_OutFrameSerial
+                   << ']';
+        }
+        return stream.str();
+    };
+
     for (size_t arm = 0; arm < kArmCount; ++arm) {
+        current_sdk_cur_state_[arm].store(
+            dcss.m_State[arm].m_CurState, std::memory_order_relaxed);
+        current_sdk_cmd_state_[arm].store(
+            dcss.m_State[arm].m_CmdState, std::memory_order_relaxed);
+        current_sdk_err_code_[arm].store(
+            dcss.m_State[arm].m_ERRCode, std::memory_order_relaxed);
+        current_sdk_in_frame_serial_[arm].store(
+            dcss.m_In[arm].m_InFrameSerial, std::memory_order_relaxed);
+        current_sdk_out_frame_serial_[arm].store(
+            dcss.m_Out[arm].m_OutFrameSerial, std::memory_order_relaxed);
         const auto state = static_cast<ArmState>(dcss.m_State[arm].m_CurState);
         if (state == ARM_STATE_ERROR) {
+            if (control_profile_post_monitor_active_) {
+                const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            Clock::now() - control_profile_post_monitor_started_at_)
+                                            .count();
+                RCLCPP_ERROR(
+                    get_logger(),
+                    "Post-transition diagnostic caught ERROR after successful profile switch: "
+                    "source=%s target=%s elapsed=%lldms %s",
+                    control_profile_to_string(control_profile_post_monitor_source_),
+                    control_profile_to_string(control_profile_post_monitor_target_),
+                    static_cast<long long>(elapsed_ms),
+                    build_post_monitor_summary().c_str());
+            }
             RCLCPP_ERROR(get_logger(), "Arm %zu in ERROR state (err=%d).",
                          arm, dcss.m_State[arm].m_ERRCode);
             return hardware_interface::return_type::ERROR;
@@ -1674,7 +2673,7 @@ hardware_interface::return_type MarvinHardware::read(
         } else {
             const auto stale = std::chrono::duration_cast<std::chrono::milliseconds>(
                 Clock::now() - last_frame_time_[arm]);
-            if (stale.count() > no_frame_timeout_ms_) {
+            if (stale.count() > effective_no_frame_timeout_ms) {
                 RCLCPP_ERROR(get_logger(), "No frame update for %dms on arm %zu.",
                              static_cast<int>(stale.count()), arm);
                 return hardware_interface::return_type::ERROR;
@@ -1697,6 +2696,56 @@ hardware_interface::return_type MarvinHardware::read(
         }
     }
     current_feedback_valid_.store(true, std::memory_order_relaxed);
+    update_sdk_observation_states(dcss);
+
+    if (control_profile_post_monitor_active_) {
+        const auto now = Clock::now();
+        bool changed = !control_profile_post_monitor_snapshot_valid_;
+        for (size_t arm = 0; arm < kArmCount && !changed; ++arm) {
+            changed =
+                control_profile_post_monitor_last_cur_state_[arm] != dcss.m_State[arm].m_CurState ||
+                control_profile_post_monitor_last_cmd_state_[arm] != dcss.m_State[arm].m_CmdState ||
+                control_profile_post_monitor_last_err_code_[arm] != dcss.m_State[arm].m_ERRCode ||
+                control_profile_post_monitor_last_in_frame_serial_[arm] !=
+                    dcss.m_In[arm].m_InFrameSerial ||
+                control_profile_post_monitor_last_out_frame_serial_[arm] !=
+                    dcss.m_Out[arm].m_OutFrameSerial;
+        }
+        if (changed ||
+            control_profile_post_monitor_last_log_at_ == Clock::time_point{} ||
+            (now - control_profile_post_monitor_last_log_at_) >= std::chrono::milliseconds(100)) {
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        now - control_profile_post_monitor_started_at_)
+                                        .count();
+            RCLCPP_WARN(
+                get_logger(),
+                "Post-transition diagnostic: source=%s target=%s elapsed=%lldms %s",
+                control_profile_to_string(control_profile_post_monitor_source_),
+                control_profile_to_string(control_profile_post_monitor_target_),
+                static_cast<long long>(elapsed_ms),
+                build_post_monitor_summary().c_str());
+            for (size_t arm = 0; arm < kArmCount; ++arm) {
+                control_profile_post_monitor_last_cur_state_[arm] = dcss.m_State[arm].m_CurState;
+                control_profile_post_monitor_last_cmd_state_[arm] = dcss.m_State[arm].m_CmdState;
+                control_profile_post_monitor_last_err_code_[arm] = dcss.m_State[arm].m_ERRCode;
+                control_profile_post_monitor_last_in_frame_serial_[arm] =
+                    dcss.m_In[arm].m_InFrameSerial;
+                control_profile_post_monitor_last_out_frame_serial_[arm] =
+                    dcss.m_Out[arm].m_OutFrameSerial;
+            }
+            control_profile_post_monitor_snapshot_valid_ = true;
+            control_profile_post_monitor_last_log_at_ = now;
+        }
+        if (now >= control_profile_post_monitor_deadline_) {
+            control_profile_post_monitor_active_ = false;
+            control_profile_post_monitor_source_ = ControlProfile::kUnknown;
+            control_profile_post_monitor_target_ = ControlProfile::kUnknown;
+            control_profile_post_monitor_started_at_ = Clock::time_point{};
+            control_profile_post_monitor_deadline_ = Clock::time_point{};
+            control_profile_post_monitor_last_log_at_ = Clock::time_point{};
+            control_profile_post_monitor_snapshot_valid_ = false;
+        }
+    }
 
     // Read gripper state cache maintained by the background worker.
     for (size_t g = 0; g < gripper_count_; ++g) {
@@ -1716,6 +2765,10 @@ hardware_interface::return_type MarvinHardware::write(
     const rclcpp::Time &, const rclcpp::Duration &)
 {
     if (!activated_) return hardware_interface::return_type::OK;
+
+    if (process_control_profile_transition()) {
+        return hardware_interface::return_type::OK;
+    }
 
     double desired_a[kJointsPerArm];
     double desired_b[kJointsPerArm];

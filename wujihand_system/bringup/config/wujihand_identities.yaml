@@ -1,0 +1,8 @@
+hands:
+  left:
+    usb_serial_number: "305137703333"
+    expected_handedness: "left"
+
+  right:
+    usb_serial_number: "356737473533"
+    expected_handedness: "right"

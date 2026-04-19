@@ -13,6 +13,13 @@ void TrackerTeleopController::startGoHomeSequence()
     }
 
     for (size_t arm = 0; arm < kArmCount; ++arm) {
+        if (!syncCommandStateToMeasuredPose(arm)) {
+            RCLCPP_WARN(
+                get_node()->get_logger(),
+                "Go-home could not sync %s arm command state to measured pose; "
+                "falling back to last commanded reference.",
+                kSideTags[arm]);
+        }
         auto &runtime = arm_state_[arm];
         for (size_t j = 0; j < kJointsPerArm; ++j) {
             runtime.target_joints_rad[j] = runtime.smoothed_joints_rad[j];
@@ -145,6 +152,13 @@ void TrackerTeleopController::handleSetEnabled(
     if (getTeleopState() == TeleopState::kEnabled) {
         for (size_t arm = 0; arm < kArmCount; ++arm) {
             cancelTrackerInterpolation(arm);
+            if (!syncCommandStateToMeasuredPose(arm)) {
+                RCLCPP_WARN(
+                    get_node()->get_logger(),
+                    "Disable teleop could not sync %s arm command state to measured pose; "
+                    "holding last commanded reference.",
+                    kSideTags[arm]);
+            }
         }
         setTeleopState(TeleopState::kArmed, "service disable");
     }

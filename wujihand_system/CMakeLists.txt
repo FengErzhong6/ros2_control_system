@@ -25,6 +25,7 @@ endif()
 # find dependencies
 find_package(backward_ros REQUIRED)
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
 find_package(onnxruntime REQUIRED)
 
 # wujihandcpp (system library may not ship a CMake package config)
@@ -53,6 +54,16 @@ endif()
 foreach(Dependency IN ITEMS ${THIS_PACKAGE_INCLUDE_DEPENDS})
   find_package(${Dependency} REQUIRED)
 endforeach()
+
+ament_python_install_package(
+  wujihand_teleop
+  PACKAGE_DIR ${PROJECT_SOURCE_DIR}/bringup/python/wujihand_teleop
+)
+
+ament_python_install_package(
+  wuji_retargeting
+  PACKAGE_DIR ${PROJECT_SOURCE_DIR}/third_party/wuji_retargeting/wuji_retargeting
+)
 
 ## COMPILE
 add_library(
@@ -116,8 +127,15 @@ install(
 	DESTINATION share/${PROJECT_NAME}
 )
 install(
-  DIRECTORY bringup/config bringup/launch policy
+  DIRECTORY bringup/config bringup/launch bringup/rviz policy
   DESTINATION share/${PROJECT_NAME}
+)
+install(
+  PROGRAMS
+    bringup/scripts/manus_input_adapter.py
+    bringup/scripts/wujihand_retarget_bridge.py
+    bringup/scripts/wujihand_manus_pipeline.py
+  DESTINATION lib/${PROJECT_NAME}
 )
 install(TARGETS wujihand_system wujihand_system_rl_controller
   EXPORT export_${PROJECT_NAME}
@@ -129,4 +147,14 @@ install(TARGETS wujihand_system wujihand_system_rl_controller
 ## EXPORTS
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_dependencies(${THIS_PACKAGE_INCLUDE_DEPENDS})
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_pytest REQUIRED)
+  ament_add_pytest_test(
+    manus_mapping_test
+    test/manus_mapping_test.py
+    APPEND_ENV PYTHONPATH=${PROJECT_SOURCE_DIR}/bringup/python
+  )
+endif()
+
 ament_package()

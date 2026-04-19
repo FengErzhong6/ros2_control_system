@@ -293,8 +293,8 @@ void TrackerTeleopController::logConfigurationSummary(double home_tolerance_deg)
 
     RCLCPP_INFO(logger, "J4 bound: %.2f deg", j4_bound_);
     RCLCPP_INFO(
-        logger, "Command shaping: linear_interp_cycles=%d, max_vel=%.2f rad/s",
-        tracker_interp_cycles_, max_joint_velocity_);
+        logger, "Command shaping: ik_low_pass_alpha=%.2f, linear_interp_cycles=%d, max_vel=%.2f rad/s",
+        smoothing_alpha_, tracker_interp_cycles_, max_joint_velocity_);
     RCLCPP_INFO(logger, "Base X scale: %.3f", base_x_scale_);
     RCLCPP_INFO(
         logger, "IK reference logs: %s",
@@ -442,6 +442,11 @@ bool TrackerTeleopController::startAnalysisRecordingSession()
     analysis_record_stream_
         << "sample_stamp_ns,target_stamp_ns,arm,tracker_fresh,tracker_input_changed,"
         << "has_base_T_ee,ik_result,has_ik_solution,has_state_joint,"
+        << "has_sdk_command_joint,has_control_profile,active_control_profile_code,"
+        << "active_control_profile_name,requested_control_profile_code,"
+        << "requested_control_profile_name,has_sdk_diag,sdk_cur_state_code,"
+        << "sdk_cur_state_name,sdk_cmd_state_code,sdk_err_code,"
+        << "sdk_in_frame_serial,sdk_out_frame_serial,"
         << "interp_active,interp_step,interp_total_steps,"
         << "base_T_ee_pos_x,base_T_ee_pos_y,base_T_ee_pos_z,"
         << "base_T_ee_quat_x,base_T_ee_quat_y,base_T_ee_quat_z,base_T_ee_quat_w,"
@@ -451,6 +456,9 @@ bool TrackerTeleopController::startAnalysisRecordingSession()
         << "command_joint1_deg,command_joint2_deg,command_joint3_deg,"
         << "command_joint4_deg,command_joint5_deg,command_joint6_deg,"
         << "command_joint7_deg,"
+        << "sdk_command_joint1_deg,sdk_command_joint2_deg,sdk_command_joint3_deg,"
+        << "sdk_command_joint4_deg,sdk_command_joint5_deg,sdk_command_joint6_deg,"
+        << "sdk_command_joint7_deg,"
         << "state_joint1_deg,state_joint2_deg,state_joint3_deg,"
         << "state_joint4_deg,state_joint5_deg,state_joint6_deg,"
         << "state_joint7_deg\n";
@@ -507,6 +515,19 @@ void TrackerTeleopController::flushAnalysisRecording()
             << static_cast<int>(sample.ik_result) << ','
             << (sample.has_ik_solution ? 1 : 0) << ','
             << (sample.has_state_joint ? 1 : 0) << ','
+            << (sample.has_sdk_command_joint ? 1 : 0) << ','
+            << (sample.has_control_profile ? 1 : 0) << ','
+            << sample.active_control_profile << ','
+            << controlProfileCodeToString(sample.active_control_profile) << ','
+            << sample.requested_control_profile << ','
+            << controlProfileCodeToString(sample.requested_control_profile) << ','
+            << (sample.has_sdk_diag ? 1 : 0) << ','
+            << sample.sdk_cur_state << ','
+            << sdkArmStateCodeToString(sample.sdk_cur_state) << ','
+            << sample.sdk_cmd_state << ','
+            << sample.sdk_err_code << ','
+            << sample.sdk_in_frame_serial << ','
+            << sample.sdk_out_frame_serial << ','
             << (sample.interp_active ? 1 : 0) << ','
             << sample.interp_step << ','
             << sample.interp_total_steps << ','
@@ -531,6 +552,13 @@ void TrackerTeleopController::flushAnalysisRecording()
             << sample.command_joint_deg[4] << ','
             << sample.command_joint_deg[5] << ','
             << sample.command_joint_deg[6] << ','
+            << sample.sdk_command_joint_deg[0] << ','
+            << sample.sdk_command_joint_deg[1] << ','
+            << sample.sdk_command_joint_deg[2] << ','
+            << sample.sdk_command_joint_deg[3] << ','
+            << sample.sdk_command_joint_deg[4] << ','
+            << sample.sdk_command_joint_deg[5] << ','
+            << sample.sdk_command_joint_deg[6] << ','
             << sample.state_joint_deg[0] << ','
             << sample.state_joint_deg[1] << ','
             << sample.state_joint_deg[2] << ','

@@ -64,6 +64,8 @@ private:
     static constexpr size_t kTotalJoints = kFingerCount * kJointCount;
 
     double low_pass_cutoff_frequency_;
+    std::string usb_serial_number_;
+    std::optional<uint8_t> expected_handedness_;
 
     enum class IoRequestType {
         Configure,
@@ -104,6 +106,10 @@ private:
     std::array<Frame, 2> cmd_frames_{};
     std::atomic<uint8_t> cmd_active_{0};
     std::atomic<uint64_t> cmd_frame_id_{0};
+
+    std::array<std::string, kTotalJoints> joint_names_{};
+    std::array<std::string, kTotalJoints> position_interface_names_{};
+    std::array<std::string, kTotalJoints> velocity_interface_names_{};
 
     bool has_velocity_state_{false};
     std::array<double, kTotalJoints> last_position_{};

@@ -42,6 +42,38 @@ class MarvinAdapter(AdapterBase):
         "/marvin_motion/get_status": "marvin_system/srv/GetMotionStatus",
         "/marvin_motion/set_enabled": "std_srvs/srv/SetBool",
     }
+    GRAPH_CLEANUP_SERVICES = (
+        "/controller_manager/list_controllers",
+        "/controller_manager/switch_controller",
+        "/marvin_motion/go_home",
+        "/marvin_motion/set_mode",
+        "/marvin_motion/get_mode",
+        "/marvin_motion/get_status",
+        "/marvin_motion/set_enabled",
+        "/marvin_dual/set_collision_guard_enabled",
+        "/marvin_dual/set_control_profile",
+    )
+    GRAPH_CLEANUP_NODE_BASENAMES = (
+        "controller_manager",
+        "robot_state_publisher",
+        "marvin_motion_server",
+        "move_group",
+        "manus_gripper_node",
+    )
+    EXTERNAL_PROCESS_MATCH_MARKERS = (
+        "marvin_tracker_teleop.launch.py",
+        "ros2 launch marvin_system",
+        "marvin_system marvin_tracker_teleop.launch.py",
+        "install/marvin_system/lib/marvin_system/motion_server",
+        "install/marvin_system/lib/marvin_system/move_group_wrapper.py",
+        "marvin_motion_server",
+        "dual_arm_controller_manager.yaml",
+        "marvin_tracker_teleop_controllers.yaml",
+        "tracker_teleop_controller",
+        "dual_arm_trajectory_controller",
+        "gripper_L_controller",
+        "gripper_R_controller",
+    )
 
     def __init__(self, device, node=None) -> None:
         super().__init__(device, node=node)
@@ -296,6 +328,13 @@ class MarvinAdapter(AdapterBase):
             if not managed_launch.is_running():
                 exit_code = managed_launch.launch_exit_code()
                 self._cleanup_process_state()
+                cleanup_result = self._ensure_graph_cleanup(
+                    timeout_sec=self._graph_cleanup_timeout_sec(),
+                    context_label="managed launch exit",
+                    allow_external_cleanup=True,
+                )
+                if cleanup_result.is_failure():
+                    return cleanup_result
                 return AdapterResult.ok(
                     f"{self.device.device_id}: Marvin launch already exited with code {exit_code}."
                 )
@@ -306,16 +345,37 @@ class MarvinAdapter(AdapterBase):
                 )
 
             self._cleanup_process_state()
+            cleanup_result = self._ensure_graph_cleanup(
+                timeout_sec=self._graph_cleanup_timeout_sec(),
+                context_label="managed shutdown",
+                allow_external_cleanup=True,
+            )
+            if cleanup_result.is_failure():
+                return cleanup_result
             return AdapterResult.ok(f"{self.device.device_id}: Marvin launch stopped.")
 
         process = self._process
         if process is None:
             self._cleanup_process_state()
+            cleanup_result = self._ensure_graph_cleanup(
+                timeout_sec=self._graph_cleanup_timeout_sec(),
+                context_label="shutdown with no tracked process",
+                allow_external_cleanup=True,
+            )
+            if cleanup_result.is_failure():
+                return cleanup_result
             return AdapterResult.ok(f"{self.device.device_id}: Marvin launch already stopped.")
 
         if process.poll() is not None:
             exit_code = process.returncode
             self._cleanup_process_state()
+            cleanup_result = self._ensure_graph_cleanup(
+                timeout_sec=self._graph_cleanup_timeout_sec(),
+                context_label="subprocess exit",
+                allow_external_cleanup=True,
+            )
+            if cleanup_result.is_failure():
+                return cleanup_result
             return AdapterResult.ok(
                 f"{self.device.device_id}: Marvin launch already exited with code {exit_code}."
             )
@@ -332,6 +392,13 @@ class MarvinAdapter(AdapterBase):
         self._wait_for_process_group_exit(process.pid, timeout_sec=1.0)
 
         self._cleanup_process_state()
+        cleanup_result = self._ensure_graph_cleanup(
+            timeout_sec=self._graph_cleanup_timeout_sec(),
+            context_label="subprocess shutdown",
+            allow_external_cleanup=True,
+        )
+        if cleanup_result.is_failure():
+            return cleanup_result
         return AdapterResult.ok(f"{self.device.device_id}: Marvin launch stopped.")
 
     def diagnose(self) -> AdapterResult:
@@ -587,6 +654,309 @@ class MarvinAdapter(AdapterBase):
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
+
+    def _graph_cleanup_timeout_sec(self) -> float:
+        configured = self.device.config.get("graph_cleanup_timeout_sec", 12.0)
+        try:
+            return max(1.0, float(configured))
+        except (TypeError, ValueError):
+            return 12.0
+
+    def _prelaunch_graph_cleanup_timeout_sec(self) -> float:
+        configured = self.device.config.get(
+            "prelaunch_graph_cleanup_timeout_sec",
+            self._graph_cleanup_timeout_sec(),
+        )
+        try:
+            return max(1.0, float(configured))
+        except (TypeError, ValueError):
+            return self._graph_cleanup_timeout_sec()
+
+    def _graph_cleanup_stability_window_sec(self) -> float:
+        configured = self.device.config.get("graph_cleanup_stability_window_sec", 0.5)
+        try:
+            return max(0.0, float(configured))
+        except (TypeError, ValueError):
+            return 0.5
+
+    def _external_cleanup_backoff_sec(self) -> float:
+        configured = self.device.config.get("external_cleanup_backoff_sec", 0.5)
+        try:
+            return max(0.0, float(configured))
+        except (TypeError, ValueError):
+            return 0.5
+
+    def _current_service_names(self) -> set[str]:
+        if self._ros_context_is_usable():
+            try:
+                return {
+                    str(name).strip()
+                    for name, _types in self.node.get_service_names_and_types()
+                    if str(name).strip()
+                }
+            except Exception:
+                pass
+
+        completed = self._run_ros2_command(["ros2", "service", "list"], timeout_sec=4.0)
+        if completed is None or completed.returncode != 0:
+            return set()
+        return {line.strip() for line in completed.stdout.splitlines() if line.strip()}
+
+    def _current_node_basenames(self) -> set[str]:
+        node_names: set[str] = set()
+        if self._ros_context_is_usable():
+            try:
+                for name, namespace in self.node.get_node_names_and_namespaces():
+                    raw_name = str(name).strip()
+                    if not raw_name:
+                        continue
+                    raw_namespace = str(namespace).strip()
+                    full_name = raw_name
+                    if raw_namespace and raw_namespace != "/":
+                        full_name = f"{raw_namespace.rstrip('/')}/{raw_name}"
+                    node_names.add(full_name.rsplit("/", 1)[-1].lstrip("/"))
+            except Exception:
+                node_names.clear()
+
+        if node_names:
+            return node_names
+
+        completed = self._run_ros2_command(["ros2", "node", "list"], timeout_sec=4.0)
+        if completed is None or completed.returncode != 0:
+            return set()
+        return {
+            line.strip().rsplit("/", 1)[-1].lstrip("/")
+            for line in completed.stdout.splitlines()
+            if line.strip()
+        }
+
+    def _stale_graph_resources(self) -> tuple[list[str], list[str]]:
+        current_services = self._current_service_names()
+        current_nodes = self._current_node_basenames()
+        stale_services = [
+            service_name
+            for service_name in self.GRAPH_CLEANUP_SERVICES
+            if service_name in current_services
+        ]
+        stale_nodes = [
+            node_basename
+            for node_basename in self.GRAPH_CLEANUP_NODE_BASENAMES
+            if node_basename in current_nodes
+        ]
+        return stale_services, stale_nodes
+
+    def _wait_for_graph_cleanup(
+        self,
+        *,
+        timeout_sec: float,
+        context_label: str,
+    ) -> AdapterResult:
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        clear_since = 0.0
+        last_stale_services: list[str] = []
+        last_stale_nodes: list[str] = []
+        stability_window_sec = self._graph_cleanup_stability_window_sec()
+
+        while time.monotonic() < deadline:
+            stale_services, stale_nodes = self._stale_graph_resources()
+            last_stale_services = stale_services
+            last_stale_nodes = stale_nodes
+
+            if not stale_services and not stale_nodes:
+                if clear_since <= 0.0:
+                    clear_since = time.monotonic()
+                if time.monotonic() - clear_since >= stability_window_sec:
+                    return AdapterResult.ok(
+                        f"{self.device.device_id}: Marvin ROS graph cleanup confirmed after {context_label}."
+                    )
+            else:
+                clear_since = 0.0
+
+            time.sleep(0.2)
+
+        details = []
+        if last_stale_services:
+            details.append("services=" + ", ".join(last_stale_services))
+        if last_stale_nodes:
+            details.append("nodes=" + ", ".join(last_stale_nodes))
+        detail_suffix = " | ".join(details) if details else "resources=unknown"
+        return AdapterResult.failed(
+            f"{self.device.device_id}: Marvin ROS graph still contains stale resources after "
+            f"{context_label}: {detail_suffix}"
+        )
+
+    def _external_cleanup_match_reason(self, cmd: str) -> str:
+        lowered = cmd.lower()
+        for marker in self.EXTERNAL_PROCESS_MATCH_MARKERS:
+            if marker in cmd:
+                return f"marker={marker}"
+
+        if "ros2_control_node" in lowered and (
+            "marvin_tracker_teleop_controllers.yaml" in lowered
+            or "dual_arm_controller_manager.yaml" in lowered
+            or "tracker_teleop_kine_params" in lowered
+        ):
+            return "ros2_control_node+marvin controller config"
+
+        if "controller_manager/spawner" in lowered and (
+            "tracker_teleop_controller" in lowered
+            or "dual_arm_trajectory_controller" in lowered
+            or "gripper_l_controller" in lowered
+            or "gripper_r_controller" in lowered
+        ):
+            return "spawner+marvin controller"
+
+        if "robot_state_publisher" in lowered and (
+            "marvin_system" in lowered or "marvin_dual" in lowered
+        ):
+            return "robot_state_publisher+marvin"
+
+        return ""
+
+    def _external_cleanup_candidate_process_groups(self) -> tuple[list[tuple[int, str, str]], list[str]]:
+        completed = self._run_ros2_command(["ps", "-eo", "pid=,pgid=,args="], timeout_sec=4.0)
+        if completed is None or completed.returncode != 0:
+            return [], []
+
+        current_pid = os.getpid()
+        current_pgid = os.getpgrp()
+        candidate_by_pgid: dict[int, tuple[str, str]] = {}
+        suspicious_samples: list[str] = []
+        for raw_line in completed.stdout.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            parts = line.split(None, 2)
+            if len(parts) < 3:
+                continue
+            try:
+                pid = int(parts[0])
+                pgid = int(parts[1])
+            except ValueError:
+                continue
+            cmd = parts[2].strip()
+            if pid <= 0 or pgid <= 0:
+                continue
+            if pid == current_pid or pgid == current_pgid:
+                continue
+            reason = self._external_cleanup_match_reason(cmd)
+            if reason:
+                candidate_by_pgid.setdefault(pgid, (cmd, reason))
+                continue
+            lowered = cmd.lower()
+            if (
+                "ros2_control_node" in lowered
+                or "motion_server" in lowered
+                or "move_group" in lowered
+                or "robot_state_publisher" in lowered
+                or "spawner" in lowered
+                or "marvin" in lowered
+            ):
+                suspicious_samples.append(cmd)
+
+        candidates = [
+            (pgid, cmd, reason)
+            for pgid, (cmd, reason) in sorted(candidate_by_pgid.items())
+        ]
+        return candidates, suspicious_samples[:8]
+
+    def _signal_external_process_group(self, pgid: int, sig: signal.Signals, timeout_sec: float) -> bool:
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            return True
+
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() < deadline:
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                return True
+            time.sleep(0.2)
+
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        return False
+
+    def _scavenge_external_process_groups(self, *, context_label: str) -> AdapterResult:
+        candidates, suspicious_samples = self._external_cleanup_candidate_process_groups()
+        if not candidates:
+            if self.node is not None and suspicious_samples:
+                for sample in suspicious_samples:
+                    self.node.get_logger().warn(
+                        f"{self.device.device_id}: external cleanup found suspicious process "
+                        f"during {context_label} but no Marvin match rule claimed it. cmd={sample}"
+                    )
+            return AdapterResult.failed(
+                f"{self.device.device_id}: no external Marvin process groups matched for {context_label}."
+            )
+
+        if self.node is not None:
+            for pgid, cmd, reason in candidates:
+                self.node.get_logger().warn(
+                    f"{self.device.device_id}: scavenging external Marvin process group "
+                    f"pgid={pgid} during {context_label}. reason={reason} cmd={cmd}"
+                )
+
+        failed_pgids: list[str] = []
+        for pgid, _cmd, _reason in candidates:
+            stopped = False
+            for sig, wait_s in (
+                (signal.SIGINT, 8.0),
+                (signal.SIGTERM, 4.0),
+                (signal.SIGKILL, 2.0),
+            ):
+                if self._signal_external_process_group(pgid, sig, timeout_sec=wait_s):
+                    stopped = True
+                    break
+            if not stopped:
+                failed_pgids.append(str(pgid))
+
+        if failed_pgids:
+            return AdapterResult.failed(
+                f"{self.device.device_id}: external Marvin cleanup failed for pgid="
+                + ", ".join(failed_pgids)
+            )
+
+        backoff_sec = self._external_cleanup_backoff_sec()
+        if backoff_sec > 0.0:
+            time.sleep(backoff_sec)
+        return AdapterResult.ok(
+            f"{self.device.device_id}: external Marvin process cleanup completed for {context_label}."
+        )
+
+    def _ensure_graph_cleanup(
+        self,
+        *,
+        timeout_sec: float,
+        context_label: str,
+        allow_external_cleanup: bool,
+    ) -> AdapterResult:
+        cleanup_result = self._wait_for_graph_cleanup(
+            timeout_sec=timeout_sec,
+            context_label=context_label,
+        )
+        if not cleanup_result.is_failure():
+            return cleanup_result
+        if not allow_external_cleanup:
+            return cleanup_result
+
+        scavenger_result = self._scavenge_external_process_groups(context_label=context_label)
+        if scavenger_result.is_failure():
+            return cleanup_result
+
+        second_cleanup_result = self._wait_for_graph_cleanup(
+            timeout_sec=timeout_sec,
+            context_label=f"{context_label} after external cleanup",
+        )
+        if not second_cleanup_result.is_failure():
+            return AdapterResult.ok(
+                f"{self.device.device_id}: Marvin ROS graph cleanup confirmed after "
+                f"{context_label} with external scavenging."
+            )
+        return second_cleanup_result
 
     def _list_controllers(self) -> dict[str, str] | None:
         if self._list_controllers_client is not None:
@@ -1266,6 +1636,15 @@ class MarvinAdapter(AdapterBase):
                     "command": self._launch_command,
                 },
             )
+
+        prelaunch_cleanup = self._ensure_graph_cleanup(
+            timeout_sec=self._prelaunch_graph_cleanup_timeout_sec(),
+            context_label="prelaunch",
+            allow_external_cleanup=True,
+        )
+        if prelaunch_cleanup.is_failure():
+            self._cleanup_process_state()
+            return prelaunch_cleanup
 
         log_dir = Path(tempfile.mkdtemp(prefix="marvin_adapter_"))
         self._log_path = log_dir / "launch.log"

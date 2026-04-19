@@ -165,6 +165,7 @@ class DataCollectionSupervisor(Node):
         self.declare_parameter("trackers_config", "")
         self.declare_parameter("manus_config", "")
         self.declare_parameter("manus_user_name", "")
+        self.declare_parameter("mock_manus", False)
         self.declare_parameter("marvin_mock_grippers", False)
 
         return SupervisorConfig(
@@ -180,6 +181,7 @@ class DataCollectionSupervisor(Node):
             trackers_config=_optional_path(self.get_parameter("trackers_config").value),
             manus_config=_optional_path(self.get_parameter("manus_config").value),
             manus_user_name=_optional_text(self.get_parameter("manus_user_name").value),
+            mock_manus=_coerce_bool(self.get_parameter("mock_manus").value),
             marvin_mock_grippers=_coerce_bool(
                 self.get_parameter("marvin_mock_grippers").value
             ),
@@ -330,6 +332,14 @@ class DataCollectionSupervisor(Node):
                 config["launch_arguments"] = launch_arguments
 
         if device.adapter == "manus":
+            raw_launch_arguments = config.get("launch_arguments")
+            launch_arguments = {}
+            if isinstance(raw_launch_arguments, dict):
+                launch_arguments.update(raw_launch_arguments)
+            if self._config.mock_manus:
+                launch_arguments.setdefault("mock", True)
+            if launch_arguments:
+                config["launch_arguments"] = launch_arguments
             if self._config.manus_config is not None:
                 config.setdefault("config_file", str(self._config.manus_config))
             if self._config.manus_user_name is not None:

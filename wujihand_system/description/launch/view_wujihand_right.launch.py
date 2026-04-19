@@ -20,27 +20,91 @@ def generate_launch_description():
     declared_arguments.append(
         DeclareLaunchArgument(
             "description_file",
-            default_value="urdf/wujihand-right.urdf",
-            description="Composite URDF/XACRO file to load.",
+            default_value="urdf/wujihand_view.urdf.xacro",
+            description="URDF/Xacro file to load for visualization.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "hand",
+            default_value="both",
+            choices=["left", "right", "both"],
+            description="Which hand model to show: left, right, or both.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "left_xyz",
+            default_value="0 0.18 0",
+            description="Mount pose xyz for the left hand in the view wrapper.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "left_rpy",
+            default_value="0 0 0",
+            description="Mount pose rpy for the left hand in the view wrapper.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "right_xyz",
+            default_value="0 -0.18 0",
+            description="Mount pose xyz for the right hand in the view wrapper.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "right_rpy",
+            default_value="0 0 0",
+            description="Mount pose rpy for the right hand in the view wrapper.",
         )
     )
     declared_arguments.append(
         DeclareLaunchArgument(
             "gui",
             default_value="true",
-            description="Start RViz2 and Joint State Publisher GUI.",
+            description="Start RViz2.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "use_jsp_gui",
+            default_value="true",
+            description="Start joint_state_publisher_gui for interactive joint sliders.",
         )
     )
 
     description_package = LaunchConfiguration("description_package")
     description_file = LaunchConfiguration("description_file")
+    hand = LaunchConfiguration("hand")
+    left_xyz = LaunchConfiguration("left_xyz")
+    left_rpy = LaunchConfiguration("left_rpy")
+    right_xyz = LaunchConfiguration("right_xyz")
+    right_rpy = LaunchConfiguration("right_rpy")
     gui = LaunchConfiguration("gui")
+    use_jsp_gui = LaunchConfiguration("use_jsp_gui")
 
     robot_description_content = Command(
         [
             PathJoinSubstitution([FindExecutable(name="xacro")]),
             " ",
             PathJoinSubstitution([FindPackageShare(description_package), description_file]),
+            ' hand:="',
+            hand,
+            '"',
+            ' left_xyz:="',
+            left_xyz,
+            '"',
+            ' left_rpy:="',
+            left_rpy,
+            '"',
+            ' right_xyz:="',
+            right_xyz,
+            '"',
+            ' right_rpy:="',
+            right_rpy,
+            '"',
         ]
     )
     robot_description = {
@@ -54,7 +118,8 @@ def generate_launch_description():
     joint_state_publisher_node = Node(
         package="joint_state_publisher_gui",
         executable="joint_state_publisher_gui",
-        condition=IfCondition(gui),
+        parameters=[robot_description],
+        condition=IfCondition(use_jsp_gui),
     )
     robot_state_publisher_node = Node(
         package="robot_state_publisher",

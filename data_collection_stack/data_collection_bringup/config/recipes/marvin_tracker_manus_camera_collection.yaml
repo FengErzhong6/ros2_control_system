@@ -35,8 +35,9 @@ devices:
     depends_on:
       - htc_tracker
       - manus_glove
-    use_managed_launch: true
-    ready_timeout_sec: 45.0
+    use_managed_launch: false
+    ready_timeout_sec: 90.0
+    startup_no_ready_restart_timeout_sec: 0.0
     launch_arguments:
       use_gripper_L: true
       use_gripper_R: true

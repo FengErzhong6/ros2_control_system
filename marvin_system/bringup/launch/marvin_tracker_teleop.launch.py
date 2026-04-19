@@ -713,8 +713,20 @@ def generate_launch_description():
             description="Allow /marvin_motion/go_home to forward to tracker_teleop_controller/go_home.",
         ),
         DeclareLaunchArgument(
-            "enable_moveit_go_home", default_value="false",
-            description="Enable experimental MoveIt-backed go_home inside tracker teleop bringup.",
+            "enable_moveit_go_home", default_value="true",
+            description="Enable MoveIt-backed go_home inside tracker teleop bringup.",
+        ),
+        DeclareLaunchArgument(
+            "go_home_return_mode", default_value="SAFE_HOLD",
+            description="Motion mode restored after /marvin_motion/go_home completes.",
+        ),
+        DeclareLaunchArgument(
+            "teleop_disable_collision_guard", default_value="true",
+            description="Disable collision_guard automatically while motion mode TELEOP is active.",
+        ),
+        DeclareLaunchArgument(
+            "allow_unsafe_legacy_go_home", default_value="false",
+            description="Permit deprecated legacy go_home on real hardware for explicit debugging only.",
         ),
         DeclareLaunchArgument(
             "config_file",
@@ -825,6 +837,9 @@ def launch_setup(context):
     collision_guard_service_name = (
         "" if use_mock_hardware_value else "/marvin_dual/set_collision_guard_enabled"
     )
+    control_profile_service_name = (
+        "" if use_mock_hardware_value else "/marvin_dual/set_control_profile"
+    )
     use_keyboard_gate_value = LaunchConfiguration("use_keyboard_gate").perform(context).lower() == "true"
     start_tracker_publisher_value = (
         LaunchConfiguration("start_tracker_publisher").perform(context).lower() == "true"
@@ -834,6 +849,13 @@ def launch_setup(context):
     enable_moveit_go_home_value = (
         LaunchConfiguration("enable_moveit_go_home").perform(context).lower() == "true"
     )
+    go_home_return_mode_value = LaunchConfiguration("go_home_return_mode").perform(context).strip()
+    teleop_disable_collision_guard_value = (
+        LaunchConfiguration("teleop_disable_collision_guard").perform(context).lower() == "true"
+    )
+    allow_unsafe_legacy_go_home_value = (
+        LaunchConfiguration("allow_unsafe_legacy_go_home").perform(context).lower() == "true"
+    )
     start_manus_gripper_bridge_value = (
         LaunchConfiguration("start_manus_gripper_bridge").perform(context).lower() == "true"
     )
@@ -842,6 +864,16 @@ def launch_setup(context):
     cameras_config_path = LaunchConfiguration("cameras_config").perform(context)
     config_file = LaunchConfiguration("config_file").perform(context)
     config = load_launch_config(config_file)
+    if (
+        not use_mock_hardware_value
+        and not enable_moveit_go_home_value
+        and not allow_unsafe_legacy_go_home_value
+    ):
+        raise RuntimeError(
+            "Refusing to launch tracker teleop with legacy go_home on real hardware. "
+            "Use enable_moveit_go_home:=true, or set allow_unsafe_legacy_go_home:=true "
+            "only for explicit debugging."
+        )
     enable_joint_recording_requested = resolve_bool_arg(
         LaunchConfiguration("enable_joint_recording").perform(context),
         config,
@@ -1154,7 +1186,7 @@ def launch_setup(context):
                     "teleop_state_topic": "/tracker_teleop_controller/teleop_state",
                     "planning_group": "dual_arm",
                     "home_pose_id": "home",
-                    "go_home_return_mode": "SAFE_HOLD",
+                    "go_home_return_mode": go_home_return_mode_value or "SAFE_HOLD",
                     "planning_time_sec": 5.0,
                     "move_group_wait_sec": 10.0,
                     "num_planning_attempts": 3,
@@ -1165,14 +1197,18 @@ def launch_setup(context):
                     "planner_id": "RRTConnect",
                     "scene_frame_id": "world",
                     "use_mock_hardware": use_mock_hardware_value,
-                    "teleop_service_timeout_sec": 5.0,
+                    "allow_unsafe_legacy_backend": False,
+                    "teleop_service_timeout_sec": 10.0,
                     "legacy_go_home_timeout_sec": 10.0,
-                    "controller_switch_timeout_sec": 5.0,
+                    "controller_switch_timeout_sec": 10.0,
                     "controller_manager_switch_service": "/controller_manager/switch_controller",
                     "controller_manager_list_service": "/controller_manager/list_controllers",
                     "trajectory_controller_name": "dual_arm_trajectory_controller",
                     "primary_controller_name": "tracker_teleop_controller",
                     "collision_guard_service_name": collision_guard_service_name,
+                    "control_profile_service_name": control_profile_service_name,
+                    "teleop_use_joint_impedance": True,
+                    "teleop_disable_collision_guard": teleop_disable_collision_guard_value,
                     "allow_legacy_go_home_fallback": ParameterValue(
                         LaunchConfiguration("motion_allow_legacy_home_fallback"),
                         value_type=bool,
@@ -1201,15 +1237,19 @@ def launch_setup(context):
                     "tracker_set_enabled_service": "/marvin_motion/internal/tracker_set_enabled",
                     "teleop_state_topic": "/tracker_teleop_controller/teleop_state",
                     "use_mock_hardware": use_mock_hardware_value,
-                    "go_home_return_mode": "SAFE_HOLD",
-                    "teleop_service_timeout_sec": 5.0,
+                    "allow_unsafe_legacy_backend": allow_unsafe_legacy_go_home_value,
+                    "go_home_return_mode": go_home_return_mode_value or "SAFE_HOLD",
+                    "teleop_service_timeout_sec": 10.0,
                     "legacy_go_home_timeout_sec": 10.0,
-                    "controller_switch_timeout_sec": 5.0,
+                    "controller_switch_timeout_sec": 10.0,
                     "controller_manager_switch_service": "/controller_manager/switch_controller",
                     "controller_manager_list_service": "/controller_manager/list_controllers",
                     "trajectory_controller_name": "dual_arm_trajectory_controller",
                     "primary_controller_name": "tracker_teleop_controller",
                     "collision_guard_service_name": collision_guard_service_name,
+                    "control_profile_service_name": control_profile_service_name,
+                    "teleop_use_joint_impedance": True,
+                    "teleop_disable_collision_guard": teleop_disable_collision_guard_value,
                     "allow_legacy_go_home_fallback": ParameterValue(
                         LaunchConfiguration("motion_allow_legacy_home_fallback"),
                         value_type=bool,

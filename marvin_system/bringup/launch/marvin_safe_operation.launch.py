@@ -116,6 +116,9 @@ def launch_setup(context):
     collision_guard_service_name = (
         "" if use_mock_hardware_value else "/marvin_dual/set_collision_guard_enabled"
     )
+    control_profile_service_name = (
+        "" if use_mock_hardware_value else "/marvin_dual/set_control_profile"
+    )
 
     pkg = LaunchConfiguration("description_package").perform(context)
     desc_file = LaunchConfiguration("description_file").perform(context)
@@ -262,6 +265,8 @@ def launch_setup(context):
                 "trajectory_controller_name": "dual_arm_trajectory_controller",
                 "primary_controller_name": "",
                 "collision_guard_service_name": collision_guard_service_name,
+                "control_profile_service_name": control_profile_service_name,
+                "teleop_use_joint_impedance": False,
                 "allow_legacy_go_home_fallback": ParameterValue(
                     LaunchConfiguration("motion_allow_legacy_home_fallback"),
                     value_type=bool,

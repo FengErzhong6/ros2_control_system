@@ -43,14 +43,15 @@ class ManusAdapter(AdapterBase):
         if shutil.which("ros2") is None:
             return AdapterResult.failed("ros2 CLI not found in PATH.")
 
+        mock_enabled = self._mock_enabled()
         config_file = self._config_file_path()
-        if not config_file.exists():
+        if not mock_enabled and not config_file.exists():
             return AdapterResult.failed(
                 f"{self.device.device_id}: MANUS config does not exist: {config_file}"
             )
 
         user_name = self._user_name()
-        if not user_name:
+        if not mock_enabled and not user_name:
             return AdapterResult.failed(
                 f"{self.device.device_id}: MANUS user_name is required for calibration loading."
             )
@@ -67,6 +68,7 @@ class ManusAdapter(AdapterBase):
             metadata={
                 "config_file": str(config_file),
                 "user_name": user_name,
+                "mock_enabled": mock_enabled,
                 "ready_topic": self._ready_topic(),
                 "launch_arguments": launch_arguments,
             },
@@ -202,6 +204,7 @@ class ManusAdapter(AdapterBase):
                 "launch_package": self._launch_package(),
                 "launch_file": self._launch_file(),
                 "config_file": str(self._config_file_path()),
+                "mock_enabled": self._mock_enabled(),
                 "user_name": self._user_name(),
                 "ready_topic": self._ready_topic(),
                 "record_topics": self.record_topics(),
@@ -249,6 +252,14 @@ class ManusAdapter(AdapterBase):
         if isinstance(raw_arguments, dict):
             return dict(raw_arguments)
         return {}
+
+    def _mock_enabled(self) -> bool:
+        raw_value = self._launch_arguments().get("mock", False)
+        if isinstance(raw_value, bool):
+            return raw_value
+        if isinstance(raw_value, str):
+            return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(raw_value)
 
     def _build_command(self) -> list[str]:
         command = [

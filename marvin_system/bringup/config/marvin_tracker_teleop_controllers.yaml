@@ -69,8 +69,9 @@ tracker_teleop_controller:
         branch_switch_penalty: 20.0
 
     # ── 输出平滑 / 限速 ──────────────────────────────────────────────────
-    smoothing_alpha: 0.8       # 低通滤波系数 (0, 1]，越大响应越快
-    max_joint_velocity: 2.0    # 最大关节速度 (rad/s)
+    smoothing_alpha: 1.0       # 低通滤波系数 (0, 1]，越大响应越快
+    max_joint_velocity: 4.0    # 最大关节速度 (rad/s)
+    tracker_interp_cycles: 2   # 每次 tracker 更新跨 2 个控制周期做线性插值
 
     # ── Home / 回零 ─────────────────────────────────────────────────────
     home_joint_positions:

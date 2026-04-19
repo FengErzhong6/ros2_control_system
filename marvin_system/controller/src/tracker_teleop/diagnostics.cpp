@@ -24,6 +24,16 @@ const char *TrackerTeleopController::ikResultToString(IKResult result)
     }
 }
 
+const char *TrackerTeleopController::controlProfileCodeToString(int code)
+{
+    return control_profile_to_string(control_profile_from_code(code));
+}
+
+const char *TrackerTeleopController::sdkArmStateCodeToString(int code)
+{
+    return arm_state_code_to_string(code);
+}
+
 void TrackerTeleopController::publishIKStatus(size_t arm, IKResult result)
 {
     if (arm >= kArmCount || !pub_ik_status_[arm]) return;
@@ -110,6 +120,71 @@ bool TrackerTeleopController::readCurrentJointPositions(
     }
 
     return has_state;
+}
+
+bool TrackerTeleopController::readCurrentSdkCommandPositions(
+    size_t arm, std::array<double, kJointsPerArm> &joints_rad) const
+{
+    if (arm >= kArmCount) {
+        return false;
+    }
+
+    const size_t offset = arm * kJointsPerArm;
+    for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+        const auto *state = state_interfaces_sdk_cmd_pos_[offset + joint];
+        if (!state) {
+            return false;
+        }
+
+        const auto cmd_opt = state->get_optional<double>();
+        if (!cmd_opt.has_value()) {
+            return false;
+        }
+        joints_rad[joint] = cmd_opt.value();
+    }
+
+    return true;
+}
+
+TrackerTeleopController::SdkObservationState
+TrackerTeleopController::readSdkObservationState(size_t arm) const
+{
+    SdkObservationState observation;
+    if (arm >= kArmCount) {
+        return observation;
+    }
+
+    auto read_int_state = [](const hardware_interface::LoanedStateInterface *state, int &out_value) {
+        if (!state) {
+            return false;
+        }
+        const auto value_opt = state->get_optional<double>();
+        if (!value_opt.has_value()) {
+            return false;
+        }
+        out_value = static_cast<int>(std::lround(value_opt.value()));
+        return true;
+    };
+
+    int active_profile = 0;
+    int requested_profile = 0;
+    observation.has_control_profile =
+        read_int_state(state_interface_active_control_profile_, active_profile) &&
+        read_int_state(state_interface_requested_control_profile_, requested_profile);
+    observation.active_control_profile = active_profile;
+    observation.requested_control_profile = requested_profile;
+
+    observation.has_sdk_diag =
+        read_int_state(state_interfaces_sdk_cur_state_[arm], observation.sdk_cur_state) &&
+        read_int_state(state_interfaces_sdk_cmd_state_[arm], observation.sdk_cmd_state) &&
+        read_int_state(state_interfaces_sdk_err_code_[arm], observation.sdk_err_code) &&
+        read_int_state(state_interfaces_sdk_in_frame_serial_[arm], observation.sdk_in_frame_serial) &&
+        read_int_state(state_interfaces_sdk_out_frame_serial_[arm], observation.sdk_out_frame_serial);
+
+    observation.has_sdk_command_joint =
+        readCurrentSdkCommandPositions(arm, observation.sdk_command_joints_rad);
+
+    return observation;
 }
 
 bool TrackerTeleopController::computeCurrentUpperArmDir(

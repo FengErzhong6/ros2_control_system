@@ -1,6 +1,7 @@
 #include "internal.hpp"
 
 #include <exception>
+#include <utility>
 
 #include "pluginlib/class_list_macros.hpp"
 #include "rclcpp/logging.hpp"
@@ -89,9 +90,24 @@ controller_interface::InterfaceConfiguration
 TrackerTeleopController::state_interface_configuration() const
 {
     controller_interface::InterfaceConfiguration conf = {config_type::INDIVIDUAL, {}};
-    conf.names.reserve(joint_names_.size());
+    conf.names.reserve(joint_names_.size() * 2 + 12);
     for (const auto &jn : joint_names_) {
         conf.names.push_back(jn + "/position");
+        conf.names.push_back(joint_state_if(jn, kSdkCommandPositionStateInterface));
+    }
+
+    if (joint_names_.size() == kTotalJoints) {
+        const auto &left_anchor_joint = joint_names_[0];
+        const auto &right_anchor_joint = joint_names_[kJointsPerArm];
+        conf.names.push_back(joint_state_if(left_anchor_joint, kActiveControlProfileStateInterface));
+        conf.names.push_back(joint_state_if(left_anchor_joint, kRequestedControlProfileStateInterface));
+        for (const auto &anchor_joint : {left_anchor_joint, right_anchor_joint}) {
+            conf.names.push_back(joint_state_if(anchor_joint, kSdkCurrentStateStateInterface));
+            conf.names.push_back(joint_state_if(anchor_joint, kSdkCommandStateStateInterface));
+            conf.names.push_back(joint_state_if(anchor_joint, kSdkErrorCodeStateInterface));
+            conf.names.push_back(joint_state_if(anchor_joint, kSdkInFrameSerialStateInterface));
+            conf.names.push_back(joint_state_if(anchor_joint, kSdkOutFrameSerialStateInterface));
+        }
     }
     return conf;
 }
@@ -117,21 +133,83 @@ bool TrackerTeleopController::bindJointInterfaces()
     const auto logger = get_node()->get_logger();
 
     for (size_t index = 0; index < kTotalJoints; ++index) {
-        const std::string interface_name = joint_names_[index] + "/position";
+        const std::string command_interface_name = joint_names_[index] + "/position";
 
-        auto *cmd = find_loaned_interface(command_interfaces_, interface_name);
+        auto *cmd = find_loaned_interface(command_interfaces_, command_interface_name);
         if (!cmd) {
-            RCLCPP_ERROR(logger, "Missing command interface '%s'.", interface_name.c_str());
+            RCLCPP_ERROR(logger, "Missing command interface '%s'.", command_interface_name.c_str());
             return false;
         }
         cmd_interfaces_[index] = cmd;
 
+        const std::string position_state_interface_name = joint_names_[index] + "/position";
+        auto *state = find_loaned_interface(state_interfaces_, position_state_interface_name);
+        if (!state) {
+            RCLCPP_ERROR(logger, "Missing state interface '%s'.", position_state_interface_name.c_str());
+            return false;
+        }
+        state_interfaces_pos_[index] = state;
+
+        const std::string sdk_command_state_interface_name =
+            joint_state_if(joint_names_[index], kSdkCommandPositionStateInterface);
+        auto *sdk_cmd_state = find_loaned_interface(state_interfaces_, sdk_command_state_interface_name);
+        if (!sdk_cmd_state) {
+            RCLCPP_ERROR(
+                logger,
+                "Missing state interface '%s'.",
+                sdk_command_state_interface_name.c_str());
+            return false;
+        }
+        state_interfaces_sdk_cmd_pos_[index] = sdk_cmd_state;
+    }
+
+    if (joint_names_.size() != kTotalJoints) {
+        RCLCPP_ERROR(
+            logger,
+            "Expected %zu joint names before binding diagnostic interfaces (got %zu).",
+            kTotalJoints,
+            joint_names_.size());
+        return false;
+    }
+
+    const std::array<size_t, kArmCount> anchor_indices{{0, kJointsPerArm}};
+    for (size_t arm = 0; arm < kArmCount; ++arm) {
+        const auto &anchor_joint = joint_names_[anchor_indices[arm]];
+
+        const std::array<std::pair<const char *, hardware_interface::LoanedStateInterface **>, 5>
+            diagnostic_interfaces{{
+                {kSdkCurrentStateStateInterface, &state_interfaces_sdk_cur_state_[arm]},
+                {kSdkCommandStateStateInterface, &state_interfaces_sdk_cmd_state_[arm]},
+                {kSdkErrorCodeStateInterface, &state_interfaces_sdk_err_code_[arm]},
+                {kSdkInFrameSerialStateInterface, &state_interfaces_sdk_in_frame_serial_[arm]},
+                {kSdkOutFrameSerialStateInterface, &state_interfaces_sdk_out_frame_serial_[arm]},
+            }};
+
+        for (const auto &[interface_suffix, slot] : diagnostic_interfaces) {
+            const std::string interface_name = joint_state_if(anchor_joint, interface_suffix);
+            auto *state = find_loaned_interface(state_interfaces_, interface_name);
+            if (!state) {
+                RCLCPP_ERROR(logger, "Missing state interface '%s'.", interface_name.c_str());
+                return false;
+            }
+            *slot = state;
+        }
+    }
+
+    const auto &left_anchor_joint = joint_names_[anchor_indices[kLeft]];
+    const std::array<std::pair<const char *, hardware_interface::LoanedStateInterface **>, 2>
+        profile_interfaces{{
+            {kActiveControlProfileStateInterface, &state_interface_active_control_profile_},
+            {kRequestedControlProfileStateInterface, &state_interface_requested_control_profile_},
+        }};
+    for (const auto &[interface_suffix, slot] : profile_interfaces) {
+        const std::string interface_name = joint_state_if(left_anchor_joint, interface_suffix);
         auto *state = find_loaned_interface(state_interfaces_, interface_name);
         if (!state) {
             RCLCPP_ERROR(logger, "Missing state interface '%s'.", interface_name.c_str());
             return false;
         }
-        state_interfaces_pos_[index] = state;
+        *slot = state;
     }
 
     return true;
@@ -307,6 +385,14 @@ TrackerTeleopController::on_deactivate(const rclcpp_lifecycle::State &)
     resetTeleopRuntime(TeleopState::kDisarmed);
     cmd_interfaces_.fill(nullptr);
     state_interfaces_pos_.fill(nullptr);
+    state_interfaces_sdk_cmd_pos_.fill(nullptr);
+    state_interfaces_sdk_cur_state_.fill(nullptr);
+    state_interfaces_sdk_cmd_state_.fill(nullptr);
+    state_interfaces_sdk_err_code_.fill(nullptr);
+    state_interfaces_sdk_in_frame_serial_.fill(nullptr);
+    state_interfaces_sdk_out_frame_serial_.fill(nullptr);
+    state_interface_active_control_profile_ = nullptr;
+    state_interface_requested_control_profile_ = nullptr;
     return CallbackReturn::SUCCESS;
 }
 

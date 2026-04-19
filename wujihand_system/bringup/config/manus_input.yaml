@@ -1,0 +1,37 @@
+# Manus -> Wuji teleop configuration
+
+# ===== Input adapter =====
+input_topic: /manus_raw_publisher_node/gloves_raw
+output_topic: /hand_input
+publish_hand_input: true
+publish_debug_topics: false
+debug_left_topic: /hand_input_debug/left
+debug_right_topic: /hand_input_debug/right
+include_left_hand: true
+include_right_hand: true
+drop_if_missing_hand: true
+right_first: true
+flip_x: false
+flip_y: true
+flip_z: false
+expected_left_side_name: left
+expected_right_side_name: right
+single_hand_fallback_side: right
+
+# ===== Retarget bridge =====
+left_command_topic: /left/forward_position_controller/commands
+right_command_topic: /right/forward_position_controller/commands
+left_retarget_config: ""
+right_retarget_config: ""
+enable_left_hand: true
+enable_right_hand: true
+require_both_hands: false
+hold_last_command_on_missing_input: true
+command_timeout_sec: 0.25
+publish_debug_qpos: false
+left_debug_qpos_topic: /left/wujihand_retarget/qpos_debug
+right_debug_qpos_topic: /right/wujihand_retarget/qpos_debug
+
+# ===== Profiling =====
+profiling_enabled: true
+profiling_log_period_sec: 5.0
