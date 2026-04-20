@@ -20,17 +20,17 @@
 
       <joint name="right_finger1_joint1">
         <command_interface name="position">
-          <param name="min">0.0475</param>
-          <param name="max">1.6033</param>
-          <param name="initial_value">0.0475</param>
+          <param name="min">0.0368</param>
+          <param name="max">1.6125</param>
+          <param name="initial_value">0.0368</param>
         </command_interface>
         <state_interface name="position"/>
         <state_interface name="velocity"/>
       </joint>
       <joint name="right_finger1_joint2">
         <command_interface name="position">
-          <param name="min">-0.1387</param>
-          <param name="max">0.9324</param>
+          <param name="min">-0.1576</param>
+          <param name="max">0.9312</param>
           <param name="initial_value">0.0</param>
         </command_interface>
         <state_interface name="position"/>
@@ -38,8 +38,8 @@
       </joint>
       <joint name="right_finger1_joint3">
         <command_interface name="position">
-          <param name="min">-0.4642</param>
-          <param name="max">1.5623</param>
+          <param name="min">-0.4638</param>
+          <param name="max">1.5607</param>
           <param name="initial_value">0.0</param>
         </command_interface>
         <state_interface name="position"/>
@@ -47,8 +47,8 @@
       </joint>
       <joint name="right_finger1_joint4">
         <command_interface name="position">
-          <param name="min">-0.4699</param>
-          <param name="max">1.5568</param>
+          <param name="min">-0.4829</param>
+          <param name="max">1.5451</param>
           <param name="initial_value">0.0</param>
         </command_interface>
         <state_interface name="position"/>
@@ -57,8 +57,8 @@
 
       <joint name="right_finger2_joint1">
         <command_interface name="position">
-          <param name="min">-0.1585</param>
-          <param name="max">1.5604</param>
+          <param name="min">-0.1611</param>
+          <param name="max">1.5588</param>
           <param name="initial_value">0.0</param>
         </command_interface>
         <state_interface name="position"/>
@@ -66,8 +66,8 @@
       </joint>
       <joint name="right_finger2_joint2">
         <command_interface name="position">
-          <param name="min">-0.37</param>
-          <param name="max">0.37</param>
+          <param name="min">-0.4044</param>
+          <param name="max">0.3054</param>
           <param name="initial_value">0.0</param>
         </command_interface>
         <state_interface name="position"/>
@@ -75,8 +75,8 @@
       </joint>
       <joint name="right_finger2_joint3">
         <command_interface name="position">
-          <param name="min">-0.4777</param>
-          <param name="max">1.5485</param>
+          <param name="min">-0.4714</param>
+          <param name="max">1.5504</param>
           <param name="initial_value">0.0</param>
         </command_interface>
         <state_interface name="position"/>
@@ -84,7 +84,7 @@
       </joint>
       <joint name="right_finger2_joint4">
         <command_interface name="position">
-          <param name="min">-0.4683</param>
+          <param name="min">-0.4644</param>
           <param name="max">1.5753</param>
           <param name="initial_value">0.0</param>
         </command_interface>
@@ -94,8 +94,8 @@
 
       <joint name="right_finger3_joint1">
         <command_interface name="position">
-          <param name="min">-0.1644</param>
-          <param name="max">1.5516</param>
+          <param name="min">-0.1719</param>
+          <param name="max">1.5496</param>
           <param name="initial_value">0.0</param>
         </command_interface>
         <state_interface name="position"/>
@@ -103,8 +103,8 @@
       </joint>
       <joint name="right_finger3_joint2">
         <command_interface name="position">
-          <param name="min">-0.37</param>
-          <param name="max">0.37</param>
+          <param name="min">-0.4014</param>
+          <param name="max">0.2996</param>
           <param name="initial_value">0.0</param>
         </command_interface>
         <state_interface name="position"/>
@@ -112,8 +112,8 @@
       </joint>
       <joint name="right_finger3_joint3">
         <command_interface name="position">
-          <param name="min">-0.4739</param>
-          <param name="max">1.5512</param>
+          <param name="min">-0.4632</param>
+          <param name="max">1.5613</param>
           <param name="initial_value">0.0</param>
         </command_interface>
         <state_interface name="position"/>
@@ -121,8 +121,8 @@
       </joint>
       <joint name="right_finger3_joint4">
         <command_interface name="position">
-          <param name="min">-0.4684</param>
-          <param name="max">1.5745</param>
+          <param name="min">-0.4697</param>
+          <param name="max">1.5702</param>
           <param name="initial_value">0.0</param>
         </command_interface>
         <state_interface name="position"/>
@@ -131,8 +131,8 @@
 
       <joint name="right_finger4_joint1">
         <command_interface name="position">
-          <param name="min">-0.1554</param>
-          <param name="max">1.5585</param>
+          <param name="min">-0.1601</param>
+          <param name="max">1.5534</param>
           <param name="initial_value">0.0</param>
         </command_interface>
         <state_interface name="position"/>
@@ -140,8 +140,8 @@
       </joint>
       <joint name="right_finger4_joint2">
         <command_interface name="position">
-          <param name="min">-0.37</param>
-          <param name="max">0.37</param>
+          <param name="min">-0.4134</param>
+          <param name="max">0.3161</param>
           <param name="initial_value">0.0</param>
         </command_interface>
         <state_interface name="position"/>
@@ -149,8 +149,8 @@
       </joint>
       <joint name="right_finger4_joint3">
         <command_interface name="position">
-          <param name="min">-0.4765</param>
-          <param name="max">1.5487</param>
+          <param name="min">-0.4782</param>
+          <param name="max">1.5448</param>
           <param name="initial_value">0.0</param>
         </command_interface>
         <state_interface name="position"/>
@@ -158,8 +158,8 @@
       </joint>
       <joint name="right_finger4_joint4">
         <command_interface name="position">
-          <param name="min">-0.4777</param>
-          <param name="max">1.5634</param>
+          <param name="min">-0.4825</param>
+          <param name="max">1.5550</param>
           <param name="initial_value">0.0</param>
         </command_interface>
         <state_interface name="position"/>
@@ -168,8 +168,8 @@
 
       <joint name="right_finger5_joint1">
         <command_interface name="position">
-          <param name="min">-0.1626</param>
-          <param name="max">1.5585</param>
+          <param name="min">-0.1674</param>
+          <param name="max">1.5539</param>
           <param name="initial_value">0.0</param>
         </command_interface>
         <state_interface name="position"/>
@@ -177,8 +177,8 @@
       </joint>
       <joint name="right_finger5_joint2">
         <command_interface name="position">
-          <param name="min">-0.37</param>
-          <param name="max">0.37</param>
+          <param name="min">-0.4203</param>
+          <param name="max">0.2931</param>
           <param name="initial_value">0.0</param>
         </command_interface>
         <state_interface name="position"/>
@@ -186,8 +186,8 @@
       </joint>
       <joint name="right_finger5_joint3">
         <command_interface name="position">
-          <param name="min">-0.4768</param>
-          <param name="max">1.5490</param>
+          <param name="min">-0.4804</param>
+          <param name="max">1.5420</param>
           <param name="initial_value">0.0</param>
         </command_interface>
         <state_interface name="position"/>
@@ -195,8 +195,8 @@
       </joint>
       <joint name="right_finger5_joint4">
         <command_interface name="position">
-          <param name="min">-0.4683</param>
-          <param name="max">1.5735</param>
+          <param name="min">-0.4705</param>
+          <param name="max">1.5709</param>
           <param name="initial_value">0.0</param>
         </command_interface>
         <state_interface name="position"/>

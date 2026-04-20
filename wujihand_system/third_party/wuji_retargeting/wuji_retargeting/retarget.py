@@ -66,6 +66,36 @@ class Retargeter:
 
         # Rotation adjustment
         self.rotation_xyz = retarget_config.get('mediapipe_rotation', {})
+        self.skip_mediapipe_transformations = bool(retarget_config.get('skip_mediapipe_transformations', False))
+
+    def _preprocess_keypoints(self, raw_keypoints: np.ndarray) -> np.ndarray:
+        keypoints = np.asarray(raw_keypoints, dtype=np.float64)
+        if keypoints.shape != (21, 3):
+            raise ValueError(f"Expected keypoints with shape (21, 3), got {keypoints.shape}.")
+        if not np.all(np.isfinite(keypoints)):
+            raise ValueError("Keypoints contain non-finite values.")
+        if self.skip_mediapipe_transformations:
+            return keypoints.copy()
+        return apply_mediapipe_transformations(keypoints, self.hand_side)
+
+    def _solve(self, raw_keypoints: np.ndarray, apply_filter: bool) -> Tuple[np.ndarray, np.ndarray]:
+        mediapipe_kp = self._preprocess_keypoints(raw_keypoints)
+        if self.rotation_xyz:
+            mediapipe_kp = self._apply_rotation(mediapipe_kp)
+        qpos = self.optimizer.solve(mediapipe_kp)
+        filtered_qpos = self.lp_filter.next(qpos) if apply_filter else qpos
+        return filtered_qpos, mediapipe_kp
+
+    def _solve_unfiltered(self, raw_keypoints: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        mediapipe_kp = self._preprocess_keypoints(raw_keypoints)
+        if self.rotation_xyz:
+            mediapipe_kp = self._apply_rotation(mediapipe_kp)
+        qpos = self.optimizer.solve(mediapipe_kp)
+        return qpos, mediapipe_kp
+
+    def _log_preprocess_mode(self) -> None:
+        mode = "skipped" if self.skip_mediapipe_transformations else "enabled"
+        return mode
 
     @classmethod
     def from_yaml(cls, yaml_path: str, hand_side: str = "right") -> "Retargeter":
@@ -109,20 +139,7 @@ class Retargeter:
         Returns:
             qpos: (20,) joint angles
         """
-        # Apply coordinate transformation
-        mediapipe_kp = apply_mediapipe_transformations(raw_keypoints, self.hand_side)
-
-        # Apply rotation adjustment if configured
-        if self.rotation_xyz:
-            mediapipe_kp = self._apply_rotation(mediapipe_kp)
-
-        # Solve IK
-        qpos = self.optimizer.solve(mediapipe_kp)
-
-        # Apply filter
-        if apply_filter:
-            qpos = self.lp_filter.next(qpos)
-
+        qpos, _ = self._solve(raw_keypoints, apply_filter)
         return qpos
 
     def retarget_verbose(
@@ -144,17 +161,8 @@ class Retargeter:
                 - cost: Optimization cost
                 - pinch_alphas: (AdaptiveOptimizer only) alpha values
         """
-        # Apply coordinate transformation
-        mediapipe_kp = apply_mediapipe_transformations(raw_keypoints, self.hand_side)
+        qpos, mediapipe_kp = self._solve_unfiltered(raw_keypoints)
 
-        # Apply rotation adjustment if configured
-        if self.rotation_xyz:
-            mediapipe_kp = self._apply_rotation(mediapipe_kp)
-
-        # Solve IK
-        qpos = self.optimizer.solve(mediapipe_kp)
-
-        # Apply filter
         if apply_filter:
             filtered_qpos = self.lp_filter.next(qpos)
         else:
@@ -185,6 +193,8 @@ class Retargeter:
         Returns:
             Rotated keypoints
         """
+        from scipy.spatial.transform import Rotation
+
         x_deg = self.rotation_xyz.get('x', 0.0)
         y_deg = self.rotation_xyz.get('y', 0.0)
         z_deg = self.rotation_xyz.get('z', 0.0)
@@ -192,51 +202,8 @@ class Retargeter:
         if x_deg == 0 and y_deg == 0 and z_deg == 0:
             return keypoints
 
-        rot_matrix = self._rotation_matrix_from_euler_xyz_degrees(x_deg, y_deg, z_deg)
-        return keypoints @ rot_matrix.T
-
-    @staticmethod
-    def _rotation_matrix_from_euler_xyz_degrees(
-        x_deg: float,
-        y_deg: float,
-        z_deg: float,
-    ) -> np.ndarray:
-        """Build a rotation matrix from extrinsic XYZ Euler angles.
-
-        This intentionally avoids a SciPy dependency at runtime. For the row-vector
-        convention used in this package (`points @ R.T`), we construct the
-        equivalent column-vector rotation matrix first and transpose at use-site.
-        """
-        x_rad, y_rad, z_rad = np.deg2rad([x_deg, y_deg, z_deg])
-        cx, cy, cz = np.cos([x_rad, y_rad, z_rad])
-        sx, sy, sz = np.sin([x_rad, y_rad, z_rad])
-
-        rot_x = np.array(
-            [
-                [1.0, 0.0, 0.0],
-                [0.0, cx, -sx],
-                [0.0, sx, cx],
-            ],
-            dtype=np.float64,
-        )
-        rot_y = np.array(
-            [
-                [cy, 0.0, sy],
-                [0.0, 1.0, 0.0],
-                [-sy, 0.0, cy],
-            ],
-            dtype=np.float64,
-        )
-        rot_z = np.array(
-            [
-                [cz, -sz, 0.0],
-                [sz, cz, 0.0],
-                [0.0, 0.0, 1.0],
-            ],
-            dtype=np.float64,
-        )
-
-        return rot_z @ rot_y @ rot_x
+        rot = Rotation.from_euler('xyz', [x_deg, y_deg, z_deg], degrees=True)
+        return keypoints @ rot.as_matrix().T
 
     def reset_filter(self):
         """Reset low-pass filter state."""

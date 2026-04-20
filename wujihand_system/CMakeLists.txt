@@ -132,6 +132,7 @@ install(
 )
 install(
   PROGRAMS
+    bringup/scripts/aligned_record_inspector.py
     bringup/scripts/manus_input_adapter.py
     bringup/scripts/wujihand_retarget_bridge.py
     bringup/scripts/wujihand_manus_pipeline.py

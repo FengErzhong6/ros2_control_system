@@ -1,4 +1,5 @@
 .vscode
+.claude
 .pytest_cache/
 .venv_ros2/
 build
@@ -10,3 +11,4 @@ __pycache__/
 manus_system/bringup/calibrations/*
 manus_system/third_party/lib/libManusSDK.so
 htc_system/trajectory/*
+CLAUDE.md

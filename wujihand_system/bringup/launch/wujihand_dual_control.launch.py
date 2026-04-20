@@ -338,7 +338,7 @@ def launch_setup(context):
         launch_hand_stack(
             side="left",
             namespace=left_namespace,
-            description_file="urdf/wujihand-left.urdf",
+            description_file="urdf/wujihand-left.urdf.xacro",
             controllers_file=left_controllers_file,
             usb_serial_number=left_identity.get("usb_serial_number", ""),
             expected_handedness=left_identity.get("expected_handedness", ""),
@@ -353,7 +353,7 @@ def launch_setup(context):
         launch_hand_stack(
             side="right",
             namespace=right_namespace,
-            description_file="urdf/wujihand-right.urdf",
+            description_file="urdf/wujihand-right.urdf.xacro",
             controllers_file=right_controllers_file,
             usb_serial_number=right_identity.get("usb_serial_number", ""),
             expected_handedness=right_identity.get("expected_handedness", ""),

@@ -127,7 +127,7 @@ def generate_launch_description():
             SetEnvironmentVariable("PATH", [python_venv_bin, ":", EnvironmentVariable("PATH")]),
             DeclareLaunchArgument("teleop_config", default_value=teleop_default_config),
             DeclareLaunchArgument("manus_config", default_value=manus_default_config),
-            DeclareLaunchArgument("manus_user_name", default_value="default"),
+            DeclareLaunchArgument("manus_user_name", default_value="hsz"),
             DeclareLaunchArgument("identity_file", default_value=identity_default_config),
             manus_launch,
             wujihand_launch,

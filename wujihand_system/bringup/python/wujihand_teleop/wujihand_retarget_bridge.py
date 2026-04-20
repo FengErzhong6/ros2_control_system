@@ -74,14 +74,26 @@ class WujihandRetargetBridge:
         right_command = None
 
         if left_keypoints is not None and self._left_retargeter is not None:
-            left_command = np.asarray(self._left_retargeter.retarget(left_keypoints), dtype=np.float64).reshape(-1)
-            self._last_left_command = left_command
+            try:
+                left_command = np.asarray(
+                    self._left_retargeter.retarget(left_keypoints), dtype=np.float64
+                ).reshape(-1)
+                self._last_left_command = left_command
+            except Exception:
+                if self.config.hold_last_command_on_missing_input:
+                    left_command = self._last_left_command
         elif left_keypoints is None and self.config.hold_last_command_on_missing_input:
             left_command = self._last_left_command
 
         if right_keypoints is not None and self._right_retargeter is not None:
-            right_command = np.asarray(self._right_retargeter.retarget(right_keypoints), dtype=np.float64).reshape(-1)
-            self._last_right_command = right_command
+            try:
+                right_command = np.asarray(
+                    self._right_retargeter.retarget(right_keypoints), dtype=np.float64
+                ).reshape(-1)
+                self._last_right_command = right_command
+            except Exception:
+                if self.config.hold_last_command_on_missing_input:
+                    right_command = self._last_right_command
         elif right_keypoints is None and self.config.hold_last_command_on_missing_input:
             right_command = self._last_right_command
 
@@ -142,10 +154,11 @@ class WujihandRetargetBridgeNode(Node):
                 single_hand_fallback_side=self._config.single_hand_fallback_side,
             )
 
-            if not is_valid_hand_keypoints(left_keypoints):
-                left_keypoints = None
-            if not is_valid_hand_keypoints(right_keypoints):
-                right_keypoints = None
+            if self._config.validate_keypoints:
+                if not is_valid_hand_keypoints(left_keypoints):
+                    left_keypoints = None
+                if not is_valid_hand_keypoints(right_keypoints):
+                    right_keypoints = None
 
             if self._config.require_both_hands:
                 if self._config.enable_left_hand and left_keypoints is None:

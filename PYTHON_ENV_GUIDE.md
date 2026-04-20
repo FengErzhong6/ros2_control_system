@@ -335,6 +335,43 @@ UV_CACHE_DIR=/tmp/uv-cache uv pip install nlopt pin
 2. `Developer: Reload Window`
 3. 手动确认当前工作空间解释器是 `.venv_ros2/bin/python3`
 
+### 12.6 `scipy` 能导入但提示 NumPy 版本不兼容
+
+典型表现：
+
+```bash
+UserWarning: A NumPy version >=... and <... is required for this version of SciPy
+```
+
+说明：
+
+- 当前 `.venv_ros2` 使用了 `--system-site-packages`
+- 如果虚拟环境里没有单独安装 `scipy`，Python 可能会落到系统自带的旧版 `scipy`
+- 同时又用了虚拟环境里的新版 `numpy`，于是出现 ABI / 版本范围不匹配
+
+解决：
+
+```bash
+cd /home/mmlab/codes/huangshzh/ros2_control_system
+source .venv_ros2/bin/activate
+UV_CACHE_DIR=/tmp/uv-cache uv pip install --upgrade --force-reinstall numpy scipy
+```
+
+验证：
+
+```bash
+python3 - <<'PY'
+import scipy, numpy
+print("scipy:", scipy.__file__, scipy.__version__)
+print("numpy:", numpy.__file__, numpy.__version__)
+PY
+```
+
+正常预期：
+
+- `scipy` 和 `numpy` 都来自 `.venv_ros2/lib/python3.12/site-packages`
+- 不再出现版本不兼容 warning
+
 ## 13. 当前工作空间的最终建议
 
 一句话总结：

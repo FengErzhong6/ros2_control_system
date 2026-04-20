@@ -32,10 +32,20 @@ def load_dataclass_from_yaml(cls: Type[T], path: str | Path) -> T:
 class ManusInputAdapterConfig:
     input_topic: str = "/manus_raw_publisher_node/gloves_raw"
     output_topic: str = "/hand_input"
+    publish_rate_hz: float = 200.0
     publish_hand_input: bool = True
+    publish_debug_markers: bool = True
     publish_debug_topics: bool = False
     debug_left_topic: str = "/hand_input_debug/left"
     debug_right_topic: str = "/hand_input_debug/right"
+    left_marker_topic: str = "/left/wujihand_retarget/keypoints_markers"
+    right_marker_topic: str = "/right/wujihand_retarget/keypoints_markers"
+    left_marker_frame_id: str = "left_palm_link"
+    right_marker_frame_id: str = "right_palm_link"
+    marker_align_wrist_to_origin: bool = True
+    marker_point_scale: float = 0.012
+    marker_line_width: float = 0.004
+    marker_lifetime_sec: float = 0.25
     include_left_hand: bool = True
     include_right_hand: bool = True
     drop_if_missing_hand: bool = True
@@ -64,16 +74,27 @@ class WujihandRetargetBridgeConfig:
     left_debug_qpos_topic: str = "/left/wujihand_retarget/qpos_debug"
     right_debug_qpos_topic: str = "/right/wujihand_retarget/qpos_debug"
     single_hand_fallback_side: str = "right"
+    validate_keypoints: bool = True
 
 
 @dataclass(slots=True)
 class WujihandManusPipelineConfig:
     input_topic: str = "/manus_raw_publisher_node/gloves_raw"
     output_topic: str = "/hand_input"
+    publish_rate_hz: float = 200.0
     publish_hand_input: bool = True
+    publish_debug_markers: bool = True
     publish_debug_topics: bool = False
     debug_left_topic: str = "/hand_input_debug/left"
     debug_right_topic: str = "/hand_input_debug/right"
+    left_marker_topic: str = "/left/wujihand_retarget/keypoints_markers"
+    right_marker_topic: str = "/right/wujihand_retarget/keypoints_markers"
+    left_marker_frame_id: str = "left_palm_link"
+    right_marker_frame_id: str = "right_palm_link"
+    marker_align_wrist_to_origin: bool = True
+    marker_point_scale: float = 0.012
+    marker_line_width: float = 0.004
+    marker_lifetime_sec: float = 0.25
     include_left_hand: bool = True
     include_right_hand: bool = True
     drop_if_missing_hand: bool = True
@@ -98,15 +119,31 @@ class WujihandManusPipelineConfig:
     right_debug_qpos_topic: str = "/right/wujihand_retarget/qpos_debug"
     profiling_enabled: bool = True
     profiling_log_period_sec: float = 5.0
+    validate_keypoints: bool = True
+    record_aligned_data: bool = False
+    record_output_dir: str = "/tmp/wujihand_manus_records"
+    record_chunk_size: int = 256
+    record_queue_size: int = 4096
+    record_flush_period_sec: float = 2.0
 
     def adapter_config(self) -> ManusInputAdapterConfig:
         return ManusInputAdapterConfig(
             input_topic=self.input_topic,
             output_topic=self.output_topic,
+            publish_rate_hz=self.publish_rate_hz,
             publish_hand_input=self.publish_hand_input,
+            publish_debug_markers=self.publish_debug_markers,
             publish_debug_topics=self.publish_debug_topics,
             debug_left_topic=self.debug_left_topic,
             debug_right_topic=self.debug_right_topic,
+            left_marker_topic=self.left_marker_topic,
+            right_marker_topic=self.right_marker_topic,
+            left_marker_frame_id=self.left_marker_frame_id,
+            right_marker_frame_id=self.right_marker_frame_id,
+            marker_align_wrist_to_origin=self.marker_align_wrist_to_origin,
+            marker_point_scale=self.marker_point_scale,
+            marker_line_width=self.marker_line_width,
+            marker_lifetime_sec=self.marker_lifetime_sec,
             include_left_hand=self.include_left_hand,
             include_right_hand=self.include_right_hand,
             drop_if_missing_hand=self.drop_if_missing_hand,
@@ -135,4 +172,5 @@ class WujihandManusPipelineConfig:
             left_debug_qpos_topic=self.left_debug_qpos_topic,
             right_debug_qpos_topic=self.right_debug_qpos_topic,
             single_hand_fallback_side=self.single_hand_fallback_side,
+            validate_keypoints=self.validate_keypoints,
         )

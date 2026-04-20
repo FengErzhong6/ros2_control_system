@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -10,7 +11,12 @@ from typing import Dict, List, Optional
 
 import nlopt
 import numpy as np
+import xacro
 import yaml
+
+from ament_index_python.packages import get_package_share_directory
+import atexit
+import os
 
 from ..robot import RobotWrapper
 
@@ -109,6 +115,40 @@ class TimingStats:
 # Package root for URDF path resolution
 _THIS_FILE = Path(__file__).resolve()
 _PACKAGE_ROOT = _THIS_FILE.parent.parent
+_GENERATED_URDFS: list[str] = []
+
+
+def _cleanup_generated_urdfs() -> None:
+    for path in _GENERATED_URDFS:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
+atexit.register(_cleanup_generated_urdfs)
+
+
+def _resolved_urdf_path(hand_side: str) -> str:
+    canonical_xacro = (
+        Path(get_package_share_directory("wujihand_system"))
+        / "urdf"
+        / f"wujihand-{hand_side}.urdf.xacro"
+    )
+    if canonical_xacro.exists():
+        document = xacro.process_file(str(canonical_xacro))
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=f"-{hand_side}.urdf",
+            prefix="wuji_retarget_",
+            delete=False,
+        ) as handle:
+            handle.write(document.toxml())
+            generated_path = handle.name
+        _GENERATED_URDFS.append(generated_path)
+        return generated_path
+    fallback = (_PACKAGE_ROOT / f"wuji_hand_description/urdf/{hand_side}.urdf").resolve()
+    return str(fallback)
 
 # Unit conversion: internal computations use cm
 M_TO_CM = 100.0
@@ -192,7 +232,7 @@ class BaseOptimizer(ABC):
         self.norm_delta = retarget_config.get('norm_delta', 0.04)
 
         # Load URDF
-        urdf_path = str((_PACKAGE_ROOT / f"wuji_hand_description/urdf/{self.hand_side}.urdf").resolve())
+        urdf_path = _resolved_urdf_path(self.hand_side)
         self.robot = RobotWrapper(urdf_path, hand_side=self.hand_side)
         self.num_joints = self.robot.model.nq
 

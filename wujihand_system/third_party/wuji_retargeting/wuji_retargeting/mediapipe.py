@@ -3,6 +3,9 @@
 import numpy as np
 
 
+_FRAME_EPS = 1e-8
+
+
 class MediaPipeSmoother:
     """Maintains independent MediaPipe format data smoothing buffer for each hand."""
     def __init__(self, buffer_size=5):
@@ -58,19 +61,40 @@ def estimate_frame_from_hand_points(keypoint_3d_array: np.ndarray) -> np.ndarray
     Returns:
         frame: the coordinate frame of wrist in MANO convention
     """
-    assert keypoint_3d_array.shape == (21, 3)
+    keypoint_3d_array = np.asarray(keypoint_3d_array, dtype=np.float64)
+    if keypoint_3d_array.shape != (21, 3):
+        raise ValueError(f"Expected keypoints with shape (21, 3), got {keypoint_3d_array.shape}.")
+    if not np.all(np.isfinite(keypoint_3d_array)):
+        raise ValueError("Keypoints contain non-finite values.")
+
     points = keypoint_3d_array[[0, 5, 9], :]
 
     x_vector = points[0] - points[2]
+    if np.linalg.norm(x_vector) <= _FRAME_EPS:
+        raise ValueError("Degenerate hand frame: wrist and middle MCP are too close.")
 
     points = points - np.mean(points, axis=0, keepdims=True)
-    u, s, v = np.linalg.svd(points)
+    if np.max(np.linalg.norm(points, axis=1)) <= _FRAME_EPS:
+        raise ValueError("Degenerate hand frame: reference points collapse to a single point.")
+    try:
+        _, _, v = np.linalg.svd(points)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError("Failed to estimate hand frame from keypoints.") from exc
 
     normal = v[2, :]
+    if not np.all(np.isfinite(normal)) or np.linalg.norm(normal) <= _FRAME_EPS:
+        raise ValueError("Degenerate hand frame: invalid plane normal.")
 
     x = x_vector - np.sum(x_vector * normal) * normal
-    x = x / np.linalg.norm(x)
+    x_norm = np.linalg.norm(x)
+    if x_norm <= _FRAME_EPS:
+        raise ValueError("Degenerate hand frame: x-axis projection is too small.")
+    x = x / x_norm
     z = np.cross(x, normal)
+    z_norm = np.linalg.norm(z)
+    if z_norm <= _FRAME_EPS:
+        raise ValueError("Degenerate hand frame: z-axis projection is too small.")
+    z = z / z_norm
 
     if np.sum(z * (points[1] - points[2])) < 0:
         normal *= -1
@@ -109,4 +133,3 @@ __all__ = [
     'estimate_frame_from_hand_points',
     'apply_mediapipe_transformations',
 ]
-

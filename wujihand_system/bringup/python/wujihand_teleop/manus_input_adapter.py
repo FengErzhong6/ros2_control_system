@@ -17,7 +17,8 @@ from ament_index_python.packages import get_package_share_directory
 from manus_system.msg import ManusGloveRawArray
 
 from .config_types import ManusInputAdapterConfig, load_dataclass_from_yaml
-from .manus_mapping import MappingOptions, extract_hands_from_gloves, flatten_hand_input
+from .keypoint_markers import KeypointMarkerConfig, KeypointMarkerPublisher, RawManusMarkerPublisher
+from .manus_mapping import HandMetadata, MappingOptions, extract_hands_from_gloves, flatten_hand_input
 
 
 def get_sensor_data_qos() -> QoSProfile:
@@ -32,6 +33,8 @@ def get_sensor_data_qos() -> QoSProfile:
 class AdaptedFrame:
     left_keypoints: Optional[np.ndarray]
     right_keypoints: Optional[np.ndarray]
+    left_metadata: HandMetadata
+    right_metadata: HandMetadata
     hand_input: Optional[np.ndarray]
 
 
@@ -47,7 +50,10 @@ class ManusInputAdapter:
         )
 
     def adapt_message(self, msg: ManusGloveRawArray) -> AdaptedFrame:
-        left_keypoints, right_keypoints = extract_hands_from_gloves(msg.gloves, self.mapping_options)
+        left_keypoints, right_keypoints, left_metadata, right_metadata = extract_hands_from_gloves(
+            msg.gloves,
+            self.mapping_options,
+        )
         hand_input = flatten_hand_input(
             left_keypoints,
             right_keypoints,
@@ -59,6 +65,8 @@ class ManusInputAdapter:
         return AdaptedFrame(
             left_keypoints=left_keypoints,
             right_keypoints=right_keypoints,
+            left_metadata=left_metadata,
+            right_metadata=right_metadata,
             hand_input=hand_input,
         )
 
@@ -68,22 +76,48 @@ class ManusInputAdapterNode(Node):
         super().__init__("manus_input_adapter")
         self._adapter = ManusInputAdapter(config)
         self._config = config
+        self._latest_raw_msg: Optional[ManusGloveRawArray] = None
 
         qos = get_sensor_data_qos()
         self._output_pub = self.create_publisher(Float32MultiArray, config.output_topic, qos)
         self._debug_left_pub = None
         self._debug_right_pub = None
+        self._marker_pub = None
+        self._raw_marker_pub = None
         if config.publish_debug_topics:
             self._debug_left_pub = self.create_publisher(Float32MultiArray, config.debug_left_topic, qos)
             self._debug_right_pub = self.create_publisher(Float32MultiArray, config.debug_right_topic, qos)
+        if config.publish_debug_markers:
+            marker_config = KeypointMarkerConfig(
+                left_topic=config.left_marker_topic,
+                right_topic=config.right_marker_topic,
+                left_frame_id=config.left_marker_frame_id,
+                right_frame_id=config.right_marker_frame_id,
+                align_wrist_to_origin=config.marker_align_wrist_to_origin,
+                point_scale=config.marker_point_scale,
+                line_width=config.marker_line_width,
+                lifetime_sec=config.marker_lifetime_sec,
+            )
+            self._marker_pub = KeypointMarkerPublisher(self, marker_config)
+            self._raw_marker_pub = RawManusMarkerPublisher(self, marker_config)
 
         self.create_subscription(ManusGloveRawArray, config.input_topic, self._on_gloves_raw, qos)
+        publish_rate_hz = max(float(config.publish_rate_hz), 1.0)
+        self.create_timer(1.0 / publish_rate_hz, self._publish_latest_frame)
         self.get_logger().info(
             "Manus input adapter ready. "
             f"input={config.input_topic}, output={config.output_topic}, "
             f"include_left={str(config.include_left_hand).lower()}, "
-            f"include_right={str(config.include_right_hand).lower()}"
+            f"include_right={str(config.include_right_hand).lower()}, "
+            f"publish_rate_hz={publish_rate_hz:.1f}"
         )
+        if self._marker_pub is not None:
+            self.get_logger().info(
+                "Keypoint markers enabled. "
+                f"left_topic={config.left_marker_topic}, right_topic={config.right_marker_topic}, "
+                f"left_frame={config.left_marker_frame_id}, right_frame={config.right_marker_frame_id}, "
+                f"align_wrist_to_origin={str(config.marker_align_wrist_to_origin).lower()}"
+            )
 
     def _publish_array(self, publisher, values: np.ndarray) -> None:
         msg = Float32MultiArray()
@@ -91,13 +125,28 @@ class ManusInputAdapterNode(Node):
         publisher.publish(msg)
 
     def _on_gloves_raw(self, msg: ManusGloveRawArray) -> None:
-        adapted = self._adapter.adapt_message(msg)
-        if adapted.hand_input is not None and self._config.publish_hand_input:
-            self._publish_array(self._output_pub, adapted.hand_input)
+        self._latest_raw_msg = msg
+
+    def _publish_latest_frame(self) -> None:
+        if self._latest_raw_msg is None:
+            return
+        adapted = self._adapter.adapt_message(self._latest_raw_msg)
+        hand_input = adapted.hand_input
+        if hand_input is not None and self._config.publish_hand_input:
+            self._publish_array(self._output_pub, hand_input)
         if self._debug_left_pub is not None and adapted.left_keypoints is not None:
             self._publish_array(self._debug_left_pub, adapted.left_keypoints)
         if self._debug_right_pub is not None and adapted.right_keypoints is not None:
             self._publish_array(self._debug_right_pub, adapted.right_keypoints)
+        if self._marker_pub is not None:
+            self._marker_pub.publish(
+                left_keypoints=adapted.left_keypoints,
+                right_keypoints=adapted.right_keypoints,
+                left_metadata=adapted.left_metadata,
+                right_metadata=adapted.right_metadata,
+            )
+        if self._raw_marker_pub is not None:
+            self._raw_marker_pub.publish(self._latest_raw_msg.gloves)
 
 
 def _default_config_path() -> Path:

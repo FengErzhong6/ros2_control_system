@@ -3,15 +3,29 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Optional, Sequence, Tuple
 
+
+@dataclass(frozen=True, slots=True)
+class ManusNodeMetadata:
+    node_id: int
+    parent_node_id: int
+    joint_type: str
+    chain_type: str
+
+
+HandMetadata = tuple[Optional[ManusNodeMetadata], ...]
+
 import numpy as np
 
-# MediaPipe order: wrist, thumb(4), index(4), middle(4), ring(4), pinky(4)
-MEDIAPIPE_TO_MANUS: Tuple[int, ...] = (
-    1, 22, 23, 24, 25,
-    3, 4, 5, 6,
-    8, 9, 10, 11,
-    13, 14, 15, 16,
-    18, 19, 20, 21,
+# MediaPipe order required by wuji_retargeting: wrist, thumb(4), index(4), middle(4), ring(4), pinky(4).
+# Current experiment assumes the earlier manual identification swapped thumb with pinky,
+# and index with ring. Pinky uses the full four-point sequence 25, 26, 23, 24.
+MEDIAPIPE_TO_MANUS: Tuple[Optional[int], ...] = (
+    0,
+    1, 2, 3, 4,
+    6, 7, 8, 9,
+    11, 12, 13, 14,
+    16, 17, 18, 19,
+    21, 22, 23, 24
 )
 
 SINGLE_HAND_VALUES = 21 * 3
@@ -43,8 +57,9 @@ def _apply_axis_flips(position: np.ndarray, options: MappingOptions) -> np.ndarr
     return position
 
 
-def glove_to_mediapipe(glove: object, options: MappingOptions) -> np.ndarray:
+def glove_to_mediapipe(glove: object, options: MappingOptions) -> tuple[np.ndarray, HandMetadata]:
     manus_positions: dict[int, np.ndarray] = {}
+    manus_metadata: dict[int, ManusNodeMetadata] = {}
     for raw_node in getattr(glove, "raw_nodes", []):
         position = np.array(
             [
@@ -54,21 +69,33 @@ def glove_to_mediapipe(glove: object, options: MappingOptions) -> np.ndarray:
             ],
             dtype=np.float32,
         )
-        manus_positions[int(raw_node.node_id)] = _apply_axis_flips(position, options)
+        node_id = int(raw_node.node_id)
+        manus_positions[node_id] = _apply_axis_flips(position, options)
+        manus_metadata[node_id] = ManusNodeMetadata(
+            node_id=node_id,
+            parent_node_id=int(getattr(raw_node, "parent_node_id", 0)),
+            joint_type=str(getattr(raw_node, "joint_type", "")),
+            chain_type=str(getattr(raw_node, "chain_type", "")),
+        )
 
     mediapipe_pose = np.zeros((21, 3), dtype=np.float32)
+    mediapipe_metadata: list[Optional[ManusNodeMetadata]] = [None] * 21
     for mp_idx, manus_node_id in enumerate(MEDIAPIPE_TO_MANUS):
-        if manus_node_id in manus_positions:
+        if manus_node_id is not None and manus_node_id in manus_positions:
             mediapipe_pose[mp_idx] = manus_positions[manus_node_id]
-    return mediapipe_pose
+            mediapipe_metadata[mp_idx] = manus_metadata.get(manus_node_id)
+    return mediapipe_pose, tuple(mediapipe_metadata)
 
 
 def extract_hands_from_gloves(
     gloves: Iterable[object],
     options: MappingOptions,
-) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+) -> tuple[Optional[np.ndarray], Optional[np.ndarray], HandMetadata, HandMetadata]:
     left_keypoints: Optional[np.ndarray] = None
     right_keypoints: Optional[np.ndarray] = None
+    empty_metadata: HandMetadata = tuple([None] * 21)
+    left_metadata: HandMetadata = empty_metadata
+    right_metadata: HandMetadata = empty_metadata
 
     expected_left = normalize_side_name(options.expected_left_side_name)
     expected_right = normalize_side_name(options.expected_right_side_name)
@@ -76,11 +103,11 @@ def extract_hands_from_gloves(
     for glove in gloves:
         side = normalize_side_name(getattr(glove, "side", ""))
         if side == expected_left:
-            left_keypoints = glove_to_mediapipe(glove, options)
+            left_keypoints, left_metadata = glove_to_mediapipe(glove, options)
         elif side == expected_right:
-            right_keypoints = glove_to_mediapipe(glove, options)
+            right_keypoints, right_metadata = glove_to_mediapipe(glove, options)
 
-    return left_keypoints, right_keypoints
+    return left_keypoints, right_keypoints, left_metadata, right_metadata
 
 
 def flatten_hand_input(

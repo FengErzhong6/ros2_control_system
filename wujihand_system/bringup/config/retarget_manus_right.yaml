@@ -27,6 +27,8 @@ retarget:
     ring:   { d1: 2.0, d2: 4.0 }
     pinky:  { d1: 2.0, d2: 4.0 }
 
+  skip_mediapipe_transformations: false
+
   mediapipe_rotation:
     x: 0.0
     y: 0.0

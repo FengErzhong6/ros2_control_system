@@ -3,15 +3,25 @@
 # ===== Input adapter =====
 input_topic: /manus_raw_publisher_node/gloves_raw
 output_topic: /hand_input
+publish_rate_hz: 200.0
 publish_hand_input: true
+publish_debug_markers: true
 publish_debug_topics: false
 debug_left_topic: /hand_input_debug/left
 debug_right_topic: /hand_input_debug/right
+left_marker_topic: /left/wujihand_retarget/keypoints_markers
+right_marker_topic: /right/wujihand_retarget/keypoints_markers
+left_marker_frame_id: left_palm_link
+right_marker_frame_id: right_palm_link
+marker_align_wrist_to_origin: true
+marker_point_scale: 0.02
+marker_line_width: 0.008
+marker_lifetime_sec: 0.0
 include_left_hand: true
 include_right_hand: true
 drop_if_missing_hand: true
 right_first: true
-flip_x: false
+flip_x: true
 flip_y: true
 flip_z: false
 expected_left_side_name: left
@@ -28,6 +38,7 @@ enable_right_hand: true
 require_both_hands: false
 hold_last_command_on_missing_input: true
 command_timeout_sec: 0.25
+validate_keypoints: true
 publish_debug_qpos: false
 left_debug_qpos_topic: /left/wujihand_retarget/qpos_debug
 right_debug_qpos_topic: /right/wujihand_retarget/qpos_debug
@@ -35,3 +46,10 @@ right_debug_qpos_topic: /right/wujihand_retarget/qpos_debug
 # ===== Profiling =====
 profiling_enabled: true
 profiling_log_period_sec: 5.0
+
+# ===== Aligned recording =====
+record_aligned_data: false
+record_output_dir: /tmp/wujihand_manus_records
+record_chunk_size: 256
+record_queue_size: 4096
+record_flush_period_sec: 2.0

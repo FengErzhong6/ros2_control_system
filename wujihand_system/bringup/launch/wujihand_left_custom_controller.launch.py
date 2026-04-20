@@ -59,7 +59,7 @@ def generate_launch_description():
     declared_arguments.append(
         DeclareLaunchArgument(
             "description_file",
-            default_value="urdf/wujihand-left.urdf",
+            default_value="urdf/wujihand-left.urdf.xacro",
             description="Composite URDF/XACRO file to load.",
         )
     )
