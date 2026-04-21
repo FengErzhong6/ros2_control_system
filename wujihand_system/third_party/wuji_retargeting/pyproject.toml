@@ -18,6 +18,8 @@ packages = ["wuji_retargeting"]
 
 [tool.setuptools.package-data]
 "wuji_retargeting" = [
-    "urdf/*.urdf",
-    "meshes/**/*.STL",
+    "wuji_hand_description/urdf/*.urdf",
+    "wuji_hand_description/meshes/**/*.STL",
+    "wuji_hand_description/mjcf/*.xml",
+    "wuji_hand_description/rviz/*.rviz",
 ]

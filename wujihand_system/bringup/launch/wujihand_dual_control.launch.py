@@ -5,8 +5,8 @@ import yaml
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, TimerAction
-from launch.conditions import IfCondition
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo, OpaqueFunction, RegisterEventHandler
+from launch.event_handlers import OnProcessExit
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -81,8 +81,8 @@ def launch_hand_stack(
     usb_serial_number,
     expected_handedness,
     use_mock_hardware,
-    use_gui,
-    activate_forward_controller,
+    start_gui,
+    start_forward_controller_active,
     mount_xyz,
     mount_rpy,
 ):
@@ -144,13 +144,12 @@ def launch_hand_stack(
 
     forward_position_controller_arguments = [
         "forward_position_controller",
+        "--inactive",
         "--param-file",
         namespaced_controllers_yaml,
         "--controller-manager",
         f"{abs_ns}/controller_manager",
     ]
-    if str(activate_forward_controller).lower() not in ("1", "true", "yes", "on"):
-        forward_position_controller_arguments.insert(1, "--inactive")
 
     forward_position_controller_spawner = Node(
         package="controller_manager",
@@ -160,56 +159,81 @@ def launch_hand_stack(
         output="screen",
     )
 
-    joint_state_publisher_gui_node = ExecuteProcess(
-        cmd=[
-            "python3",
-            PathJoinSubstitution(
-                [FindPackageShare("wujihand_system"), "launch", "joint_gui_publisher.py"]
-            ),
-            "--ros-args",
-            "-r",
-            f"__ns:={abs_ns}",
-            "-r",
-            f"robot_description:={abs_ns}/robot_description",
-            "-r",
-            f"/robot_description:={abs_ns}/robot_description",
-            "-p",
-            "publish_topic:=gui_joint_states",
-        ],
-        output="screen",
-        condition=IfCondition(use_gui),
-    )
-
-    gui_to_forward_bridge = ExecuteProcess(
-        cmd=[
-            "python3",
-            PathJoinSubstitution(
-                [FindPackageShare("wujihand_system"), "launch", "gui_joint_state_to_forward_command.py"]
-            ),
-            "--ros-args",
-            "-r",
-            f"__ns:={abs_ns}",
-            "-r",
-            f"robot_description:={abs_ns}/robot_description",
-            "-r",
-            f"/robot_description:={abs_ns}/robot_description",
-            "-p",
-            "input_topic:=gui_joint_states",
-            "-p",
-            "output_topic:=forward_position_controller/commands",
-        ],
-        output="screen",
-        condition=IfCondition(use_gui),
-    )
-
-    return [
+    actions = [
         ros2_control_node,
         robot_state_publisher_node,
         joint_state_broadcaster_spawner,
         forward_position_controller_spawner,
-        joint_state_publisher_gui_node,
-        gui_to_forward_bridge,
     ]
+
+    if start_gui:
+        joint_state_publisher_gui_node = ExecuteProcess(
+            cmd=[
+                "python3",
+                PathJoinSubstitution(
+                    [FindPackageShare("wujihand_system"), "launch", "joint_gui_publisher.py"]
+                ),
+                "--ros-args",
+                "-r",
+                f"__ns:={abs_ns}",
+                "-r",
+                f"robot_description:={abs_ns}/robot_description",
+                "-r",
+                f"/robot_description:={abs_ns}/robot_description",
+                "-p",
+                "publish_topic:=gui_joint_states",
+                "-p",
+                f"window_title:=Wuji Hand Joint GUI ({side})",
+            ],
+            output="screen",
+        )
+
+        gui_to_forward_bridge = ExecuteProcess(
+            cmd=[
+                "python3",
+                PathJoinSubstitution(
+                    [FindPackageShare("wujihand_system"), "launch", "gui_joint_state_to_forward_command.py"]
+                ),
+                "--ros-args",
+                "-r",
+                f"__ns:={abs_ns}",
+                "-r",
+                f"robot_description:={abs_ns}/robot_description",
+                "-r",
+                f"/robot_description:={abs_ns}/robot_description",
+                "-p",
+                "input_topic:=gui_joint_states",
+                "-p",
+                "output_topic:=forward_position_controller/commands",
+            ],
+            output="screen",
+        )
+        actions.extend([joint_state_publisher_gui_node, gui_to_forward_bridge])
+
+    if start_forward_controller_active:
+        actions.append(
+            RegisterEventHandler(
+                OnProcessExit(
+                    target_action=forward_position_controller_spawner,
+                    on_exit=[
+                        ExecuteProcess(
+                            cmd=[
+                                "ros2",
+                                "control",
+                                "switch_controllers",
+                                "--controller-manager",
+                                f"{abs_ns}/controller_manager",
+                                "--activate",
+                                "forward_position_controller",
+                            ],
+                            output="screen",
+                        )
+                    ],
+                )
+            )
+        )
+
+    return actions
 
 
 def generate_launch_description():
@@ -305,6 +329,13 @@ def generate_launch_description():
             description="Activate forward_position_controller automatically for both hands.",
         )
     )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "use_dual_gui",
+            default_value="false",
+            description="Enable both left/right GUI windows and auto-activate both forward controllers.",
+        )
+    )
 
     return LaunchDescription(declared_arguments + [OpaqueFunction(function=launch_setup)])
 
@@ -322,18 +353,44 @@ def launch_setup(context):
     right_controllers_file = resolve_config_path(
         LaunchConfiguration("right_controllers_file").perform(context).strip()
     )
-    use_left_gui = LaunchConfiguration("use_left_gui")
-    use_right_gui = LaunchConfiguration("use_right_gui")
+    use_left_gui_value = LaunchConfiguration("use_left_gui").perform(context).strip().lower()
+    use_right_gui_value = LaunchConfiguration("use_right_gui").perform(context).strip().lower()
     left_mount_xyz = LaunchConfiguration("left_mount_xyz").perform(context).strip()
     left_mount_rpy = LaunchConfiguration("left_mount_rpy").perform(context).strip()
     right_mount_xyz = LaunchConfiguration("right_mount_xyz").perform(context).strip()
     right_mount_rpy = LaunchConfiguration("right_mount_rpy").perform(context).strip()
-    activate_forward_controller = LaunchConfiguration("activate_forward_controller").perform(context).strip()
+    activate_forward_controller_value = (
+        LaunchConfiguration("activate_forward_controller").perform(context).strip().lower()
+    )
+    use_dual_gui_value = LaunchConfiguration("use_dual_gui").perform(context).strip().lower()
+
+    use_left_gui = use_left_gui_value in ("1", "true", "yes", "on")
+    use_right_gui = use_right_gui_value in ("1", "true", "yes", "on")
+    activate_forward_controller = activate_forward_controller_value in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    use_dual_gui = use_dual_gui_value in ("1", "true", "yes", "on")
+
+    if use_dual_gui:
+        use_left_gui = True
+        use_right_gui = True
+        activate_forward_controller = True
+
+    resolved_flag_summary = (
+        "Resolved dual launch flags: "
+        f"use_dual_gui={use_dual_gui}, "
+        f"use_left_gui={use_left_gui}, "
+        f"use_right_gui={use_right_gui}, "
+        f"activate_forward_controller={activate_forward_controller}"
+    )
 
     left_identity = load_hand_identity(identity_file, "left")
     right_identity = load_hand_identity(identity_file, "right")
 
-    actions = []
+    actions = [LogInfo(msg=resolved_flag_summary)]
     actions.extend(
         launch_hand_stack(
             side="left",
@@ -343,8 +400,8 @@ def launch_setup(context):
             usb_serial_number=left_identity.get("usb_serial_number", ""),
             expected_handedness=left_identity.get("expected_handedness", ""),
             use_mock_hardware=use_mock_hardware,
-            use_gui=use_left_gui,
-            activate_forward_controller=activate_forward_controller,
+            start_gui=use_left_gui,
+            start_forward_controller_active=activate_forward_controller,
             mount_xyz=left_mount_xyz,
             mount_rpy=left_mount_rpy,
         )
@@ -358,8 +415,8 @@ def launch_setup(context):
             usb_serial_number=right_identity.get("usb_serial_number", ""),
             expected_handedness=right_identity.get("expected_handedness", ""),
             use_mock_hardware=use_mock_hardware,
-            use_gui=use_right_gui,
-            activate_forward_controller=activate_forward_controller,
+            start_gui=use_right_gui,
+            start_forward_controller_active=activate_forward_controller,
             mount_xyz=right_mount_xyz,
             mount_rpy=right_mount_rpy,
         )

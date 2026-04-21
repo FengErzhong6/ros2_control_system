@@ -105,12 +105,12 @@ class JointRow:
 
 
 class MainWindow(QWidget):
-    def __init__(self, node, free_joints):
+    def __init__(self, node, free_joints, window_title):
         super().__init__()
         self.node = node
         self.rows = []
 
-        self.setWindowTitle("Wuji Hand Joint GUI")
+        self.setWindowTitle(window_title)
         self.setMinimumWidth(850)
 
         root = QVBoxLayout()
@@ -187,12 +187,15 @@ def main():
     publish_topic = str(node.declare_parameter("publish_topic", "gui_joint_states").value).strip()
     if not publish_topic:
         publish_topic = "gui_joint_states"
+    window_title = str(node.declare_parameter("window_title", "Wuji Hand Joint GUI").value).strip()
+    if not window_title:
+        window_title = "Wuji Hand Joint GUI"
 
     node.publisher_ = node.create_publisher(JointState, publish_topic, 10)
     node.get_logger().info(
         f"Publishing GUI joint states on {publish_topic} in radians (UI displays degrees)."
     )
-
+    node.get_logger().info(f"Using GUI window title: {window_title}")
     robot_description = {"xml": None}
     qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
@@ -218,7 +221,7 @@ def main():
     signal.signal(signal.SIGINT, lambda *_args: app.quit())
     signal.signal(signal.SIGTERM, lambda *_args: app.quit())
 
-    window = MainWindow(node, free_joints)
+    window = MainWindow(node, free_joints, window_title)
     window.show()
 
     ros_spin = QTimer()
