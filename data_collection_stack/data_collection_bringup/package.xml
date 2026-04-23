@@ -13,6 +13,7 @@
   <depend>data_collection_orchestrator</depend>
   <depend>data_collection_ui</depend>
   <depend>camera_system</depend>
+  <depend>wujihand_system</depend>
 
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>launch</exec_depend>

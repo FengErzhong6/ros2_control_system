@@ -1,5 +1,34 @@
 session_root: ~/.ros/data_collection
 bag_directory_name: rosbag
+metadata_file_name: metadata.json
+event_log_file_name: event_log.txt
+timing_report_file_name: timing_report.json
 snapshot_recipe: true
 snapshot_site_config: true
+snapshot_startup_policy: true
+snapshot_fault_policy: true
+snapshot_time_sync_config: true
+snapshot_robot_description: true
+snapshot_camera_calibration: true
+prepare_recorder_on_start_system: false
+use_start_paused: true
+recorder_node_name_prefix: data_collection_recorder
+service_timeout_sec: 10.0
+stop_timeout_sec: 10.0
+cleanup_timeout_sec: 5.0
+storage_id: mcap
+compression_mode: none
+compression_format: zstd
+capture_git_state: true
 preview_drop_policy: latest_only
+require_time_sync_healthy: true
+time_sync_mode: hardware_trigger_or_common_clock
+canonical_timestamp_clock: shared_dataset_clock
+canonical_timestamp_semantics:
+  image: source_capture_time
+  joint_states: controller_measurement_time
+time_sync_max_offset_ns: 1000000
+joint_state_min_rate_hz: 100.0
+joint_state_max_jitter_ms: 2.0
+post_session_timing_validation: true
+training_ready_requires_canonical_timestamps: true

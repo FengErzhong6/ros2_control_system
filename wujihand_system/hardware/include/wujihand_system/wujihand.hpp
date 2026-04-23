@@ -110,6 +110,9 @@ private:
     std::array<std::string, kTotalJoints> joint_names_{};
     std::array<std::string, kTotalJoints> position_interface_names_{};
     std::array<std::string, kTotalJoints> velocity_interface_names_{};
+    std::array<double, kTotalJoints> joint_min_{};
+    std::array<double, kTotalJoints> joint_max_{};
+    std::array<double, kTotalJoints> initial_command_{};
 
     bool has_velocity_state_{false};
     std::array<double, kTotalJoints> last_position_{};

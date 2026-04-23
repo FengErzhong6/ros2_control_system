@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 import signal
 import threading
 import time
-from typing import Optional
+from typing import Any, Optional
 
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
@@ -33,8 +34,16 @@ from .command_server import CommandServer
 from .event_log import EventLog
 from .health_monitor import HealthMonitor
 from .managed_launch import LaunchManager
-from .models import ActiveSession, DeviceSpec, RecipeSpec, StartupPolicy, SupervisorConfig
+from .models import (
+    ActiveSession,
+    DeviceSpec,
+    RecipeSpec,
+    RecordingPolicy,
+    StartupPolicy,
+    SupervisorConfig,
+)
 from .recipe_loader import discover_recipes, load_recipe
+from .record_manager import RecordManager
 from .runtime_manifest import RuntimeManifest
 from .session_manager import SessionManager
 from .state_machine import Commands, SystemStates, allowed_commands_for, is_command_allowed
@@ -93,7 +102,12 @@ def _nonnegative_int(raw_value: object, default: int) -> int:
 
 
 class DataCollectionSupervisor(Node):
-    def __init__(self, *, launch_manager: LaunchManager | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        launch_manager: LaunchManager | None = None,
+        record_manager: RecordManager | None = None,
+    ) -> None:
         super().__init__("data_collection_supervisor")
 
         self.launch_manager = launch_manager
@@ -105,9 +119,13 @@ class DataCollectionSupervisor(Node):
         self._config = self._declare_config()
         self._runtime_manifest = RuntimeManifest()
         self._startup_policy = self._load_startup_policy()
+        self._recording_policy = self._load_recording_policy()
         self._event_log = EventLog()
         self._health_monitor = HealthMonitor()
-        self._session_manager = SessionManager()
+        self._session_manager = SessionManager(
+            session_root=self._recording_policy.session_root
+        )
+        self._record_manager = record_manager or RecordManager(self)
         self._recipes = discover_recipes(self._config.recipe_directory)
         self._selected_recipe_id = self._config.recipe_id
         self._current_recipe: RecipeSpec | None = None
@@ -161,10 +179,14 @@ class DataCollectionSupervisor(Node):
         self.declare_parameter("recipe_directory", "")
         self.declare_parameter("startup_policy_config", "")
         self.declare_parameter("fault_policy_config", "")
+        self.declare_parameter("recording_config", "")
         self.declare_parameter("cameras_config", "")
         self.declare_parameter("trackers_config", "")
         self.declare_parameter("manus_config", "")
         self.declare_parameter("manus_user_name", "")
+        self.declare_parameter("wujihand_identity_file", "")
+        self.declare_parameter("wujihand_teleop_config", "")
+        self.declare_parameter("wujihand_use_mock_hardware", False)
         self.declare_parameter("mock_manus", False)
         self.declare_parameter("marvin_mock_grippers", False)
 
@@ -177,10 +199,20 @@ class DataCollectionSupervisor(Node):
             fault_policy_config=_optional_path(
                 self.get_parameter("fault_policy_config").value
             ),
+            recording_config=_optional_path(self.get_parameter("recording_config").value),
             cameras_config=_optional_path(self.get_parameter("cameras_config").value),
             trackers_config=_optional_path(self.get_parameter("trackers_config").value),
             manus_config=_optional_path(self.get_parameter("manus_config").value),
             manus_user_name=_optional_text(self.get_parameter("manus_user_name").value),
+            wujihand_identity_file=_optional_path(
+                self.get_parameter("wujihand_identity_file").value
+            ),
+            wujihand_teleop_config=_optional_path(
+                self.get_parameter("wujihand_teleop_config").value
+            ),
+            wujihand_use_mock_hardware=_coerce_bool(
+                self.get_parameter("wujihand_use_mock_hardware").value
+            ),
             mock_manus=_coerce_bool(self.get_parameter("mock_manus").value),
             marvin_mock_grippers=_coerce_bool(
                 self.get_parameter("marvin_mock_grippers").value
@@ -206,6 +238,127 @@ class DataCollectionSupervisor(Node):
             ),
         )
 
+    def _load_recording_policy(self) -> RecordingPolicy:
+        raw_policy = _load_yaml_map(self._config.recording_config)
+        defaults = RecordingPolicy()
+        canonical_timestamp_semantics = raw_policy.get(
+            "canonical_timestamp_semantics",
+            defaults.canonical_timestamp_semantics,
+        )
+        if not isinstance(canonical_timestamp_semantics, dict):
+            canonical_timestamp_semantics = dict(defaults.canonical_timestamp_semantics)
+        return RecordingPolicy(
+            session_root=_optional_path(str(raw_policy.get("session_root", "")))
+            or defaults.session_root,
+            bag_directory_name=str(
+                raw_policy.get("bag_directory_name", defaults.bag_directory_name)
+            ),
+            metadata_file_name=str(
+                raw_policy.get("metadata_file_name", defaults.metadata_file_name)
+            ),
+            event_log_file_name=str(
+                raw_policy.get("event_log_file_name", defaults.event_log_file_name)
+            ),
+            timing_report_file_name=str(
+                raw_policy.get("timing_report_file_name", defaults.timing_report_file_name)
+            ),
+            snapshot_recipe=_coerce_bool(
+                raw_policy.get("snapshot_recipe", defaults.snapshot_recipe)
+            ),
+            snapshot_site_config=_coerce_bool(
+                raw_policy.get("snapshot_site_config", defaults.snapshot_site_config)
+            ),
+            snapshot_startup_policy=_coerce_bool(
+                raw_policy.get("snapshot_startup_policy", defaults.snapshot_startup_policy)
+            ),
+            snapshot_fault_policy=_coerce_bool(
+                raw_policy.get("snapshot_fault_policy", defaults.snapshot_fault_policy)
+            ),
+            snapshot_time_sync_config=_coerce_bool(
+                raw_policy.get("snapshot_time_sync_config", defaults.snapshot_time_sync_config)
+            ),
+            snapshot_robot_description=_coerce_bool(
+                raw_policy.get("snapshot_robot_description", defaults.snapshot_robot_description)
+            ),
+            snapshot_camera_calibration=_coerce_bool(
+                raw_policy.get("snapshot_camera_calibration", defaults.snapshot_camera_calibration)
+            ),
+            prepare_recorder_on_start_system=_coerce_bool(
+                raw_policy.get(
+                    "prepare_recorder_on_start_system",
+                    defaults.prepare_recorder_on_start_system,
+                )
+            ),
+            use_start_paused=_coerce_bool(
+                raw_policy.get("use_start_paused", defaults.use_start_paused)
+            ),
+            recorder_node_name_prefix=str(
+                raw_policy.get(
+                    "recorder_node_name_prefix", defaults.recorder_node_name_prefix
+                )
+            ),
+            service_timeout_sec=_nonnegative_float(
+                raw_policy.get("service_timeout_sec"), defaults.service_timeout_sec
+            ),
+            stop_timeout_sec=_nonnegative_float(
+                raw_policy.get("stop_timeout_sec"), defaults.stop_timeout_sec
+            ),
+            cleanup_timeout_sec=_nonnegative_float(
+                raw_policy.get("cleanup_timeout_sec"), defaults.cleanup_timeout_sec
+            ),
+            storage_id=str(raw_policy.get("storage_id", defaults.storage_id)),
+            compression_mode=str(
+                raw_policy.get("compression_mode", defaults.compression_mode)
+            ),
+            compression_format=str(
+                raw_policy.get("compression_format", defaults.compression_format)
+            ),
+            capture_git_state=_coerce_bool(
+                raw_policy.get("capture_git_state", defaults.capture_git_state)
+            ),
+            preview_drop_policy=str(
+                raw_policy.get("preview_drop_policy", defaults.preview_drop_policy)
+            ),
+            require_time_sync_healthy=_coerce_bool(
+                raw_policy.get(
+                    "require_time_sync_healthy",
+                    defaults.require_time_sync_healthy,
+                )
+            ),
+            time_sync_mode=str(raw_policy.get("time_sync_mode", defaults.time_sync_mode)),
+            canonical_timestamp_clock=str(
+                raw_policy.get(
+                    "canonical_timestamp_clock",
+                    defaults.canonical_timestamp_clock,
+                )
+            ),
+            canonical_timestamp_semantics={
+                str(key): str(value)
+                for key, value in canonical_timestamp_semantics.items()
+            },
+            time_sync_max_offset_ns=_nonnegative_int(
+                raw_policy.get("time_sync_max_offset_ns"), defaults.time_sync_max_offset_ns
+            ),
+            joint_state_min_rate_hz=_nonnegative_float(
+                raw_policy.get("joint_state_min_rate_hz"), defaults.joint_state_min_rate_hz
+            ),
+            joint_state_max_jitter_ms=_nonnegative_float(
+                raw_policy.get("joint_state_max_jitter_ms"), defaults.joint_state_max_jitter_ms
+            ),
+            post_session_timing_validation=_coerce_bool(
+                raw_policy.get(
+                    "post_session_timing_validation",
+                    defaults.post_session_timing_validation,
+                )
+            ),
+            training_ready_requires_canonical_timestamps=_coerce_bool(
+                raw_policy.get(
+                    "training_ready_requires_canonical_timestamps",
+                    defaults.training_ready_requires_canonical_timestamps,
+                )
+            ),
+        )
+
     def _publish_state(self) -> None:
         with self._state_lock:
             if not rclpy.ok():
@@ -222,6 +375,54 @@ class DataCollectionSupervisor(Node):
             self._publisher.publish(state_snapshot)
         except Exception:
             return
+
+    def _session_record_topics(self) -> list[str]:
+        if self._current_recipe is None:
+            return []
+        if self._current_recipe.record_topics:
+            return self._record_manager.validate_record_topics(self._current_recipe.record_topics)
+
+        topics: list[str] = []
+        seen: set[str] = set()
+        for device in self._current_recipe.devices:
+            adapter = self._adapters.get(device.device_id)
+            if adapter is None:
+                continue
+            for topic in adapter.record_topics():
+                normalized = str(topic).strip()
+                if not normalized or normalized in seen:
+                    continue
+                topics.append(normalized)
+                seen.add(normalized)
+        return self._record_manager.validate_record_topics(topics)
+
+    def _now_wall_time(self) -> str:
+        return datetime.now(timezone.utc).astimezone().isoformat()
+
+    def _now_ros_time_ns(self) -> int:
+        return int(self.get_clock().now().nanoseconds)
+
+    def _time_sync_health_summary(self, topics: list[str]) -> dict[str, Any]:
+        image_topics = [topic for topic in topics if "image_raw" in topic]
+        has_any_joint_state = any(topic.endswith("/joint_states") for topic in topics)
+        has_canonical_joint_states = "/joint_states" in topics
+        healthy = bool(image_topics) and has_any_joint_state
+        summary = {
+            "healthy": healthy,
+            "mode": self._recording_policy.time_sync_mode,
+            "required": self._recording_policy.require_time_sync_healthy,
+            "camera_topics": image_topics,
+            "joint_states_present": has_any_joint_state,
+            "canonical_topics_ok": bool(image_topics) and has_canonical_joint_states,
+            "joint_state_rate_hz": self._recording_policy.joint_state_min_rate_hz,
+            "joint_state_jitter_ms": self._recording_policy.joint_state_max_jitter_ms,
+            "max_offset_ns": self._recording_policy.time_sync_max_offset_ns,
+            "checks": {
+                "pre_session": "passed" if healthy else "failed",
+                "post_session": "pending",
+            },
+        }
+        return summary
 
     def _set_system_state(self, system_state: str, summary: str) -> None:
         with self._state_lock:
@@ -266,6 +467,7 @@ class DataCollectionSupervisor(Node):
                         adapter.shutdown()
                     except Exception as exc:  # pragma: no cover - defensive cleanup path
                         self.get_logger().error(f"Adapter shutdown during reset failed: {exc}")
+        self._record_manager.reset_runtime()
         self._adapters = {}
         self._device_specs = {}
         self._devices = {}
@@ -273,6 +475,9 @@ class DataCollectionSupervisor(Node):
         self._health_monitor.reset()
         self._session_manager.end_session()
         self._runtime_manifest.clear()
+        self._current_operator_id = ""
+        self._current_site_name = ""
+        self._selected_recipe_id = self._config.recipe_id
 
     def _load_recipe_or_fail(self, recipe_id: str) -> RecipeSpec | None:
         recipe = load_recipe(self._config.recipe_directory, recipe_id)
@@ -344,6 +549,22 @@ class DataCollectionSupervisor(Node):
                 config.setdefault("config_file", str(self._config.manus_config))
             if self._config.manus_user_name is not None:
                 config.setdefault("user_name", self._config.manus_user_name)
+
+        if device.adapter == "wujihand":
+            raw_launch_arguments = config.get("launch_arguments")
+            launch_arguments = {}
+            if isinstance(raw_launch_arguments, dict):
+                launch_arguments.update(raw_launch_arguments)
+            if self._config.wujihand_use_mock_hardware:
+                launch_arguments.setdefault("use_mock_hardware", True)
+            if launch_arguments:
+                config["launch_arguments"] = launch_arguments
+            if self._config.wujihand_identity_file is not None:
+                config.setdefault("identity_file", str(self._config.wujihand_identity_file))
+            if self._config.wujihand_teleop_config is not None:
+                config.setdefault("teleop_config", str(self._config.wujihand_teleop_config))
+            if self._config.manus_user_name is not None:
+                config.setdefault("manus_user_name", self._config.manus_user_name)
 
         return DeviceSpec(
             device_id=device.device_id,
@@ -578,6 +799,198 @@ class DataCollectionSupervisor(Node):
                 rollback_failure = failure
 
         return rollback_failure
+
+    def _collect_startup_completion(
+        self,
+        future,
+        active_futures: dict,
+        started_device_ids: list[str],
+        ready_device_ids: set[str],
+    ) -> str | None:
+        active_futures.pop(future)
+        device_id, failure = future.result()
+        if failure is not None:
+            return failure
+
+        started_device_ids.append(device_id)
+        ready_device_ids.add(device_id)
+        return None
+
+    def _ready_device_ids(self) -> set[str]:
+        return {
+            device_id
+            for device_id, device_state in self._devices.items()
+            if device_state.lifecycle_state == DeviceState.LIFECYCLE_READY
+        }
+
+    def _next_startable_devices(
+        self,
+        pending_devices: list[DeviceSpec],
+        ready_device_ids: set[str],
+    ) -> list[DeviceSpec]:
+        return [
+            device
+            for device in pending_devices
+            if all(dependency_id in ready_device_ids for dependency_id in device.depends_on)
+        ]
+
+    def _validate_startup_dependencies(self) -> None:
+        assert self._current_recipe is not None
+
+        known_device_ids = {
+            device.device_id for device in self._current_recipe.devices
+        }
+        unresolved = [
+            device.device_id
+            for device in self._current_recipe.devices
+            if any(dependency_id not in known_device_ids for dependency_id in device.depends_on)
+        ]
+        if unresolved:
+            raise RuntimeError(
+                "Unable to resolve startup order; missing dependency detected among "
+                f"{unresolved}."
+            )
+
+        pending_device_ids = set(known_device_ids)
+        ready_device_ids: set[str] = set()
+        while pending_device_ids:
+            progress_ids = {
+                device.device_id
+                for device in self._current_recipe.devices
+                if device.device_id in pending_device_ids
+                and all(dependency_id in ready_device_ids for dependency_id in device.depends_on)
+            }
+            if not progress_ids:
+                unresolved_pending = [
+                    device.device_id
+                    for device in self._current_recipe.devices
+                    if device.device_id in pending_device_ids
+                ]
+                raise RuntimeError(
+                    "Unable to resolve startup order; dependency cycle detected among "
+                    f"{unresolved_pending}."
+                )
+            pending_device_ids -= progress_ids
+            ready_device_ids |= progress_ids
+
+    def _attempt_device_full_start(
+        self,
+        startup_slot_index: int,
+        device: DeviceSpec,
+        goal_handle,
+    ) -> str | None:
+        failure = self._attempt_device_bringup(startup_slot_index, device, goal_handle)
+        if failure is not None:
+            return failure
+        return self._attempt_device_start(startup_slot_index, device, goal_handle)
+
+    def _device_startup_runner(
+        self,
+        startup_slot_index: int,
+        device: DeviceSpec,
+        goal_handle,
+    ) -> tuple[str, str | None]:
+        try:
+            failure = self._attempt_device_full_start(
+                startup_slot_index,
+                device,
+                goal_handle,
+            )
+        except Exception as exc:  # pragma: no cover - defensive runtime path
+            self.get_logger().error(
+                f"Startup raised for {device.device_id}: {exc}"
+            )
+            return device.device_id, f"{device.device_id}: startup raised {exc!r}"
+        return device.device_id, failure
+
+    def _bringup_devices_dynamic(self, goal_handle) -> str | None:
+        assert self._current_recipe is not None
+
+        try:
+            self._validate_startup_dependencies()
+        except RuntimeError as exc:
+            return str(exc)
+
+        pending_devices = list(self._current_recipe.devices)
+        active_futures = {}
+        started_device_ids: list[str] = []
+        ready_device_ids = self._ready_device_ids()
+        startup_slot_index = 0
+
+        self._set_system_state(
+            SystemStates.STARTING,
+            f"Starting recipe {self._current_recipe.recipe_id} with "
+            f"{len(self._current_recipe.devices)} devices.",
+        )
+        self._publish_feedback(
+            goal_handle,
+            StartSystem,
+            f"Recipe {self._current_recipe.recipe_id} loaded, starting devices.",
+        )
+
+        max_workers = max(1, len(self._current_recipe.devices))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            while pending_devices or active_futures:
+                startable_devices = self._next_startable_devices(
+                    pending_devices,
+                    ready_device_ids,
+                )
+                for device in startable_devices:
+                    startup_slot_index += 1
+                    self._publish_feedback(
+                        goal_handle,
+                        StartSystem,
+                        f"Launching startup slot {startup_slot_index}: {device.device_id}",
+                    )
+                    future = executor.submit(
+                        self._device_startup_runner,
+                        startup_slot_index,
+                        device,
+                        goal_handle,
+                    )
+                    active_futures[future] = device
+                    pending_devices.remove(device)
+
+                if not active_futures:
+                    blocked_devices = ", ".join(device.device_id for device in pending_devices)
+                    return (
+                        "Unable to continue startup; no startable devices remain while "
+                        f"pending={blocked_devices}."
+                    )
+
+                done_futures, _ = wait(active_futures.keys(), return_when=FIRST_COMPLETED)
+                startup_failure = None
+                for future in done_futures:
+                    failure = self._collect_startup_completion(
+                        future,
+                        active_futures,
+                        started_device_ids,
+                        ready_device_ids,
+                    )
+                    if failure is not None and startup_failure is None:
+                        startup_failure = failure
+
+                if startup_failure is None:
+                    continue
+
+                while active_futures:
+                    done_futures, _ = wait(active_futures.keys(), return_when=FIRST_COMPLETED)
+                    for future in done_futures:
+                        failure = self._collect_startup_completion(
+                            future,
+                            active_futures,
+                            started_device_ids,
+                            ready_device_ids,
+                        )
+                        if failure is not None and startup_failure is None:
+                            startup_failure = failure
+
+                rollback_failure = self._rollback_started_devices(started_device_ids)
+                if rollback_failure is not None:
+                    return f"{startup_failure}\nRollback failure: {rollback_failure}"
+                return startup_failure
+
+        return None
 
     def _shutdown_device_ids_parallel(
         self,
@@ -931,41 +1344,7 @@ class DataCollectionSupervisor(Node):
         return None
 
     def _bringup_devices(self, goal_handle) -> str | None:
-        assert self._current_recipe is not None
-        started_device_ids: list[str] = []
-        try:
-            startup_layers = self._startup_layers()
-        except RuntimeError as exc:
-            return str(exc)
-
-        self._set_system_state(
-            SystemStates.STARTING,
-            f"Starting recipe {self._current_recipe.recipe_id} with "
-            f"{len(self._current_recipe.devices)} devices.",
-        )
-        self._publish_feedback(
-            goal_handle,
-            StartSystem,
-            f"Recipe {self._current_recipe.recipe_id} loaded, starting devices.",
-        )
-
-        for layer_index, layer in enumerate(startup_layers, start=1):
-            layer_name = ", ".join(device.device_id for device in layer)
-            self._publish_feedback(
-                goal_handle,
-                StartSystem,
-                f"Launching startup layer {layer_index}: {layer_name}",
-            )
-            failure = self._attempt_layer_start(layer_index, layer, goal_handle)
-            if failure is not None:
-                rollback_failure = self._rollback_started_devices(started_device_ids)
-                if rollback_failure is not None:
-                    return f"{failure}\nRollback failure: {rollback_failure}"
-                return failure
-
-            started_device_ids.extend(device.device_id for device in layer)
-
-        return None
+        return self._bringup_devices_dynamic(goal_handle)
 
     def _run_home_sequence(self) -> tuple[AdapterResult | None, str]:
         assert self._current_recipe is not None
@@ -1079,20 +1458,34 @@ class DataCollectionSupervisor(Node):
         if session is None:
             return None, "No active session."
 
-        failure = self._run_after_session()
-        if failure is not None:
-            return None, failure
-
+        try:
+            stop_summary = self._record_manager.stop_recording(
+                active_session=session,
+                recording_policy=self._recording_policy,
+                event_log_entries=self._event_log.snapshot(),
+            )
+        except Exception as exc:
+            return None, str(exc)
+        after_failure = self._run_after_session()
+        if after_failure is not None:
+            return None, after_failure
         disarm_failure = self._run_disarm_sequence()
         if disarm_failure is not None:
             return None, disarm_failure
 
         ended_session = self._session_manager.end_session()
-        self._set_system_state(
-            SystemStates.READY,
-            f"Session {session.session_id} stopped and system returned to READY.",
+        if stop_summary.get("success", False):
+            self._set_system_state(
+                SystemStates.READY,
+                f"Session {session.session_id} stopped and system returned to READY.",
+            )
+            return ended_session, None
+
+        warning = (
+            f"Session {session.session_id} stopped with preserved incomplete artifacts."
         )
-        return ended_session, None
+        self._set_system_state(SystemStates.READY, warning)
+        return ended_session, warning
 
     def _reset_after_startup_failure(self, failure: str) -> None:
         failure_head = failure.splitlines()[0].strip() if failure else "unknown startup failure"
@@ -1151,6 +1544,24 @@ class DataCollectionSupervisor(Node):
             )
             return result
 
+        if self._recording_policy.require_time_sync_healthy:
+            try:
+                session_topics = self._session_record_topics()
+            except Exception as exc:
+                self._reset_after_startup_failure(str(exc))
+                goal_handle.abort()
+                result.success = False
+                result.message = str(exc)
+                return result
+            sync_summary = self._time_sync_health_summary(session_topics)
+            if not bool(sync_summary.get("healthy", False)):
+                failure = "Timing prerequisites are not satisfied for the configured recording contract."
+                self._reset_after_startup_failure(failure)
+                goal_handle.abort()
+                result.success = False
+                result.message = failure
+                return result
+
         self._set_system_state(
             SystemStates.READY,
             f"Recipe {recipe.recipe_id} is READY. "
@@ -1186,8 +1597,13 @@ class DataCollectionSupervisor(Node):
         )
 
         if self._state.system_state == SystemStates.RECORDING:
+            active_session = self._session_manager.active_session
+            if active_session is not None:
+                active_session.session_stop_ros_time_ns = self._now_ros_time_ns()
+                active_session.session_stop_wall_time = self._now_wall_time()
+                active_session.session_stop_monotonic_sec = time.monotonic()
             session, stop_failure = self._stop_active_session_runtime()
-            if stop_failure is not None:
+            if stop_failure is not None and session is None:
                 self._set_fault(stop_failure)
                 goal_handle.abort()
                 result.success = False
@@ -1240,37 +1656,102 @@ class DataCollectionSupervisor(Node):
             result.message = "No active recipe. StartSystem must succeed first."
             return result
 
-        if self._state.system_state == SystemStates.READY:
-            self._publish_feedback(goal_handle, StartSession, "Arming supported devices.")
-            arm_failure = self._run_arm_sequence()
-            if arm_failure is not None:
-                self._set_fault(arm_failure)
+        armed_this_session = False
+        before_session_ran = False
+        session: ActiveSession | None = None
+        try:
+            if self._state.system_state == SystemStates.READY:
+                self._publish_feedback(goal_handle, StartSession, "Arming supported devices.")
+                arm_failure = self._run_arm_sequence()
+                if arm_failure is not None:
+                    self._set_fault(arm_failure)
+                    goal_handle.abort()
+                    result.success = False
+                    result.session_id = ""
+                    result.message = arm_failure
+                    return result
+                armed_this_session = True
+                self._set_system_state(
+                    SystemStates.ARMED,
+                    "System armed and ready to enter RECORDING.",
+                )
+
+            self._publish_feedback(goal_handle, StartSession, "Running before_session hooks.")
+            before_session_failure = self._run_before_session()
+            if before_session_failure is not None:
+                self._set_fault(before_session_failure)
                 goal_handle.abort()
                 result.success = False
                 result.session_id = ""
-                result.message = arm_failure
+                result.message = before_session_failure
                 return result
-            self._set_system_state(
-                SystemStates.ARMED,
-                "System armed and ready to enter RECORDING.",
-            )
+            before_session_ran = True
 
-        self._publish_feedback(goal_handle, StartSession, "Running before_session hooks.")
-        before_session_failure = self._run_before_session()
-        if before_session_failure is not None:
-            self._set_fault(before_session_failure)
+            operator_id = request.operator_id or self._current_operator_id or "unknown"
+            session = self._session_manager.begin_session(
+                recipe_id=self._current_recipe.recipe_id,
+                operator_id=operator_id,
+                session_tag=request.session_tag,
+                site_name=self._current_site_name,
+            )
+            record_topics = self._session_record_topics()
+            sync_summary = self._time_sync_health_summary(record_topics)
+            if self._recording_policy.require_time_sync_healthy and not bool(
+                sync_summary.get("healthy", False)
+            ):
+                raise RuntimeError("Pre-session synchronization health checks failed.")
+
+            self._record_manager.prepare_session(
+                active_session=session,
+                recipe=self._current_recipe,
+                supervisor_config=self._config,
+                recording_policy=self._recording_policy,
+                normalized_topics=record_topics,
+                event_log_snapshot_source=self._event_log.snapshot,
+            )
+            session.time_sync_summary = dict(sync_summary)
+            session.record_topics = list(record_topics)
+            session.session_start_ros_time_ns = self._now_ros_time_ns()
+            session.session_start_wall_time = self._now_wall_time()
+            session.session_start_monotonic_sec = time.monotonic()
+            self._record_manager.start_recording(
+                active_session=session,
+                recording_policy=self._recording_policy,
+                sync_health_summary=sync_summary,
+            )
+        except Exception as exc:
+            failure_message = str(exc)
+            if session is not None:
+                try:
+                    self._record_manager.abort_recording(
+                        active_session=session,
+                        recording_policy=self._recording_policy,
+                        message=failure_message,
+                        event_log_entries=self._event_log.snapshot(),
+                    )
+                except Exception:
+                    pass
+                self._session_manager.end_session()
+            rollback_failure = None
+            if before_session_ran:
+                rollback_failure = self._run_after_session()
+            if rollback_failure is None and armed_this_session:
+                rollback_failure = self._run_disarm_sequence()
+            if rollback_failure is not None:
+                self._set_fault(rollback_failure)
+                goal_handle.abort()
+                result.success = False
+                result.session_id = ""
+                result.message = f"{failure_message}\nRollback failure: {rollback_failure}"
+                return result
+            self._set_system_state(SystemStates.READY, f"StartSession failed: {failure_message}")
             goal_handle.abort()
             result.success = False
             result.session_id = ""
-            result.message = before_session_failure
+            result.message = failure_message
             return result
 
-        operator_id = request.operator_id or self._current_operator_id or "unknown"
-        session = self._session_manager.begin_session(
-            recipe_id=self._current_recipe.recipe_id,
-            operator_id=operator_id,
-            session_tag=request.session_tag,
-        )
+        assert session is not None
         self._set_system_state(
             SystemStates.RECORDING,
             f"Session {session.session_id} started for recipe {session.recipe_id}.",
@@ -1299,6 +1780,12 @@ class DataCollectionSupervisor(Node):
             result.message = blocked_reason
             return result
 
+        active_session = self._session_manager.active_session
+        if active_session is not None:
+            active_session.session_stop_ros_time_ns = self._now_ros_time_ns()
+            active_session.session_stop_wall_time = self._now_wall_time()
+            active_session.session_stop_monotonic_sec = time.monotonic()
+
         self._publish_feedback(
             goal_handle,
             StopSession,
@@ -1306,11 +1793,18 @@ class DataCollectionSupervisor(Node):
         )
 
         session, failure = self._stop_active_session_runtime()
-        if failure is not None:
+        if failure is not None and session is None:
             self._set_fault(failure)
             goal_handle.abort()
             result.success = False
             result.session_id = ""
+            result.message = failure
+            return result
+
+        if failure is not None:
+            goal_handle.abort()
+            result.success = False
+            result.session_id = "" if session is None else session.session_id
             result.message = failure
             return result
 

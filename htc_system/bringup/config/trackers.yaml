@@ -3,6 +3,8 @@ tracker_publisher:
     coordinate_transform: true
     publish_rate: 100.0  # Hz
     parent_frame: "world"  # TF parent frame for all trackers
+    pose_prediction_ms: 0.0
+      # SteamVR pose prediction horizon in milliseconds
 
     # Tracker definitions (parallel arrays, keep indices aligned).
     # Run tracker_publisher without config first to discover serial numbers.
@@ -46,13 +48,31 @@ tracker_publisher:
         position:    [0.0, 0.0, 0.12]
         orientation: [0.0, 0.0, 0.0, 1.0]
 
+      # This parameter is for installation on the wrist.
+      # left_wrist:
+      #   position:    [0.04, 0.0, 0.02]
+      #   orientation: [0.0, 0.0, 0.0, 1.0]
+
+      # right_wrist:
+      #   position:    [-0.04, 0.0, 0.02]
+      #   orientation: [0.0, 0.0, 0.0, 1.0] 
+
+      # This parameter is for installation on maus glove.
+      # left_wrist:
+      #   position:    [0.0, 0.03, 0.06]
+      #   orientation: [0.0, 0.0, 0.0, 1.0]
+
+      # right_wrist:
+      #   position:    [0.0, 0.03, 0.06]
+      #   orientation: [0.0, 0.0, 0.0, 1.0] 
+
       left_wrist:
-        position:    [0.04, 0.0, 0.02]
-        orientation: [0.0, 0.0, 0.0, 1.0]
+        position:    [0.04242641, 0.0, 0.01757359]
+        orientation: [0.0, -0.38268343, 0.0, 0.92387953]
 
       right_wrist:
-        position:    [-0.04, 0.0, 0.02]
-        orientation: [0.0, 0.0, 0.0, 1.0] 
+        position:    [-0.04242641, 0.0, 0.01757359]
+        orientation: [0.0, 0.38268343, 0.0, 0.92387953]
 
       left_arm:
         position:    [0.0, 0.0, 0.05]

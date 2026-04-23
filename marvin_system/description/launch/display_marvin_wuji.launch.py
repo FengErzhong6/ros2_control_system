@@ -172,7 +172,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "left_hand_mount_rpy",
-                default_value="1.5708 -1.5708 0",
+                default_value="1.5708 -0.7854 0",
                 description="Link7_L -> hand_mount_L rotation",
             ),
             DeclareLaunchArgument(
@@ -192,7 +192,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "right_hand_mount_rpy",
-                default_value="1.5708 -1.5708 0",
+                default_value="1.5708 -2.3562 0",
                 description="Link7_R -> hand_mount_R rotation",
             ),
             DeclareLaunchArgument(

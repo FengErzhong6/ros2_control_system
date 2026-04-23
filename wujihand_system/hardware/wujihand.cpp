@@ -181,7 +181,8 @@ void WujiHandHardware::io_thread_main()
                             break;
                         }
 
-                        // Initialize caches to current position and hold.
+                        // Initialize state caches to current position and command caches to
+                        // the configured startup pose when provided.
                         const auto &actual_pos = controller_->get_joint_actual_position();
                         double hold_target[kFingerCount][kJointCount] = {};
 
@@ -196,12 +197,16 @@ void WujiHandHardware::io_thread_main()
                                 const double pos = actual_pos[f][j].load(std::memory_order_relaxed);
                                 const size_t idx = flat_index(f, j);
 
+                                const double cmd = std::isfinite(initial_command_[idx])
+                                    ? initial_command_[idx]
+                                    : pos;
+
                                 state_frames_[0].data[idx] = pos;
                                 state_frames_[1].data[idx] = pos;
-                                cmd_frames_[0].data[idx] = pos;
-                                cmd_frames_[1].data[idx] = pos;
+                                cmd_frames_[0].data[idx] = cmd;
+                                cmd_frames_[1].data[idx] = cmd;
 
-                                hold_target[f][j] = pos;
+                                hold_target[f][j] = cmd;
                             }
                         }
                         state_frames_[0].frame_id = 0;
@@ -406,6 +411,13 @@ hardware_interface::CallbackReturn WujiHandHardware::on_init(
         return hardware_interface::CallbackReturn::ERROR;
     }
 
+    const double neg_inf = -std::numeric_limits<double>::infinity();
+    const double pos_inf = std::numeric_limits<double>::infinity();
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    joint_min_.fill(neg_inf);
+    joint_max_.fill(pos_inf);
+    initial_command_.fill(nan);
+
     bool all_have_velocity = true;
     bool any_have_velocity = false;
     for(size_t index = 0; index < info_.joints.size(); ++index){
@@ -427,15 +439,33 @@ hardware_interface::CallbackReturn WujiHandHardware::on_init(
             return hardware_interface::CallbackReturn::ERROR;
         }
 
-        if(joint.command_interfaces[0].name != hardware_interface::HW_IF_POSITION){
+        const auto &command_interface = joint.command_interfaces[0];
+        if(command_interface.name != hardware_interface::HW_IF_POSITION){
             RCLCPP_FATAL(
                 get_logger(),
                 "Joint '%s' has '%s' command interface. '%s' expected.",
                 joint.name.c_str(),
-                joint.command_interfaces[0].name.c_str(),
+                command_interface.name.c_str(),
                 hardware_interface::HW_IF_POSITION
             );
             return hardware_interface::CallbackReturn::ERROR;
+        }
+
+        const auto min_it = command_interface.parameters.find("min");
+        if(min_it != command_interface.parameters.end()){
+            joint_min_[index] = std::stod(min_it->second);
+        }
+        const auto max_it = command_interface.parameters.find("max");
+        if(max_it != command_interface.parameters.end()){
+            joint_max_[index] = std::stod(max_it->second);
+        }
+        const auto initial_it = command_interface.parameters.find("initial_value");
+        if(initial_it != command_interface.parameters.end()){
+            initial_command_[index] = std::clamp(
+                std::stod(initial_it->second),
+                joint_min_[index],
+                joint_max_[index]
+            );
         }
 
         bool has_position = false;
@@ -510,12 +540,14 @@ hardware_interface::CallbackReturn WujiHandHardware::on_activate(
 
     // Align command/state interfaces to the cached initial positions.
     const uint8_t sidx = state_active_.load(std::memory_order_acquire);
+    const uint8_t cidx = cmd_active_.load(std::memory_order_acquire);
     for(size_t f = 0; f < kFingerCount; ++f){
         for(size_t j = 0; j < kJointCount; ++j){
             const size_t flat = flat_index(f, j);
             const double pos = state_frames_[sidx].data[flat];
+            const double cmd = cmd_frames_[cidx].data[flat];
             set_state(position_interface_names_[flat], pos);
-            set_command(position_interface_names_[flat], pos);
+            set_command(position_interface_names_[flat], cmd);
 
             last_position_[flat] = pos;
             if(has_velocity_state_){

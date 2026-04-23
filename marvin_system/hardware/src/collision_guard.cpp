@@ -34,10 +34,10 @@ const std::array<const char *, marvin_system::CollisionGuard::kGripperCount> kGr
     {"ee_L", "ee_R"}};
 const std::array<const char *, marvin_system::CollisionGuard::kGripperCount> kGripperObjectIds{
     {"collision_guard_gripper_L", "collision_guard_gripper_R"}};
-const std::array<std::array<const char *, 5>, marvin_system::CollisionGuard::kGripperCount>
+const std::array<std::array<const char *, 8>, marvin_system::CollisionGuard::kGripperCount>
     kGripperTouchLinks{{
-        {{"Link7_L", "ee_L", "gripper_L_link", "left_finger_L_link", "right_finger_L_link"}},
-        {{"Link7_R", "ee_R", "gripper_R_link", "left_finger_R_link", "right_finger_R_link"}},
+        {{"Link7_L", "ee_L", "gripper_L_link", "left_finger_L_link", "right_finger_L_link", "hand_mount_L", "left_palm_link", "left_finger1_link1"}},
+        {{"Link7_R", "ee_R", "gripper_R_link", "left_finger_R_link", "right_finger_R_link", "hand_mount_R", "right_palm_link", "right_finger1_link1"}},
     }};
 
 std::string param_str(
@@ -562,7 +562,9 @@ CollisionGuard::Evaluation CollisionGuard::evaluate_motion(
                 attached.object.primitives.push_back(primitive);
                 attached.object.primitive_poses.push_back(pose);
                 for (const auto *touch_link : kGripperTouchLinks[index]) {
-                    attached.touch_links.emplace_back(touch_link);
+                    if (impl_->robot_model_ && impl_->robot_model_->hasLinkModel(touch_link)) {
+                        attached.touch_links.emplace_back(touch_link);
+                    }
                 }
             }
 

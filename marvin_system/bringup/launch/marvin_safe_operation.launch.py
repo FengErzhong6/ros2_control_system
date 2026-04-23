@@ -42,6 +42,20 @@ def generate_launch_description():
             description="Composite URDF/XACRO file to load.",
         ),
         DeclareLaunchArgument(
+            "collision_description_package", default_value="marvin_system",
+            description="Package with the collision-only URDF/XACRO file for MoveIt and motion_server.",
+        ),
+        DeclareLaunchArgument(
+            "collision_description_file",
+            default_value="description/urdf/marvin_dual.urdf",
+            description="Collision-only URDF/XACRO file for MoveIt and motion_server.",
+        ),
+        DeclareLaunchArgument(
+            "collision_srdf_file",
+            default_value="description/srdf/marvin_dual.srdf",
+            description="SRDF file paired with the collision-only model.",
+        ),
+        DeclareLaunchArgument(
             "use_gripper_L", default_value="true",
             description="Enable OmniPicker gripper on left arm.",
         ),
@@ -122,6 +136,9 @@ def launch_setup(context):
 
     pkg = LaunchConfiguration("description_package").perform(context)
     desc_file = LaunchConfiguration("description_file").perform(context)
+    collision_pkg = LaunchConfiguration("collision_description_package").perform(context)
+    collision_desc_file = LaunchConfiguration("collision_description_file").perform(context)
+    collision_srdf_file = LaunchConfiguration("collision_srdf_file").perform(context)
     grip_L = LaunchConfiguration("use_gripper_L").perform(context).lower() == "true"
     grip_R = LaunchConfiguration("use_gripper_R").perform(context).lower() == "true"
     left_xyz = LaunchConfiguration("left_xyz")
@@ -162,6 +179,19 @@ def launch_setup(context):
         "robot_description": ParameterValue(Command(xacro_cmd), value_type=str)
     }
 
+    collision_xacro_cmd = [
+        PathJoinSubstitution([FindExecutable(name="xacro")]),
+        " ",
+        PathJoinSubstitution([FindPackageShare(collision_pkg), collision_desc_file]),
+        ' left_xyz:="', left_xyz, '"',
+        ' left_rpy:="', left_rpy, '"',
+        ' right_xyz:="', right_xyz, '"',
+        ' right_rpy:="', right_rpy, '"',
+    ]
+    collision_robot_description = {
+        "robot_description": ParameterValue(Command(collision_xacro_cmd), value_type=str)
+    }
+
     controllers_yaml = PathJoinSubstitution(
         [FindPackageShare("marvin_system"), "bringup", "config", "marvin_dual_trajectory_controllers.yaml"]
     )
@@ -175,7 +205,7 @@ def launch_setup(context):
         [FindPackageShare("marvin_system"), "description", "rviz", "marvin_dual.rviz"]
     )
     pkg_share = get_package_share_directory("marvin_system")
-    srdf_path = Path(pkg_share) / "description" / "srdf" / "marvin_dual.srdf"
+    srdf_path = Path(get_package_share_directory(collision_pkg)) / collision_srdf_file
     kinematics_path = Path(pkg_share) / "motion" / "config" / "kinematics.yaml"
     joint_limits_path = Path(pkg_share) / "motion" / "config" / "joint_limits.yaml"
     planning_pipelines_path = Path(pkg_share) / "motion" / "config" / "planning_pipelines.yaml"
@@ -183,7 +213,7 @@ def launch_setup(context):
     moveit_controllers_path = Path(pkg_share) / "motion" / "config" / "moveit_controllers.yaml"
 
     move_group_params = [
-        robot_description,
+        collision_robot_description,
         {"robot_description_semantic": load_text_file(srdf_path)},
         {"robot_description_kinematics": load_yaml_file(kinematics_path)},
         {"robot_description_planning": load_yaml_file(joint_limits_path)},
@@ -203,11 +233,14 @@ def launch_setup(context):
         },
     ]
 
+    joint_state_remappings = [("/joint_states", "/marvin/joint_states")]
+
     ros2_control_node = Node(
         package="controller_manager",
         executable="ros2_control_node",
         output="both",
         parameters=[robot_description, controllers_yaml],
+        remappings=joint_state_remappings,
     )
 
     robot_state_publisher_node = Node(
@@ -215,6 +248,7 @@ def launch_setup(context):
         executable="robot_state_publisher",
         output="both",
         parameters=[robot_description],
+        remappings=joint_state_remappings,
     )
 
     move_group_node = Node(
@@ -222,6 +256,7 @@ def launch_setup(context):
         executable="move_group_wrapper.py",
         output="screen",
         parameters=move_group_params,
+        remappings=joint_state_remappings,
         sigterm_timeout="15.0",
     )
 
@@ -230,7 +265,9 @@ def launch_setup(context):
         executable="motion_server",
         name="marvin_motion_server",
         output="screen",
+        remappings=joint_state_remappings,
         parameters=[
+            collision_robot_description,
             home_poses_file,
             cell_scene_file,
             {"robot_description_semantic": load_text_file(srdf_path)},
@@ -264,6 +301,7 @@ def launch_setup(context):
                 "controller_manager_list_service": "/controller_manager/list_controllers",
                 "trajectory_controller_name": "dual_arm_trajectory_controller",
                 "primary_controller_name": "",
+                "joint_state_topic": "/marvin/joint_states",
                 "collision_guard_service_name": collision_guard_service_name,
                 "control_profile_service_name": control_profile_service_name,
                 "teleop_use_joint_impedance": False,

@@ -12,6 +12,7 @@ from launch.actions import (
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import EnvironmentVariable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -53,11 +54,17 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("use_pipeline", default_value="true"),
             DeclareLaunchArgument("start_manus", default_value="false"),
             DeclareLaunchArgument("start_wujihand", default_value="false"),
+            DeclareLaunchArgument("start_left", default_value="true"),
+            DeclareLaunchArgument("start_right", default_value="true"),
             DeclareLaunchArgument("use_mock_hardware", default_value="false"),
             DeclareLaunchArgument("activate_forward_controller", default_value="true"),
             DeclareLaunchArgument("use_dual_gui", default_value="false"),
             DeclareLaunchArgument("manus_mock", default_value="false"),
             DeclareLaunchArgument("enable_rviz", default_value="false"),
+            DeclareLaunchArgument("pipeline_namespace", default_value=""),
+            DeclareLaunchArgument("pipeline_start_enabled", default_value="false"),
+            DeclareLaunchArgument("left_namespace", default_value="left"),
+            DeclareLaunchArgument("right_namespace", default_value="right"),
             DeclareLaunchArgument("rviz_config", default_value=rviz_default_config),
             DeclareLaunchArgument("left_mount_xyz", default_value="0 0.25 0"),
             DeclareLaunchArgument("left_mount_rpy", default_value="0 0 0"),
@@ -83,6 +90,8 @@ def launch_setup(context):
     use_pipeline = as_bool(LaunchConfiguration("use_pipeline").perform(context))
     start_manus = as_bool(LaunchConfiguration("start_manus").perform(context))
     start_wujihand = as_bool(LaunchConfiguration("start_wujihand").perform(context))
+    start_left = as_bool(LaunchConfiguration("start_left").perform(context))
+    start_right = as_bool(LaunchConfiguration("start_right").perform(context))
     use_mock_hardware = as_bool(LaunchConfiguration("use_mock_hardware").perform(context))
     activate_forward_controller = as_bool(
         LaunchConfiguration("activate_forward_controller").perform(context)
@@ -122,6 +131,8 @@ def launch_setup(context):
         f"start_manus={start_manus}, "
         f"start_wujihand={start_wujihand}, "
         f"use_pipeline={use_pipeline}, "
+        f"start_left={start_left}, "
+        f"start_right={start_right}, "
         f"use_mock_hardware={use_mock_hardware}, "
         f"manus_mock={manus_mock}, "
         f"use_dual_gui={use_dual_gui}, "
@@ -134,10 +145,14 @@ def launch_setup(context):
     manus_user_name = LaunchConfiguration("manus_user_name")
     identity_file = LaunchConfiguration("identity_file")
     rviz_config = LaunchConfiguration("rviz_config")
+    pipeline_namespace = LaunchConfiguration("pipeline_namespace")
+    pipeline_start_enabled = LaunchConfiguration("pipeline_start_enabled")
     left_mount_xyz = LaunchConfiguration("left_mount_xyz")
     left_mount_rpy = LaunchConfiguration("left_mount_rpy")
     right_mount_xyz = LaunchConfiguration("right_mount_xyz")
     right_mount_rpy = LaunchConfiguration("right_mount_rpy")
+    left_namespace = LaunchConfiguration("left_namespace")
+    right_namespace = LaunchConfiguration("right_namespace")
 
     actions = [LogInfo(msg=summary)]
 
@@ -162,10 +177,14 @@ def launch_setup(context):
             "use_mock_hardware": as_launch_bool(use_mock_hardware),
             "identity_file": identity_file,
             "activate_forward_controller": as_launch_bool(activate_forward_controller),
+            "start_left": as_launch_bool(start_left),
+            "start_right": as_launch_bool(start_right),
             "left_mount_xyz": left_mount_xyz,
             "left_mount_rpy": left_mount_rpy,
             "right_mount_xyz": right_mount_xyz,
             "right_mount_rpy": right_mount_rpy,
+            "left_namespace": left_namespace,
+            "right_namespace": right_namespace,
         }
         if use_dual_gui:
             dual_launch_arguments["use_dual_gui"] = "true"
@@ -186,9 +205,18 @@ def launch_setup(context):
             Node(
                 package="wujihand_system",
                 executable="wujihand_manus_pipeline.py",
+                namespace=pipeline_namespace,
                 name="wujihand_manus_pipeline",
                 output="screen",
                 arguments=["-c", teleop_config],
+                parameters=[
+                    {
+                        "start_enabled": ParameterValue(
+                            pipeline_start_enabled,
+                            value_type=bool,
+                        )
+                    }
+                ],
             )
         )
     else:

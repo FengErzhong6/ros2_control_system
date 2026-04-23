@@ -28,8 +28,28 @@ def generate_launch_description():
             description="Composite URDF/XACRO file to load.",
         ),
         DeclareLaunchArgument(
+            "use_mock_hardware", default_value="false",
+            description="Use mock hardware instead of the real Marvin robot.",
+        ),
+        DeclareLaunchArgument(
             "use_gripper_L", default_value="false",
             description="Enable OmniPicker gripper on left arm.",
+        ),
+        DeclareLaunchArgument(
+            "marvin_ip", default_value="192.168.1.190",
+            description="IP address for the real Marvin hardware connection.",
+        ),
+        DeclareLaunchArgument(
+            "connect_timeout_ms", default_value="1500",
+            description="Hardware connection timeout in milliseconds.",
+        ),
+        DeclareLaunchArgument(
+            "state_timeout_ms", default_value="8000",
+            description="Hardware state timeout in milliseconds.",
+        ),
+        DeclareLaunchArgument(
+            "profile_switch_timeout_ms", default_value="5000",
+            description="Profile switch timeout in milliseconds.",
         ),
         DeclareLaunchArgument(
             "use_gripper_R", default_value="false",
@@ -65,8 +85,13 @@ def launch_setup(context):
 
     pkg = LaunchConfiguration("description_package").perform(context)
     desc_file = LaunchConfiguration("description_file").perform(context)
+    use_mock_hardware = LaunchConfiguration("use_mock_hardware")
     grip_L = LaunchConfiguration("use_gripper_L").perform(context).lower() == "true"
     grip_R = LaunchConfiguration("use_gripper_R").perform(context).lower() == "true"
+    marvin_ip = LaunchConfiguration("marvin_ip")
+    connect_timeout_ms = LaunchConfiguration("connect_timeout_ms")
+    state_timeout_ms = LaunchConfiguration("state_timeout_ms")
+    profile_switch_timeout_ms = LaunchConfiguration("profile_switch_timeout_ms")
     left_xyz = LaunchConfiguration("left_xyz")
     left_rpy = LaunchConfiguration("left_rpy")
     right_xyz = LaunchConfiguration("right_xyz")
@@ -86,6 +111,11 @@ def launch_setup(context):
         ' left_rpy:="', left_rpy, '"',
         ' right_xyz:="', right_xyz, '"',
         ' right_rpy:="', right_rpy, '"',
+        ' use_mock_hardware:="', use_mock_hardware, '"',
+        ' marvin_ip:="', marvin_ip, '"',
+        ' connect_timeout_ms:="', connect_timeout_ms, '"',
+        ' state_timeout_ms:="', state_timeout_ms, '"',
+        ' profile_switch_timeout_ms:="', profile_switch_timeout_ms, '"',
         f" use_gripper_L:={'true' if grip_L else 'false'}",
         f" use_gripper_R:={'true' if grip_R else 'false'}",
         ' collision_guard_enabled:="', collision_guard_enabled, '"',

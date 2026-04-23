@@ -268,6 +268,20 @@ def generate_launch_description():
     )
     declared_arguments.append(
         DeclareLaunchArgument(
+            "start_left",
+            default_value="true",
+            description="Launch the left-hand stack.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "start_right",
+            default_value="true",
+            description="Launch the right-hand stack.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
             "left_controllers_file",
             default_value="config/wujihand_left_controllers.yaml",
             description="Controller YAML for the left hand.",
@@ -353,6 +367,8 @@ def launch_setup(context):
     right_controllers_file = resolve_config_path(
         LaunchConfiguration("right_controllers_file").perform(context).strip()
     )
+    start_left_value = LaunchConfiguration("start_left").perform(context).strip().lower()
+    start_right_value = LaunchConfiguration("start_right").perform(context).strip().lower()
     use_left_gui_value = LaunchConfiguration("use_left_gui").perform(context).strip().lower()
     use_right_gui_value = LaunchConfiguration("use_right_gui").perform(context).strip().lower()
     left_mount_xyz = LaunchConfiguration("left_mount_xyz").perform(context).strip()
@@ -364,6 +380,8 @@ def launch_setup(context):
     )
     use_dual_gui_value = LaunchConfiguration("use_dual_gui").perform(context).strip().lower()
 
+    start_left = start_left_value in ("1", "true", "yes", "on")
+    start_right = start_right_value in ("1", "true", "yes", "on")
     use_left_gui = use_left_gui_value in ("1", "true", "yes", "on")
     use_right_gui = use_right_gui_value in ("1", "true", "yes", "on")
     activate_forward_controller = activate_forward_controller_value in (
@@ -381,44 +399,47 @@ def launch_setup(context):
 
     resolved_flag_summary = (
         "Resolved dual launch flags: "
+        f"start_left={start_left}, "
+        f"start_right={start_right}, "
         f"use_dual_gui={use_dual_gui}, "
         f"use_left_gui={use_left_gui}, "
         f"use_right_gui={use_right_gui}, "
         f"activate_forward_controller={activate_forward_controller}"
     )
 
-    left_identity = load_hand_identity(identity_file, "left")
-    right_identity = load_hand_identity(identity_file, "right")
-
     actions = [LogInfo(msg=resolved_flag_summary)]
-    actions.extend(
-        launch_hand_stack(
-            side="left",
-            namespace=left_namespace,
-            description_file="urdf/wujihand-left.urdf.xacro",
-            controllers_file=left_controllers_file,
-            usb_serial_number=left_identity.get("usb_serial_number", ""),
-            expected_handedness=left_identity.get("expected_handedness", ""),
-            use_mock_hardware=use_mock_hardware,
-            start_gui=use_left_gui,
-            start_forward_controller_active=activate_forward_controller,
-            mount_xyz=left_mount_xyz,
-            mount_rpy=left_mount_rpy,
+    if start_left:
+        left_identity = load_hand_identity(identity_file, "left")
+        actions.extend(
+            launch_hand_stack(
+                side="left",
+                namespace=left_namespace,
+                description_file="urdf/wujihand-left.urdf.xacro",
+                controllers_file=left_controllers_file,
+                usb_serial_number=left_identity.get("usb_serial_number", ""),
+                expected_handedness=left_identity.get("expected_handedness", ""),
+                use_mock_hardware=use_mock_hardware,
+                start_gui=use_left_gui,
+                start_forward_controller_active=activate_forward_controller,
+                mount_xyz=left_mount_xyz,
+                mount_rpy=left_mount_rpy,
+            )
         )
-    )
-    actions.extend(
-        launch_hand_stack(
-            side="right",
-            namespace=right_namespace,
-            description_file="urdf/wujihand-right.urdf.xacro",
-            controllers_file=right_controllers_file,
-            usb_serial_number=right_identity.get("usb_serial_number", ""),
-            expected_handedness=right_identity.get("expected_handedness", ""),
-            use_mock_hardware=use_mock_hardware,
-            start_gui=use_right_gui,
-            start_forward_controller_active=activate_forward_controller,
-            mount_xyz=right_mount_xyz,
-            mount_rpy=right_mount_rpy,
+    if start_right:
+        right_identity = load_hand_identity(identity_file, "right")
+        actions.extend(
+            launch_hand_stack(
+                side="right",
+                namespace=right_namespace,
+                description_file="urdf/wujihand-right.urdf.xacro",
+                controllers_file=right_controllers_file,
+                usb_serial_number=right_identity.get("usb_serial_number", ""),
+                expected_handedness=right_identity.get("expected_handedness", ""),
+                use_mock_hardware=use_mock_hardware,
+                start_gui=use_right_gui,
+                start_forward_controller_active=activate_forward_controller,
+                mount_xyz=right_mount_xyz,
+                mount_rpy=right_mount_rpy,
+            )
         )
-    )
     return actions

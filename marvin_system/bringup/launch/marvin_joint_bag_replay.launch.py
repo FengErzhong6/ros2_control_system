@@ -180,11 +180,14 @@ def launch_setup(context):
     if grip_R:
         joint_names.append("gripper_R")
 
+    joint_state_remappings = [("/joint_states", "/marvin/joint_states")]
+
     ros2_control_node = Node(
         package="controller_manager",
         executable="ros2_control_node",
         output="both",
         parameters=[robot_description, controllers_yaml, trajectory_controllers_yaml],
+        remappings=joint_state_remappings,
     )
 
     robot_state_publisher_node = Node(
@@ -192,6 +195,7 @@ def launch_setup(context):
         executable="robot_state_publisher",
         output="both",
         parameters=[robot_description],
+        remappings=joint_state_remappings,
     )
 
     pkg_share = get_package_share_directory("marvin_system")
@@ -234,6 +238,7 @@ def launch_setup(context):
         executable="move_group_wrapper.py",
         output="screen",
         parameters=move_group_params,
+        remappings=joint_state_remappings,
         sigterm_timeout="15.0",
     )
 
@@ -242,6 +247,7 @@ def launch_setup(context):
         executable="motion_server",
         name="marvin_motion_server",
         output="screen",
+        remappings=joint_state_remappings,
         parameters=[
             robot_description,
             home_poses_file,

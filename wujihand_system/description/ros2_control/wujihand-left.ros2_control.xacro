@@ -21,7 +21,7 @@
         <command_interface name="position">
           <param name="min">0.0475</param>
           <param name="max">1.6033</param>
-          <param name="initial_value">0.0475</param>
+          <param name="initial_value">0.06</param>
         </command_interface>
         <state_interface name="position"/>
         <state_interface name="velocity"/>

@@ -63,6 +63,7 @@
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>ros2launch</exec_depend>
   <exec_depend>camera_system</exec_depend>
+  <exec_depend>htc_system</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>controller_manager</exec_depend>
   <exec_depend>cv_bridge</exec_depend>

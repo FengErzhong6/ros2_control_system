@@ -61,6 +61,11 @@ private:
     static constexpr size_t kTotalJoints = kJointsPerArm * kArmCount;
 
     bool process_control_profile_transition();
+    std::string build_sdk_arm_status_summary() const;
+    std::string build_write_command_summary(
+        const double *cmd_a,
+        const double *cmd_b,
+        bool using_collision_guard) const;
     bool send_position_hold_command(
         const std::array<std::array<double, kJointsPerArm>, kArmCount> &hold_deg,
         bool request_position_state);

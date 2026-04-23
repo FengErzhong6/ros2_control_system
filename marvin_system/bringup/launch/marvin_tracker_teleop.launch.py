@@ -40,8 +40,17 @@ from std_srvs.srv import Trigger
 
 _terminal_gate = None
 DEFAULT_TRAJECTORY_ROOT = os.path.expanduser("~/.ros/marvin_trajectory")
+
+
+def shutdown_on_exit(target_action, reason: str):
+    return RegisterEventHandler(
+        OnProcessExit(
+            target_action=target_action,
+            on_exit=[EmitEvent(event=Shutdown(reason=reason))],
+        )
+    )
 DEFAULT_TRAJECTORY_BAG_PREFIX = "marvin_joint_trajectory"
-DEFAULT_TRAJECTORY_TOPICS = ["/joint_states"]
+DEFAULT_TRAJECTORY_TOPICS = ["/marvin/joint_states"]
 
 
 def load_launch_config(config_path):
@@ -119,6 +128,11 @@ def resolve_topics_arg(arg_value: str, config: dict, key: str, fallback) -> list
         return topics or list(fallback)
 
     return list(fallback)
+
+
+def resolve_string_list_arg(arg_value: str, fallback) -> list[str]:
+    topics = [value for value in shlex.split(arg_value) if value.strip()]
+    return topics or list(fallback)
 
 
 class TrackerTeleopRosbagRecorder:
@@ -752,6 +766,11 @@ def generate_launch_description():
             description="Override bag topics with a space-delimited list; use default to keep YAML setting.",
         ),
         DeclareLaunchArgument(
+            "wujihand_joint_state_topics",
+            default_value="/left/joint_states /right/joint_states",
+            description="Space-delimited list of WujiHand joint_states topics consumed by motion_server.",
+        ),
+        DeclareLaunchArgument(
             "enable_ik_reference_logs", default_value="false",
             description="Enable verbose IK reference diagnostics logs from tracker_teleop_controller.",
         ),
@@ -762,6 +781,20 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "description_file", default_value="description/urdf/marvin_dual.urdf",
             description="Composite URDF/XACRO file to load.",
+        ),
+        DeclareLaunchArgument(
+            "collision_description_package", default_value="marvin_system",
+            description="Package with the collision-only URDF/XACRO file for MoveIt and motion_server.",
+        ),
+        DeclareLaunchArgument(
+            "collision_description_file",
+            default_value="description/urdf/marvin_dual.urdf",
+            description="Collision-only URDF/XACRO file for MoveIt and motion_server.",
+        ),
+        DeclareLaunchArgument(
+            "collision_srdf_file",
+            default_value="description/srdf/marvin_dual.srdf",
+            description="SRDF file paired with the collision-only model.",
         ),
         DeclareLaunchArgument(
             "use_gripper_L", default_value="false",
@@ -898,6 +931,10 @@ def launch_setup(context):
         "trajectory_bag_topics",
         DEFAULT_TRAJECTORY_TOPICS,
     )
+    wujihand_joint_state_topics = resolve_string_list_arg(
+        LaunchConfiguration("wujihand_joint_state_topics").perform(context),
+        ["/left/joint_states", "/right/joint_states"],
+    )
     enable_joint_recording_value = (
         enable_joint_recording_requested and not use_mock_hardware_value
     )
@@ -910,6 +947,9 @@ def launch_setup(context):
 
     pkg = LaunchConfiguration("description_package").perform(context)
     desc_file = LaunchConfiguration("description_file").perform(context)
+    collision_pkg = LaunchConfiguration("collision_description_package").perform(context)
+    collision_desc_file = LaunchConfiguration("collision_description_file").perform(context)
+    collision_srdf_file = LaunchConfiguration("collision_srdf_file").perform(context)
     grip_L = LaunchConfiguration("use_gripper_L").perform(context).lower() == "true"
     grip_R = LaunchConfiguration("use_gripper_R").perform(context).lower() == "true"
     mock_grippers = LaunchConfiguration("mock_grippers").perform(context).lower() == "true"
@@ -956,6 +996,19 @@ def launch_setup(context):
 
     robot_description = {
         "robot_description": ParameterValue(Command(xacro_cmd), value_type=str)
+    }
+
+    collision_xacro_cmd = [
+        PathJoinSubstitution([FindExecutable(name="xacro")]),
+        " ",
+        PathJoinSubstitution([FindPackageShare(collision_pkg), collision_desc_file]),
+        ' left_xyz:="', left_xyz, '"',
+        ' left_rpy:="', left_rpy, '"',
+        ' right_xyz:="', right_xyz, '"',
+        ' right_rpy:="', right_rpy, '"',
+    ]
+    collision_robot_description = {
+        "robot_description": ParameterValue(Command(collision_xacro_cmd), value_type=str)
     }
 
     # ── Tracker teleop controller config ───────────────────────────────────
@@ -1040,11 +1093,14 @@ def launch_setup(context):
     if enable_moveit_go_home_value:
         ros2_control_parameters.insert(2, trajectory_controller_manager_file)
 
+    joint_state_remappings = [("/joint_states", "/marvin/joint_states")]
+
     ros2_control_node = Node(
         package="controller_manager",
         executable="ros2_control_node",
         output="both",
         parameters=ros2_control_parameters,
+        remappings=joint_state_remappings,
     )
 
     robot_state_publisher_node = Node(
@@ -1052,18 +1108,24 @@ def launch_setup(context):
         executable="robot_state_publisher",
         output="both",
         parameters=[robot_description],
+        remappings=joint_state_remappings,
     )
 
     # HTC Tracker publisher (broadcasts TF: world -> tracker_left_hand, tracker_torso, etc.)
     tracker_publisher_actions = []
     if start_tracker_publisher_value:
+        tracker_publisher_node = Node(
+            package="htc_system",
+            executable="tracker_publisher",
+            name="tracker_publisher",
+            output="screen",
+            parameters=[trackers_config],
+        )
+        tracker_publisher_actions.append(tracker_publisher_node)
         tracker_publisher_actions.append(
-            Node(
-                package="htc_system",
-                executable="tracker_publisher",
-                name="tracker_publisher",
-                output="screen",
-                parameters=[trackers_config],
+            shutdown_on_exit(
+                tracker_publisher_node,
+                "tracker_publisher exited",
             )
         )
 
@@ -1099,38 +1161,29 @@ def launch_setup(context):
 
         camera_actions.append(camera_startup_manager)
         camera_actions.append(
-            RegisterEventHandler(
-                OnProcessExit(
-                    target_action=camera_startup_manager,
-                    on_exit=[
-                        EmitEvent(
-                            event=Shutdown(
-                                reason="tracker_camera_startup_manager exited",
-                            )
-                        )
-                    ],
-                )
+            shutdown_on_exit(
+                camera_startup_manager,
+                "tracker_camera_startup_manager exited",
             )
         )
 
         if show_camera_views_value:
-            camera_actions.append(
-                Node(
-                    package="marvin_system",
-                    executable="tracker_camera_dashboard.py",
-                    name="tracker_camera_dashboard",
-                    output="screen",
-                    parameters=[{
-                        "window_title": "Marvin Tracker Camera Dashboard",
-                        "left_camera_title": "Left Wrist",
-                        "right_camera_title": "Right Wrist",
-                        "high_camera_title": "High Camera",
-                        "left_image_topic": f"/{left_namespace}/image_raw",
-                        "right_image_topic": f"/{right_namespace}/image_raw",
-                        "high_image_topic": f"/{high_namespace}/{high_namespace}/color/image_raw",
-                    }],
-                )
+            camera_dashboard_node = Node(
+                package="marvin_system",
+                executable="tracker_camera_dashboard.py",
+                name="tracker_camera_dashboard",
+                output="screen",
+                parameters=[{
+                    "window_title": "Marvin Tracker Camera Dashboard",
+                    "left_camera_title": "Left Wrist",
+                    "right_camera_title": "Right Wrist",
+                    "high_camera_title": "High Camera",
+                    "left_image_topic": f"/{left_namespace}/image_raw",
+                    "right_image_topic": f"/{right_namespace}/image_raw",
+                    "high_image_topic": f"/{high_namespace}/{high_namespace}/color/image_raw",
+                }],
             )
+            camera_actions.append(camera_dashboard_node)
 
     # ── Visualisation ─────────────────────────────────────────────────────
     rviz_config_file = PathJoinSubstitution(
@@ -1153,7 +1206,7 @@ def launch_setup(context):
     cell_scene_file = PathJoinSubstitution(
         [FindPackageShare("marvin_system"), "motion", "config", "cell_scene.yaml"]
     )
-    srdf_path = os.path.join(pkg_share, "description", "srdf", "marvin_dual.srdf")
+    srdf_path = os.path.join(get_package_share_directory(collision_pkg), collision_srdf_file)
     kinematics_path = os.path.join(pkg_share, "motion", "config", "kinematics.yaml")
     joint_limits_path = os.path.join(pkg_share, "motion", "config", "joint_limits.yaml")
     planning_pipelines_path = os.path.join(pkg_share, "motion", "config", "planning_pipelines.yaml")
@@ -1166,8 +1219,9 @@ def launch_setup(context):
             executable="motion_server",
             name="marvin_motion_server",
             output="screen",
+            remappings=joint_state_remappings,
             parameters=[
-                robot_description,
+                collision_robot_description,
                 home_poses_file,
                 cell_scene_file,
                 {"robot_description_semantic": load_text_file(srdf_path)},
@@ -1184,6 +1238,7 @@ def launch_setup(context):
                     "tracker_set_armed_service": "/marvin_motion/internal/tracker_set_armed",
                     "tracker_set_enabled_service": "/marvin_motion/internal/tracker_set_enabled",
                     "teleop_state_topic": "/tracker_teleop_controller/teleop_state",
+                    "joint_state_topic": "/marvin/joint_states",
                     "planning_group": "dual_arm",
                     "home_pose_id": "home",
                     "go_home_return_mode": go_home_return_mode_value or "SAFE_HOLD",
@@ -1207,6 +1262,7 @@ def launch_setup(context):
                     "primary_controller_name": "tracker_teleop_controller",
                     "collision_guard_service_name": collision_guard_service_name,
                     "control_profile_service_name": control_profile_service_name,
+                    "wujihand_joint_state_topics": wujihand_joint_state_topics,
                     "teleop_use_joint_impedance": True,
                     "teleop_disable_collision_guard": teleop_disable_collision_guard_value,
                     "allow_legacy_go_home_fallback": ParameterValue(
@@ -1222,6 +1278,7 @@ def launch_setup(context):
             executable="motion_server",
             name="marvin_motion_server",
             output="screen",
+            remappings=joint_state_remappings,
             parameters=[
                 home_poses_file,
                 cell_scene_file,
@@ -1236,6 +1293,7 @@ def launch_setup(context):
                     "tracker_set_armed_service": "/marvin_motion/internal/tracker_set_armed",
                     "tracker_set_enabled_service": "/marvin_motion/internal/tracker_set_enabled",
                     "teleop_state_topic": "/tracker_teleop_controller/teleop_state",
+                    "joint_state_topic": "/marvin/joint_states",
                     "use_mock_hardware": use_mock_hardware_value,
                     "allow_unsafe_legacy_backend": allow_unsafe_legacy_go_home_value,
                     "go_home_return_mode": go_home_return_mode_value or "SAFE_HOLD",
@@ -1248,6 +1306,7 @@ def launch_setup(context):
                     "primary_controller_name": "tracker_teleop_controller",
                     "collision_guard_service_name": collision_guard_service_name,
                     "control_profile_service_name": control_profile_service_name,
+                    "wujihand_joint_state_topics": wujihand_joint_state_topics,
                     "teleop_use_joint_impedance": True,
                     "teleop_disable_collision_guard": teleop_disable_collision_guard_value,
                     "allow_legacy_go_home_fallback": ParameterValue(
@@ -1259,7 +1318,7 @@ def launch_setup(context):
         )
 
     move_group_params = [
-        robot_description,
+        collision_robot_description,
         {"robot_description_semantic": load_text_file(srdf_path)},
         {"robot_description_kinematics": load_yaml_file(kinematics_path)},
         {"robot_description_planning": load_yaml_file(joint_limits_path)},
@@ -1284,6 +1343,7 @@ def launch_setup(context):
         executable="move_group_wrapper.py",
         output="screen",
         parameters=move_group_params,
+        remappings=joint_state_remappings,
         sigterm_timeout="15.0",
     )
 
@@ -1419,6 +1479,25 @@ def launch_setup(context):
                 actions=[move_group_node, motion_server_node],
             )
         )
+        moveit_runtime_actions.append(
+            shutdown_on_exit(
+                move_group_node,
+                "move_group_wrapper exited",
+            )
+        )
+        moveit_runtime_actions.append(
+            shutdown_on_exit(
+                motion_server_node,
+                "marvin_motion_server exited",
+            )
+        )
+    else:
+        immediate_motion_nodes.append(
+            shutdown_on_exit(
+                motion_server_node,
+                "marvin_motion_server exited",
+            )
+        )
 
     keyboard_gate_actions = []
     if use_keyboard_gate_value:
@@ -1442,16 +1521,27 @@ def launch_setup(context):
                 ),
             )
         )
+        keyboard_gate_actions.append(
+            shutdown_on_exit(
+                keyboard_gate_node,
+                "tracker_teleop_keyboard exited",
+            )
+        )
 
     final_followup_actions = []
     if start_manus_gripper_bridge_value:
+        manus_gripper_node = Node(
+            package="manus_system",
+            executable="manus_gripper_node",
+            name="manus_gripper_node",
+            output="screen",
+            parameters=[manus_gripper_config],
+        )
+        final_followup_actions.append(manus_gripper_node)
         final_followup_actions.append(
-            Node(
-                package="manus_system",
-                executable="manus_gripper_node",
-                name="manus_gripper_node",
-                output="screen",
-                parameters=[manus_gripper_config],
+            shutdown_on_exit(
+                manus_gripper_node,
+                "manus_gripper_node exited",
             )
         )
 
@@ -1465,9 +1555,15 @@ def launch_setup(context):
             )
         )
 
+    critical_exit_actions = [
+        shutdown_on_exit(ros2_control_node, "ros2_control_node exited"),
+        shutdown_on_exit(robot_state_publisher_node, "robot_state_publisher exited"),
+    ]
+
     return [
         ros2_control_node,
         robot_state_publisher_node,
+        *critical_exit_actions,
         *tracker_publisher_actions,
         *camera_actions,
         *immediate_motion_nodes,

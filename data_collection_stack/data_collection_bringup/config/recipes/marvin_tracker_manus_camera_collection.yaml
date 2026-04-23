@@ -44,10 +44,6 @@ devices:
       start_manus_gripper_bridge: true
 record_topics:
   - /cam_high/cam_high/color/image_raw
-  - /cam_high/cam_high/color/camera_info
   - /cam_left_wrist/image_raw
   - /cam_right_wrist/image_raw
-  - /joint_states
-  - /manus_raw_publisher_node/gloves_raw
-  - /tf
-  - /tf_static
+  - /marvin/joint_states

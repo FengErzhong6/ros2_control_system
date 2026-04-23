@@ -17,6 +17,5 @@ devices:
     ready_timeout_sec: 45.0
 record_topics:
   - /cam_high/cam_high/color/image_raw
-  - /cam_high/cam_high/color/camera_info
   - /cam_left_wrist/image_raw
   - /cam_right_wrist/image_raw

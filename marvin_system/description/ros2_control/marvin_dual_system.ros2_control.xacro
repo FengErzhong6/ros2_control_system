@@ -4,6 +4,10 @@
   <xacro:macro name="marvin_dual_ros2_control"
                params="name
                        use_mock_hardware:=false
+                       marvin_ip:='192.168.1.190'
+                       connect_timeout_ms:=1500
+                       state_timeout_ms:=8000
+                       profile_switch_timeout_ms:=5000
                        joint_vel_ratio:=100  joint_acc_ratio:=100
                        joint_impedance_enabled:=true
                        joint_impedance_k_left:='2 2 2 2 2 1 1'
@@ -37,7 +41,7 @@
         </xacro:if>
         <xacro:unless value="${str(use_mock_hardware).lower() == 'true'}">
           <plugin>marvin_system/MarvinHardware</plugin>
-          <param name="ip">192.168.1.190</param>
+          <param name="ip">${marvin_ip}</param>
           <param name="joint_vel_ratio">${joint_vel_ratio}</param>
           <param name="joint_acc_ratio">${joint_acc_ratio}</param>
           <param name="joint_impedance_enabled">${joint_impedance_enabled}</param>
@@ -54,9 +58,9 @@
           <param name="gripper_command_rate_hz">${gripper_command_rate_hz}</param>
           <param name="gripper_command_epsilon">${gripper_command_epsilon}</param>
           <param name="mock_grippers">${mock_grippers}</param>
-          <param name="connect_timeout_ms">1500</param>
-          <param name="state_timeout_ms">8000</param>
-          <param name="profile_switch_timeout_ms">5000</param>
+          <param name="connect_timeout_ms">${connect_timeout_ms}</param>
+          <param name="state_timeout_ms">${state_timeout_ms}</param>
+          <param name="profile_switch_timeout_ms">${profile_switch_timeout_ms}</param>
           <param name="profile_switch_post_monitor_ms">500</param>
           <param name="profile_switch_initial_resend_delay_ms">80</param>
           <param name="profile_switch_resend_interval_ms">20</param>

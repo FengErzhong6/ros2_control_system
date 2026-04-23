@@ -53,12 +53,12 @@ class MarvinAdapter(AdapterBase):
         "/marvin_dual/set_collision_guard_enabled",
         "/marvin_dual/set_control_profile",
     )
-    GRAPH_CLEANUP_NODE_BASENAMES = (
-        "controller_manager",
-        "robot_state_publisher",
-        "marvin_motion_server",
-        "move_group",
-        "manus_gripper_node",
+    GRAPH_CLEANUP_NODE_NAMES = (
+        "/controller_manager",
+        "/robot_state_publisher",
+        "/marvin_motion_server",
+        "/move_group",
+        "/manus_gripper_node",
     )
     EXTERNAL_PROCESS_MATCH_MARKERS = (
         "marvin_tracker_teleop.launch.py",
@@ -111,7 +111,7 @@ class MarvinAdapter(AdapterBase):
             )
             self._joint_state_subscription = self.node.create_subscription(
                 JointState,
-                "/joint_states",
+                "/marvin/joint_states",
                 self._on_joint_state,
                 qos_profile_sensor_data,
             )
@@ -320,8 +320,15 @@ class MarvinAdapter(AdapterBase):
 
     def shutdown(self) -> AdapterResult:
         if self._launch_is_running() and self._ros_context_is_usable():
-            self._call_set_bool_service("/marvin_motion/set_enabled", False, timeout_sec=3.0)
-            self._call_set_mode_service("SAFE_HOLD", timeout_sec=3.0)
+            disable_result = self._call_set_bool_service(
+                "/marvin_motion/set_enabled", False, timeout_sec=3.0
+            )
+            if disable_result.is_failure():
+                return disable_result
+
+            safe_hold_result = self._call_set_mode_service("SAFE_HOLD", timeout_sec=3.0)
+            if safe_hold_result.is_failure():
+                return safe_hold_result
 
         managed_launch = self._managed_launch
         if managed_launch is not None:
@@ -472,7 +479,7 @@ class MarvinAdapter(AdapterBase):
         topics = self.device.config.get("record_topics", [])
         if isinstance(topics, list):
             return [str(topic) for topic in topics]
-        return ["/joint_states", "/tf", "/tf_static"]
+        return ["/marvin/joint_states"]
 
     def arm(self) -> AdapterResult:
         return self._call_set_mode_service("TELEOP", timeout_sec=10.0)
@@ -553,7 +560,6 @@ class MarvinAdapter(AdapterBase):
             "collision_guard_binary_search_steps": 5,
             "enable_moveit_go_home": True,
             "motion_allow_legacy_home_fallback": False,
-            "target_pose_file_dump_requires_recording_state": True,
         }
         raw_arguments = self.device.config.get("launch_arguments", {})
         if isinstance(raw_arguments, dict):
@@ -702,19 +708,20 @@ class MarvinAdapter(AdapterBase):
             return set()
         return {line.strip() for line in completed.stdout.splitlines() if line.strip()}
 
-    def _current_node_basenames(self) -> set[str]:
+    def _current_node_names(self) -> set[str]:
         node_names: set[str] = set()
         if self._ros_context_is_usable():
             try:
                 for name, namespace in self.node.get_node_names_and_namespaces():
-                    raw_name = str(name).strip()
+                    raw_name = str(name).strip().lstrip("/")
                     if not raw_name:
                         continue
                     raw_namespace = str(namespace).strip()
-                    full_name = raw_name
                     if raw_namespace and raw_namespace != "/":
                         full_name = f"{raw_namespace.rstrip('/')}/{raw_name}"
-                    node_names.add(full_name.rsplit("/", 1)[-1].lstrip("/"))
+                    else:
+                        full_name = f"/{raw_name}"
+                    node_names.add(full_name)
             except Exception:
                 node_names.clear()
 
@@ -725,23 +732,24 @@ class MarvinAdapter(AdapterBase):
         if completed is None or completed.returncode != 0:
             return set()
         return {
-            line.strip().rsplit("/", 1)[-1].lstrip("/")
+            line.strip()
             for line in completed.stdout.splitlines()
             if line.strip()
         }
 
     def _stale_graph_resources(self) -> tuple[list[str], list[str]]:
         current_services = self._current_service_names()
-        current_nodes = self._current_node_basenames()
+        current_nodes = self._current_node_names()
         stale_services = [
             service_name
             for service_name in self.GRAPH_CLEANUP_SERVICES
             if service_name in current_services
+            and not self._service_belongs_to_local_client(service_name)
         ]
         stale_nodes = [
-            node_basename
-            for node_basename in self.GRAPH_CLEANUP_NODE_BASENAMES
-            if node_basename in current_nodes
+            node_name
+            for node_name in self.GRAPH_CLEANUP_NODE_NAMES
+            if node_name in current_nodes
         ]
         return stale_services, stale_nodes
 
@@ -773,6 +781,15 @@ class MarvinAdapter(AdapterBase):
                 clear_since = 0.0
 
             time.sleep(0.2)
+
+        if not last_stale_services and set(last_stale_nodes) == {"/move_group"}:
+            if self.node is not None:
+                self.node.get_logger().warn(
+                    f"{self.device.device_id}: tolerating lingering /move_group graph residue after {context_label}; process shutdown already completed."
+                )
+            return AdapterResult.ok(
+                f"{self.device.device_id}: Marvin subprocesses stopped after {context_label}; lingering /move_group graph residue tolerated."
+            )
 
         details = []
         if last_stale_services:
@@ -1110,6 +1127,19 @@ class MarvinAdapter(AdapterBase):
                 return False
         return False
 
+    def _service_belongs_to_local_client(self, service_name: str) -> bool:
+        client = self._client_for_service(service_name)
+        if client is None or self.node is None:
+            return False
+        try:
+            client_name_list = self.node.get_client_names_and_types_by_node(
+                self.node.get_name(),
+                self.node.get_namespace(),
+            )
+        except Exception:
+            return False
+        return any(name == service_name for name, _types in client_name_list)
+
     def _call_set_bool_service(
         self, service_name: str, value: bool, timeout_sec: float
     ) -> AdapterResult:
@@ -1253,6 +1283,8 @@ class MarvinAdapter(AdapterBase):
         return AdapterResult.ok(summary)
 
     def _client_for_service(self, service_name: str):
+        if service_name == "/controller_manager/list_controllers":
+            return self._list_controllers_client
         if service_name == "/marvin_motion/go_home":
             return self._motion_go_home_client
         if service_name == "/marvin_motion/set_mode":

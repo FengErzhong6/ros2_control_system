@@ -3,4 +3,4 @@ marvin_tracker_teleop:
   trajectory_root: default
   trajectory_bag_prefix: marvin_joint_trajectory
   trajectory_bag_topics:
-    - /joint_states
+    - /marvin/joint_states

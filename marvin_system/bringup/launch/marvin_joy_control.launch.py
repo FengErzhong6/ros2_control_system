@@ -15,6 +15,10 @@ def generate_launch_description():
             description="Start RViz2 automatically.",
         ),
         DeclareLaunchArgument(
+            "use_mock_hardware", default_value="false",
+            description="Use mock hardware instead of the real Marvin robot.",
+        ),
+        DeclareLaunchArgument(
             "use_gripper_L", default_value="false",
             description="Enable OmniPicker gripper on left arm.",
         ),
@@ -78,6 +82,7 @@ def launch_setup(context):
         ),
         launch_arguments={
             "gui": LaunchConfiguration("gui"),
+            "use_mock_hardware": LaunchConfiguration("use_mock_hardware"),
             "use_gripper_L": LaunchConfiguration("use_gripper_L"),
             "use_gripper_R": LaunchConfiguration("use_gripper_R"),
             "left_xyz": LaunchConfiguration("left_xyz"),

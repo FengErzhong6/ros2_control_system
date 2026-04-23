@@ -1,21 +1,5 @@
 <?xml version="1.0"?>
-<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="marvin_wuji">
-
-  <!--
-    Display-oriented dual-arm + Wuji-hand composite model.
-    - Includes both Marvin arm models from `asset_description`.
-    - Mounts the arm bases under a common `world` link.
-    - Attaches one official Wuji hand model to each arm end.
-    - Intentionally omits ros2_control blocks so this file stays safe for
-      visualization, TF inspection and URDF composition work.
-
-    Hand mounting is split into:
-    1. Link7_* -> hand_mount_*: arm/tool flange transform
-    2. hand_mount_* -> *_palm_link: palm fine adjustment
-
-    This keeps later docking or flange adapters easy to insert without
-    rewriting the arm or hand descriptions.
-  -->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="marvin_wuji_simplified_collision">
 
   <xacro:arg name="left_xyz" default="0 0.037 0.3618964" />
   <xacro:arg name="left_rpy" default="-1.5707963 0 0" />
@@ -25,10 +9,6 @@
   <xacro:arg name="use_wujihand_L" default="true" />
   <xacro:arg name="use_wujihand_R" default="true" />
 
-  <!--
-    Default Link7 -> hand mount transform reuses the previous gripper EE frame.
-    The palm fine-adjustment defaults to identity and can be tuned later.
-  -->
   <xacro:arg name="left_hand_mount_xyz" default="0 -0.095 0" />
   <xacro:arg name="left_hand_mount_rpy" default="1.5708 -0.7854 0" />
   <xacro:arg name="left_palm_xyz" default="0 0 0.016" />
@@ -41,15 +21,12 @@
 
   <link name="world" />
 
-  <!-- Arm models -->
   <xacro:include filename="$(find asset_description)/marvin/urdf/Marvin M6-S-L-CCS-696-V4.0 urdf.urdf" />
   <xacro:include filename="$(find asset_description)/marvin/urdf/Marvin M6-S-R-CCS-696-V4.0 urdf.urdf" />
 
-  <!-- Hand geometry models -->
-  <xacro:include filename="$(find asset_description)/wuji/urdf/left.urdf" />
-  <xacro:include filename="$(find asset_description)/wuji/urdf/right.urdf" />
+  <xacro:include filename="$(find asset_description)/wuji/urdf/left_simplified_collision.urdf" />
+  <xacro:include filename="$(find asset_description)/wuji/urdf/right_simplified_collision.urdf" />
 
-  <!-- Mount arms under world -->
   <joint name="world_to_base_l" type="fixed">
     <origin xyz="$(arg left_xyz)" rpy="$(arg left_rpy)" />
     <parent link="world" />
@@ -70,7 +47,7 @@
       <child link="hand_mount_L" />
     </joint>
 
-    <xacro:wujihand_left_description mesh_pkg="asset_description" />
+    <xacro:wujihand_left_simplified_collision_description mesh_pkg="asset_description" />
 
     <joint name="hand_mount_L_to_left_palm" type="fixed">
       <origin xyz="$(arg left_palm_xyz)" rpy="$(arg left_palm_rpy)" />
@@ -87,7 +64,7 @@
       <child link="hand_mount_R" />
     </joint>
 
-    <xacro:wujihand_right_description mesh_pkg="asset_description" />
+    <xacro:wujihand_right_simplified_collision_description mesh_pkg="asset_description" />
 
     <joint name="hand_mount_R_to_right_palm" type="fixed">
       <origin xyz="$(arg right_palm_xyz)" rpy="$(arg right_palm_rpy)" />

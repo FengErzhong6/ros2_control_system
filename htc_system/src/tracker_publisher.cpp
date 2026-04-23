@@ -301,6 +301,7 @@ public:
         coordinate_transform_ = declare_parameter("coordinate_transform", true);
         double rate = declare_parameter("publish_rate", 100.0);
         parent_frame_ = declare_parameter("parent_frame", "world");
+        pose_prediction_ms_ = declare_parameter("pose_prediction_ms", 0.0);
         openvr_library_path_ =
             declare_parameter("openvr_library_path", std::string{});
 
@@ -341,8 +342,8 @@ public:
         const std::string openvr_library = openvr_.libraryPath().string();
         RCLCPP_INFO(
             get_logger(),
-            "OpenVR initialized from %s, publishing TF to parent_frame='%s'",
-            openvr_library.c_str(), parent_frame_.c_str());
+            "OpenVR initialized from %s, publishing TF to parent_frame='%s', pose_prediction_ms=%.3f",
+            openvr_library.c_str(), parent_frame_.c_str(), pose_prediction_ms_);
 
         scanDevices();
 
@@ -482,7 +483,8 @@ private:
     {
         vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
         vr_system_->GetDeviceToAbsoluteTrackingPose(
-            vr::TrackingUniverseStanding, 0, poses, vr::k_unMaxTrackedDeviceCount);
+            vr::TrackingUniverseStanding, static_cast<float>(pose_prediction_ms_ / 1000.0),
+            poses, vr::k_unMaxTrackedDeviceCount);
 
         auto stamp = now();
         std::vector<geometry_msgs::msg::TransformStamped> transforms;
@@ -531,6 +533,7 @@ private:
     OpenVrLibrary openvr_;
     bool coordinate_transform_;
     std::string parent_frame_;
+    double pose_prediction_ms_;
     std::string openvr_library_path_;
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     std::vector<TrackerConfig> tracker_configs_;

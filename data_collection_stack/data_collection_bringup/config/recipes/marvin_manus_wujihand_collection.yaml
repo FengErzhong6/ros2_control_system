@@ -1,5 +1,24 @@
 recipe_id: marvin_manus_wujihand_collection
 devices:
+  - id: cam_high
+    adapter: camera
+    required: true
+    depends_on: []
+    ready_timeout_sec: 15.0
+    startup_no_image_restart_timeout_sec: 12.0
+    use_managed_launch: true
+  - id: cam_left_wrist
+    adapter: camera
+    required: true
+    depends_on: []
+    ready_timeout_sec: 15.0
+    use_managed_launch: true
+  - id: cam_right_wrist
+    adapter: camera
+    required: true
+    depends_on: []
+    ready_timeout_sec: 15.0
+    use_managed_launch: true
   - id: htc_tracker
     adapter: htc
     required: true
@@ -10,10 +29,28 @@ devices:
     required: true
     depends_on: []
     use_managed_launch: true
-  - id: wujihand
+  - id: left_wujihand
     adapter: wujihand
-    required: false
-    depends_on: []
+    required: true
+    depends_on:
+      - manus_glove
+    use_managed_launch: true
+    ready_timeout_sec: 30.0
+    hand_side: left
+    namespace: left_hand
+    pipeline_namespace: left_hand
+    joint_state_topic: /left_hand/joint_states
+  - id: right_wujihand
+    adapter: wujihand
+    required: true
+    depends_on:
+      - manus_glove
+    use_managed_launch: true
+    ready_timeout_sec: 30.0
+    hand_side: right
+    namespace: right_hand
+    pipeline_namespace: right_hand
+    joint_state_topic: /right_hand/joint_states
   - id: marvin_dual
     adapter: marvin
     required: true
@@ -24,11 +61,17 @@ devices:
     ready_timeout_sec: 90.0
     startup_no_ready_restart_timeout_sec: 0.0
     launch_arguments:
-      use_gripper_L: true
-      use_gripper_R: true
-      start_manus_gripper_bridge: true
+      use_gripper_L: false
+      use_gripper_R: false
+      start_manus_gripper_bridge: false
+      collision_description_package: marvin_system
+      collision_description_file: description/urdf/marvin_wuji_simplified_collision.urdf
+      collision_srdf_file: description/srdf/marvin_wuji_simplified_collision.srdf
+      wujihand_joint_state_topics: /left_hand/joint_states /right_hand/joint_states
 record_topics:
-  - /joint_states
-  - /manus_raw_publisher_node/gloves_raw
-  - /tf
-  - /tf_static
+  - /cam_high/cam_high/color/image_raw
+  - /cam_left_wrist/image_raw
+  - /cam_right_wrist/image_raw
+  - /marvin/joint_states
+  - /left_hand/joint_states
+  - /right_hand/joint_states

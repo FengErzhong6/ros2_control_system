@@ -205,6 +205,60 @@ const char *arm_state_name(ArmState state)
 
 namespace marvin_system {
 
+std::string MarvinHardware::build_sdk_arm_status_summary() const
+{
+    const auto now = Clock::now();
+    std::ostringstream stream;
+    for (size_t arm = 0; arm < kArmCount; ++arm) {
+        if (arm > 0) {
+            stream << ' ';
+        }
+        stream << (arm == 0 ? "A" : "B")
+               << "[state="
+               << arm_state_name(static_cast<ArmState>(
+                      current_sdk_cur_state_[arm].load(std::memory_order_relaxed)))
+               << '(' << current_sdk_cur_state_[arm].load(std::memory_order_relaxed) << ')'
+               << " cmd=" << current_sdk_cmd_state_[arm].load(std::memory_order_relaxed)
+               << " err=" << current_sdk_err_code_[arm].load(std::memory_order_relaxed)
+               << " in=" << current_sdk_in_frame_serial_[arm].load(std::memory_order_relaxed)
+               << " out=" << current_sdk_out_frame_serial_[arm].load(std::memory_order_relaxed)
+               << " frame_age_ms="
+               << std::chrono::duration_cast<std::chrono::milliseconds>(
+                      now - last_frame_time_[arm])
+                      .count()
+               << ']';
+    }
+    return stream.str();
+}
+
+std::string MarvinHardware::build_write_command_summary(
+    const double *cmd_a,
+    const double *cmd_b,
+    bool using_collision_guard) const
+{
+    auto append_arm = [](std::ostringstream &stream, const char *label, const double *cmd) {
+        stream << label << "=[";
+        for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+            if (joint > 0) {
+                stream << ' ';
+            }
+            stream << cmd[joint];
+        }
+        stream << ']';
+    };
+
+    std::ostringstream stream;
+    stream << "profile="
+           << control_profile_to_string(active_control_profile_.load(std::memory_order_relaxed))
+           << " requested="
+           << control_profile_to_string(requested_control_profile_.load(std::memory_order_relaxed))
+           << " collision_guard=" << (using_collision_guard ? "on" : "off") << ' ';
+    append_arm(stream, "cmd_deg_A", cmd_a);
+    stream << ' ';
+    append_arm(stream, "cmd_deg_B", cmd_b);
+    return stream.str();
+}
+
 void MarvinHardware::update_sdk_observation_states(const DCSS &dcss)
 {
     if (info_.joints.size() < kTotalJoints) {
@@ -262,17 +316,47 @@ bool MarvinHardware::send_position_hold_command(
         hold_b[joint] = hold_deg[1][joint];
     }
 
-    OnClearSet();
-    bool ok = true;
-    if (request_position_state) {
-        ok = ok && OnSetTargetState_A(1);
-        ok = ok && OnSetJointLmt_A(joint_vel_ratio_, joint_acc_ratio_);
-        ok = ok && OnSetTargetState_B(1);
-        ok = ok && OnSetJointLmt_B(joint_vel_ratio_, joint_acc_ratio_);
+    if (!OnClearSet()) {
+        RCLCPP_ERROR(
+            get_logger(),
+            "Position hold command failed at OnClearSet. request_position_state=%s %s %s",
+            request_position_state ? "true" : "false",
+            build_write_command_summary(hold_a, hold_b, false).c_str(),
+            build_sdk_arm_status_summary().c_str());
+        return false;
     }
-    ok = ok && OnSetJointCmdPos_A(hold_a);
-    ok = ok && OnSetJointCmdPos_B(hold_b);
-    return ok && OnSetSend();
+    bool ok = true;
+    const char *failed_step = "";
+    if (request_position_state) {
+        if (!(ok = OnSetTargetState_A(1))) {
+            failed_step = "OnSetTargetState_A(1)";
+        } else if (!(ok = OnSetJointLmt_A(joint_vel_ratio_, joint_acc_ratio_))) {
+            failed_step = "OnSetJointLmt_A";
+        } else if (!(ok = OnSetTargetState_B(1))) {
+            failed_step = "OnSetTargetState_B(1)";
+        } else if (!(ok = OnSetJointLmt_B(joint_vel_ratio_, joint_acc_ratio_))) {
+            failed_step = "OnSetJointLmt_B";
+        }
+    }
+    if (ok && !(ok = OnSetJointCmdPos_A(hold_a))) {
+        failed_step = "OnSetJointCmdPos_A";
+    }
+    if (ok && !(ok = OnSetJointCmdPos_B(hold_b))) {
+        failed_step = "OnSetJointCmdPos_B";
+    }
+    if (ok && !(ok = OnSetSend())) {
+        failed_step = "OnSetSend";
+    }
+    if (!ok) {
+        RCLCPP_ERROR(
+            get_logger(),
+            "Position hold command failed at %s. request_position_state=%s %s %s",
+            failed_step,
+            request_position_state ? "true" : "false",
+            build_write_command_summary(hold_a, hold_b, false).c_str(),
+            build_sdk_arm_status_summary().c_str());
+    }
+    return ok;
 }
 
 bool MarvinHardware::send_joint_impedance_hold_command(
@@ -307,23 +391,59 @@ bool MarvinHardware::send_joint_impedance_hold_command(
         tool_dyn_b[i] = tool_dyn_[1][i];
     }
 
-    OnClearSet();
-    bool ok = true;
-    if (request_torque_state) {
-        ok = ok && OnSetTool_A(tool_kine_a, tool_dyn_a);
-        ok = ok && OnSetTool_B(tool_kine_b, tool_dyn_b);
-        ok = ok && OnSetJointKD_A(joint_k_a, joint_d_a);
-        ok = ok && OnSetJointKD_B(joint_k_b, joint_d_b);
-        ok = ok && OnSetJointLmt_A(joint_vel_ratio_, joint_acc_ratio_);
-        ok = ok && OnSetJointLmt_B(joint_vel_ratio_, joint_acc_ratio_);
-        ok = ok && OnSetImpType_A(1);
-        ok = ok && OnSetImpType_B(1);
-        ok = ok && OnSetTargetState_A(3);
-        ok = ok && OnSetTargetState_B(3);
+    if (!OnClearSet()) {
+        RCLCPP_ERROR(
+            get_logger(),
+            "Joint-impedance hold command failed at OnClearSet. request_torque_state=%s %s %s",
+            request_torque_state ? "true" : "false",
+            build_write_command_summary(hold_a, hold_b, false).c_str(),
+            build_sdk_arm_status_summary().c_str());
+        return false;
     }
-    ok = ok && OnSetJointCmdPos_A(hold_a);
-    ok = ok && OnSetJointCmdPos_B(hold_b);
-    return ok && OnSetSend();
+    bool ok = true;
+    const char *failed_step = "";
+    if (request_torque_state) {
+        if (!(ok = OnSetTool_A(tool_kine_a, tool_dyn_a))) {
+            failed_step = "OnSetTool_A";
+        } else if (!(ok = OnSetTool_B(tool_kine_b, tool_dyn_b))) {
+            failed_step = "OnSetTool_B";
+        } else if (!(ok = OnSetJointKD_A(joint_k_a, joint_d_a))) {
+            failed_step = "OnSetJointKD_A";
+        } else if (!(ok = OnSetJointKD_B(joint_k_b, joint_d_b))) {
+            failed_step = "OnSetJointKD_B";
+        } else if (!(ok = OnSetJointLmt_A(joint_vel_ratio_, joint_acc_ratio_))) {
+            failed_step = "OnSetJointLmt_A";
+        } else if (!(ok = OnSetJointLmt_B(joint_vel_ratio_, joint_acc_ratio_))) {
+            failed_step = "OnSetJointLmt_B";
+        } else if (!(ok = OnSetImpType_A(1))) {
+            failed_step = "OnSetImpType_A";
+        } else if (!(ok = OnSetImpType_B(1))) {
+            failed_step = "OnSetImpType_B";
+        } else if (!(ok = OnSetTargetState_A(3))) {
+            failed_step = "OnSetTargetState_A(3)";
+        } else if (!(ok = OnSetTargetState_B(3))) {
+            failed_step = "OnSetTargetState_B(3)";
+        }
+    }
+    if (ok && !(ok = OnSetJointCmdPos_A(hold_a))) {
+        failed_step = "OnSetJointCmdPos_A";
+    }
+    if (ok && !(ok = OnSetJointCmdPos_B(hold_b))) {
+        failed_step = "OnSetJointCmdPos_B";
+    }
+    if (ok && !(ok = OnSetSend())) {
+        failed_step = "OnSetSend";
+    }
+    if (!ok) {
+        RCLCPP_ERROR(
+            get_logger(),
+            "Joint-impedance hold command failed at %s. request_torque_state=%s %s %s",
+            failed_step,
+            request_torque_state ? "true" : "false",
+            build_write_command_summary(hold_a, hold_b, false).c_str(),
+            build_sdk_arm_status_summary().c_str());
+    }
+    return ok;
 }
 
 bool MarvinHardware::process_control_profile_transition()
@@ -559,6 +679,15 @@ bool MarvinHardware::process_control_profile_transition()
         }
         return true;
     case ControlProfileTransitionPhase::kSendSwitchPacket: {
+        const auto now = Clock::now();
+        if ((now - control_profile_transition_started_at_) >
+            std::chrono::milliseconds(profile_switch_timeout_ms_)) {
+            fail_locked(
+                std::string("Timed out sending the initial switch packet for ") +
+                control_profile_to_string(control_profile_pending_target_) +
+                ". " + build_arm_status_summary());
+            return true;
+        }
         const ControlProfile target_profile = control_profile_pending_target_;
         const auto hold_deg = control_profile_hold_deg_;
         lock.unlock();
@@ -571,10 +700,11 @@ bool MarvinHardware::process_control_profile_transition()
             return true;
         }
         if (!ok) {
-            fail_locked(
-                std::string("Failed to send switch packet while starting the ") +
+            control_profile_last_message_ =
+                std::string("Initial switch packet send failed; retrying for ") +
                 control_profile_to_string(control_profile_pending_target_) +
-                " transition. " + build_arm_status_summary());
+                ". " + build_arm_status_summary();
+            maybe_log_diagnostic_progress_locked("send_switch_packet_retry_pending", false);
             return true;
         }
         RCLCPP_INFO(
@@ -582,7 +712,7 @@ bool MarvinHardware::process_control_profile_transition()
             "Control profile switch packet sent: target=%s %s",
             control_profile_to_string(target_profile),
             build_arm_status_summary().c_str());
-        control_profile_last_packet_sent_at_ = Clock::now();
+        control_profile_last_packet_sent_at_ = now;
         maybe_log_diagnostic_progress_locked("send_switch_packet", true);
         control_profile_transition_phase_ = ControlProfileTransitionPhase::kWaitArmState;
         control_profile_last_message_ =
@@ -656,30 +786,32 @@ bool MarvinHardware::process_control_profile_transition()
                     (now - control_profile_last_packet_sent_at_) >=
                         std::chrono::milliseconds(profile_switch_resend_interval_ms_);
             }
+            if (!resend_switch_packet) {
+                if (diagnostic_transition_active() && any_arm_in_transition_state) {
+                    maybe_log_diagnostic_progress_locked(
+                        "wait_arm_state_transition_seen", false);
+                }
+                return true;
+            }
             lock.unlock();
             const bool ok =
                 target_profile == ControlProfile::kJointImpedance ?
-                    send_joint_impedance_hold_command(hold_deg, resend_switch_packet) :
-                    send_position_hold_command(hold_deg, resend_switch_packet);
+                    send_joint_impedance_hold_command(hold_deg, true) :
+                    send_position_hold_command(hold_deg, true);
             lock.lock();
             if (!control_profile_request_pending_) {
                 return true;
             }
             if (!ok) {
                 fail_locked(
-                    std::string("Failed to maintain hold command while waiting for ") +
+                    std::string("Failed to resend switch packet while waiting for ") +
                     target_arm_state_name(target_profile) +
                     " during control profile transition. " + build_arm_status_summary());
                 return true;
             }
-            if (resend_switch_packet) {
-                control_profile_resend_count_++;
-                control_profile_last_packet_sent_at_ = now;
-                maybe_log_diagnostic_progress_locked("wait_arm_state_resend", true);
-            } else if (diagnostic_transition_active() && any_arm_in_transition_state) {
-                maybe_log_diagnostic_progress_locked(
-                    "wait_arm_state_hold_only_transition_seen", false);
-            }
+            control_profile_resend_count_++;
+            control_profile_last_packet_sent_at_ = now;
+            maybe_log_diagnostic_progress_locked("wait_arm_state_resend", true);
             return true;
         }
 
@@ -2837,23 +2969,46 @@ hardware_interface::return_type MarvinHardware::write(
     }
 
     // Single atomic send: ClearSet → set A → set B → Send
-    OnClearSet();
-    const bool ok = OnSetJointCmdPos_A(cmd_a)
-                 && OnSetJointCmdPos_B(cmd_b)
-                 && OnSetSend();
+    bool ok = false;
+    const char *failed_step = "";
+    if (!OnClearSet()) {
+        failed_step = "OnClearSet";
+    } else if (!OnSetJointCmdPos_A(cmd_a)) {
+        failed_step = "OnSetJointCmdPos_A";
+    } else if (!OnSetJointCmdPos_B(cmd_b)) {
+        failed_step = "OnSetJointCmdPos_B";
+    } else if (!OnSetSend()) {
+        failed_step = "OnSetSend";
+    } else {
+        ok = true;
+    }
     if (!ok) {
         consecutive_write_failures_++;
         total_write_failures_++;
+        const std::string command_summary =
+            build_write_command_summary(cmd_a, cmd_b, using_collision_guard);
+        const std::string arm_status_summary = build_sdk_arm_status_summary();
         if (consecutive_write_failures_ >= kMaxWriteFailures) {
-            RCLCPP_ERROR(get_logger(),
-                "SDK send failed %d times consecutively (total %d), aborting.",
-                consecutive_write_failures_, total_write_failures_);
+            RCLCPP_ERROR(
+                get_logger(),
+                "SDK send failed %d times consecutively (total %d), aborting. failed_step=%s %s %s",
+                consecutive_write_failures_,
+                total_write_failures_,
+                failed_step,
+                command_summary.c_str(),
+                arm_status_summary.c_str());
             return hardware_interface::return_type::ERROR;
         }
         if (consecutive_write_failures_ >= 3) {
-            RCLCPP_WARN(get_logger(), "SDK send failure streak %d/%d (total %d).",
-                        consecutive_write_failures_, kMaxWriteFailures,
-                        total_write_failures_);
+            RCLCPP_WARN(
+                get_logger(),
+                "SDK send failure streak %d/%d (total %d). failed_step=%s %s %s",
+                consecutive_write_failures_,
+                kMaxWriteFailures,
+                total_write_failures_,
+                failed_step,
+                command_summary.c_str(),
+                arm_status_summary.c_str());
         }
         return hardware_interface::return_type::OK;
     }

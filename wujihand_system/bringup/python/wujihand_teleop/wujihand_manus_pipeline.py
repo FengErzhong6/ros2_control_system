@@ -14,6 +14,7 @@ from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.utilities import remove_ros_args
 from std_msgs.msg import Float32MultiArray, Float64MultiArray
+from std_srvs.srv import SetBool
 
 from manus_system.msg import ManusGloveRawArray
 
@@ -38,9 +39,14 @@ class WujihandManusPipelineNode(Node):
     def __init__(self, config: WujihandManusPipelineConfig) -> None:
         super().__init__("wujihand_manus_pipeline")
         self._config = config
+        self._enabled = bool(self.declare_parameter("start_enabled", False).value)
         self._adapter = ManusInputAdapter(config.adapter_config())
         self._bridge = WujihandRetargetBridge(config.bridge_config())
-        self._profiler = PeriodicProfiler(config.profiling_enabled, config.profiling_log_period_sec, self.get_logger())
+        self._profiler = PeriodicProfiler(
+            config.profiling_enabled,
+            config.profiling_log_period_sec,
+            self.get_logger(),
+        )
         self._last_input_monotonic = 0.0
         self._timeout_action_sent = False
         self._latest_raw_msg: Optional[ManusGloveRawArray] = None
@@ -87,9 +93,18 @@ class WujihandManusPipelineNode(Node):
             self._marker_pub = KeypointMarkerPublisher(self, marker_config)
             self._raw_marker_pub = RawManusMarkerPublisher(self, marker_config)
         if config.publish_debug_qpos:
-            self._left_qpos_debug_pub = self.create_publisher(Float64MultiArray, config.left_debug_qpos_topic, qos)
-            self._right_qpos_debug_pub = self.create_publisher(Float64MultiArray, config.right_debug_qpos_topic, qos)
+            self._left_qpos_debug_pub = self.create_publisher(
+                Float64MultiArray,
+                config.left_debug_qpos_topic,
+                qos,
+            )
+            self._right_qpos_debug_pub = self.create_publisher(
+                Float64MultiArray,
+                config.right_debug_qpos_topic,
+                qos,
+            )
 
+        self.create_service(SetBool, "~/set_enabled", self._handle_set_enabled)
         self.create_subscription(ManusGloveRawArray, config.input_topic, self._on_gloves_raw, qos)
         publish_rate_hz = max(float(config.publish_rate_hz), 1.0)
         self.create_timer(1.0 / publish_rate_hz, self._process_latest_frame)
@@ -99,7 +114,7 @@ class WujihandManusPipelineNode(Node):
             f"raw={config.input_topic}, "
             f"left_cmd={config.left_command_topic}, "
             f"right_cmd={config.right_command_topic}, "
-            f"publish_hand_input={str(config.publish_hand_input).lower()}, "
+            f"enabled={str(self._enabled).lower()}, "
             f"publish_rate_hz={publish_rate_hz:.1f}"
         )
         if self._marker_pub is not None:
@@ -109,6 +124,14 @@ class WujihandManusPipelineNode(Node):
                 f"left_frame={config.left_marker_frame_id}, right_frame={config.right_marker_frame_id}, "
                 f"align_wrist_to_origin={str(config.marker_align_wrist_to_origin).lower()}"
             )
+
+    def _handle_set_enabled(self, request: SetBool.Request, response: SetBool.Response) -> SetBool.Response:
+        self._enabled = bool(request.data)
+        self._timeout_action_sent = False
+        response.success = True
+        response.message = "enabled" if self._enabled else "disabled"
+        self.get_logger().info(f"Pipeline {response.message}.")
+        return response
 
     def _publish_float32(self, publisher, values: np.ndarray) -> None:
         msg = Float32MultiArray()
@@ -132,15 +155,14 @@ class WujihandManusPipelineNode(Node):
             self._last_input_monotonic = time.monotonic()
             self._timeout_action_sent = False
             self._latest_raw_msg = msg
-        except Exception:  # pragma: no cover - runtime guard
-            self.get_logger().error(
-                "Pipeline callback failed:\n" + traceback.format_exc()
-            )
+        except Exception:
+            self.get_logger().error("Pipeline callback failed:\n" + traceback.format_exc())
 
     def _process_latest_frame(self) -> None:
         try:
-            if self._latest_raw_msg is None:
+            if not self._enabled or self._latest_raw_msg is None:
                 return
+
             with self._profiler.measure("adapt_total"):
                 adapted = self._adapter.adapt_message(self._latest_raw_msg)
             hand_input = adapted.hand_input
@@ -204,12 +226,12 @@ class WujihandManusPipelineNode(Node):
                 self._last_recorded_raw_stamp_ns = raw_stamp_ns
 
             self._profiler.maybe_log()
-        except Exception:  # pragma: no cover - runtime guard
-            self.get_logger().error(
-                "Pipeline processing failed:\n" + traceback.format_exc()
-            )
+        except Exception:
+            self.get_logger().error("Pipeline processing failed:\n" + traceback.format_exc())
 
     def _on_timeout_timer(self) -> None:
+        if not self._enabled:
+            return
         if self._config.hold_last_command_on_missing_input:
             return
         if self._config.command_timeout_sec <= 0.0:

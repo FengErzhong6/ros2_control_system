@@ -24,7 +24,4 @@ devices:
       use_gripper_R: true
       start_manus_gripper_bridge: true
 record_topics:
-  - /joint_states
-  - /manus_raw_publisher_node/gloves_raw
-  - /tf
-  - /tf_static
+  - /marvin/joint_states

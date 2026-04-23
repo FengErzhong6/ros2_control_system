@@ -46,8 +46,11 @@ public:
                 }
             });
 
+        auto feedback_topic = declare_parameter(
+            "feedback_topic", std::string("/marvin/joint_states"));
+
         real_sub_ = create_subscription<sensor_msgs::msg::JointState>(
-            "joint_states", rclcpp::SensorDataQoS(),
+            feedback_topic, rclcpp::SensorDataQoS(),
             [this](const sensor_msgs::msg::JointState::SharedPtr msg) {
                 on_real_js(msg);
             });
@@ -127,7 +130,7 @@ private:
         last_cmd_ = real_pos_;
         publish_cmd(last_cmd_);
         RCLCPP_INFO(get_logger(),
-            "Seeded initial positions from hardware feedback on /joint_states.");
+            "Seeded initial positions from hardware feedback.");
     }
 
     /// Only publish when the operator actually moves a slider away from the

@@ -85,10 +85,12 @@ const std::array<double, kJointsPerArm> kJointLowerLimits{
     {-3.1067, -2.0944, -3.1067, -2.5307, -3.1067, -1.0472, -1.5708}};
 const std::array<double, kJointsPerArm> kJointUpperLimits{
     {3.1067, 2.0944, 3.1067, 1.0472, 3.1067, 1.0472, 1.5708}};
-const std::array<std::array<const char *, 5>, kTrackedGripperCount> kGripperTouchLinks{{
-    {{"Link7_L", "ee_L", "gripper_L_link", "left_finger_L_link", "right_finger_L_link"}},
-    {{"Link7_R", "ee_R", "gripper_R_link", "left_finger_R_link", "right_finger_R_link"}},
+const std::array<std::array<const char *, 8>, kTrackedGripperCount> kGripperTouchLinks{{
+    {{"Link7_L", "ee_L", "gripper_L_link", "left_finger_L_link", "right_finger_L_link", "hand_mount_L", "left_palm_link", "left_finger1_link1"}},
+    {{"Link7_R", "ee_R", "gripper_R_link", "left_finger_R_link", "right_finger_R_link", "hand_mount_R", "right_palm_link", "right_finger1_link1"}},
 }};
+const std::array<const char *, 2> kDefaultWujihandJointStateTopics{{
+    "/left/joint_states", "/right/joint_states"}};
 
 constexpr char kGripperCollisionMarkerTopic[] = "/gripper_collision_markers";
 constexpr double kGripperHeightInterceptM = 0.15;
@@ -211,6 +213,12 @@ double gripper_radius_m(double percent)
     return kGripperRadiusInterceptM + kGripperRadiusSlopeM * percent;
 }
 
+bool is_tracked_arm_joint_name(const std::string &name)
+{
+    return std::find(kLeftJointNames.begin(), kLeftJointNames.end(), name) != kLeftJointNames.end() ||
+           std::find(kRightJointNames.begin(), kRightJointNames.end(), name) != kRightJointNames.end();
+}
+
 }  // namespace
 
 namespace marvin_system {
@@ -315,8 +323,17 @@ public:
             this, "collision_guard_service_name", "");
         control_profile_service_name_ = get_param_or_declare<std::string>(
             this, "control_profile_service_name", "");
+        joint_state_topic_ = get_param_or_declare<std::string>(
+            this, "joint_state_topic", "/marvin/joint_states");
         dynamic_joint_state_topic_ = get_param_or_declare<std::string>(
             this, "dynamic_joint_state_topic", "/dynamic_joint_states");
+        wujihand_joint_state_topics_ = get_string_array_param(this, "wujihand_joint_state_topics");
+        if (wujihand_joint_state_topics_.empty()) {
+            wujihand_joint_state_topics_ = {
+                kDefaultWujihandJointStateTopics[0],
+                kDefaultWujihandJointStateTopics[1],
+            };
+        }
         teleop_use_joint_impedance_ = get_param_or_declare<bool>(
             this, "teleop_use_joint_impedance", true);
         teleop_disable_collision_guard_ = get_param_or_declare<bool>(
@@ -443,9 +460,19 @@ public:
                 std::bind(&MarvinMotionServer::handle_teleop_state, this, std::placeholders::_1));
         }
         joint_state_subscription_ = this->create_subscription<sensor_msgs::msg::JointState>(
-            "/joint_states",
+            joint_state_topic_,
             rclcpp::SensorDataQoS(),
             std::bind(&MarvinMotionServer::handle_joint_state, this, std::placeholders::_1));
+        for (const auto &topic : wujihand_joint_state_topics_) {
+            if (topic.empty()) {
+                continue;
+            }
+            wujihand_joint_state_subscriptions_.push_back(
+                this->create_subscription<sensor_msgs::msg::JointState>(
+                    topic,
+                    rclcpp::SensorDataQoS(),
+                    std::bind(&MarvinMotionServer::handle_wujihand_joint_state, this, std::placeholders::_1)));
+        }
         if (!dynamic_joint_state_topic_.empty()) {
             dynamic_joint_state_subscription_ =
                 this->create_subscription<control_msgs::msg::DynamicJointState>(
@@ -513,7 +540,7 @@ public:
             "legacy_fallback=%s return_mode=%s planning_group=%s execute=%s "
             "initial_mode=%s teleop_services=%s primary_controller=%s trajectory_controller=%s "
             "collision_guard_service=%s control_profile_service=%s teleop_impedance=%s "
-            "teleop_collision_guard_off=%s "
+            "teleop_collision_guard_off=%s wujihand_topics=%zu "
             "go_home_sequence=%zu recovery=%s recovery_topic=%s scene_objects=%zu",
             backend_.c_str(),
             go_home_service_name_.c_str(),
@@ -531,10 +558,14 @@ public:
             control_profile_service_name_.c_str(),
             to_bool_string(teleop_use_joint_impedance_).c_str(),
             to_bool_string(teleop_disable_collision_guard_).c_str(),
+            wujihand_joint_state_topics_.size(),
             go_home_pose_sequence_.size(),
             to_bool_string(recovery_enabled_).c_str(),
             recovery_command_topic_.c_str(),
             count_scene_objects());
+        for (const auto &topic : wujihand_joint_state_topics_) {
+            RCLCPP_INFO(get_logger(), "Tracking Wuji joint states from %s", topic.c_str());
+        }
     }
 
     ~MarvinMotionServer() override
@@ -636,6 +667,18 @@ private:
         }
     }
 
+    void handle_wujihand_joint_state(const sensor_msgs::msg::JointState &msg)
+    {
+        std::lock_guard<std::mutex> lock(joint_state_mutex_);
+        for (size_t i = 0; i < msg.name.size() && i < msg.position.size(); ++i) {
+            const auto &name = msg.name[i];
+            if (is_tracked_arm_joint_name(name)) {
+                continue;
+            }
+            recovery_aux_joint_positions_rad_[name] = msg.position[i];
+        }
+    }
+
     void handle_dynamic_joint_state(const control_msgs::msg::DynamicJointState &msg)
     {
         DynamicHardwareObservation observation;
@@ -704,7 +747,7 @@ private:
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
 
-        error_message = "Timed out waiting for /joint_states feedback.";
+        error_message = "Timed out waiting for " + joint_state_topic_ + " feedback.";
         return false;
     }
 
@@ -723,6 +766,32 @@ private:
                 joint_positions_rad_[kJointsPerArm + joint] * 180.0 / M_PI;
         }
         return true;
+    }
+
+    void apply_aux_joint_positions_to_state(moveit::core::RobotState &state) const
+    {
+        std::lock_guard<std::mutex> lock(joint_state_mutex_);
+        for (const auto &[name, value] : recovery_aux_joint_positions_rad_) {
+            if (!std::isfinite(value)) {
+                continue;
+            }
+            const moveit::core::JointModel *joint_model = state.getRobotModel()->getJointModel(name);
+            if (joint_model == nullptr) {
+                continue;
+            }
+            state.setVariablePosition(name, value);
+        }
+    }
+
+    void append_aux_joint_targets(std::map<std::string, double> &target) const
+    {
+        std::lock_guard<std::mutex> lock(joint_state_mutex_);
+        for (const auto &[name, value] : recovery_aux_joint_positions_rad_) {
+            if (!std::isfinite(value)) {
+                continue;
+            }
+            target.emplace(name, value);
+        }
     }
 
     struct EscapeCollisionEvaluation {
@@ -909,6 +978,7 @@ private:
                 escape_gripper_var_indices_[index],
                 clamp_gripper_percent(gripper_percents[index]));
         }
+        apply_aux_joint_positions_to_state(state);
         state.update();
 
         for (size_t index = 0; index < kTrackedGripperCount; ++index) {
@@ -1294,7 +1364,7 @@ private:
         if (!build_named_target(fallback_pose_id, target, error_message)) {
             if (!feedback_error.empty()) {
                 error_message =
-                    "Failed to build primary command seed from /joint_states (" + feedback_error +
+                    "Failed to build primary command seed from " + joint_state_topic_ + " (" + feedback_error +
                     ") and fallback pose '" + fallback_pose_id + "' (" + error_message + ").";
             } else {
                 error_message =
@@ -1311,9 +1381,10 @@ private:
 
         RCLCPP_WARN(
             get_logger(),
-            "Primary command seed fell back to named pose '%s' because /joint_states feedback "
+            "Primary command seed fell back to named pose '%s' because %s feedback "
             "was unavailable (%s).",
             fallback_pose_id.c_str(),
+            joint_state_topic_.c_str(),
             feedback_error.c_str());
         return true;
     }
@@ -1652,6 +1723,23 @@ private:
         if (!teleop_services_configured_) {
             return true;
         }
+        std::string before_mode;
+        std::string before_teleop_state;
+        bool before_motion_busy = false;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            before_mode = current_mode_;
+            before_teleop_state = latest_teleop_state_;
+            before_motion_busy = motion_busy_;
+        }
+        RCLCPP_INFO(
+            get_logger(),
+            "Teleop set_enabled request: value=%s service=%s mode=%s teleop=%s busy=%s",
+            to_bool_string(value).c_str(),
+            tracker_set_enabled_service_.c_str(),
+            before_mode.c_str(),
+            before_teleop_state.c_str(),
+            to_bool_string(before_motion_busy).c_str());
         if (!call_tracker_set_bool(
                 tracker_set_enabled_client_,
                 tracker_set_enabled_service_,
@@ -1660,12 +1748,30 @@ private:
             return false;
         }
 
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        if (value) {
-            latest_teleop_state_ = kTeleopStateEnabled;
-        } else if (latest_teleop_state_ == kTeleopStateEnabled) {
-            latest_teleop_state_ = kTeleopStateArmed;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            if (value) {
+                latest_teleop_state_ = kTeleopStateEnabled;
+            } else if (latest_teleop_state_ == kTeleopStateEnabled) {
+                latest_teleop_state_ = kTeleopStateArmed;
+            }
         }
+        std::string after_mode;
+        std::string after_teleop_state;
+        bool after_motion_busy = false;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            after_mode = current_mode_;
+            after_teleop_state = latest_teleop_state_;
+            after_motion_busy = motion_busy_;
+        }
+        RCLCPP_INFO(
+            get_logger(),
+            "Teleop set_enabled complete: value=%s mode=%s teleop=%s busy=%s",
+            to_bool_string(value).c_str(),
+            after_mode.c_str(),
+            after_teleop_state.c_str(),
+            to_bool_string(after_motion_busy).c_str());
         return true;
     }
 
@@ -1805,10 +1911,44 @@ private:
         return call_control_profile(ControlProfile::kPositionFollow, error_message);
     }
 
+    ControllerStates inferred_controller_states_for_mode(const std::string &mode) const
+    {
+        ControllerStates states;
+        if (!primary_controller_name_.empty()) {
+            states.primary_exists = true;
+            states.primary_state = kControllerStateInactive;
+        }
+        if (!trajectory_controller_name_.empty()) {
+            states.trajectory_exists = true;
+            states.trajectory_state = kControllerStateInactive;
+        }
+
+        if (mode == kModeMotion) {
+            if (!trajectory_controller_name_.empty()) {
+                states.trajectory_active = true;
+                states.trajectory_state = kControllerStateActive;
+            }
+            return states;
+        }
+
+        if (mode == kModeSafeHold || mode == kModeTeleop) {
+            if (!primary_controller_name_.empty()) {
+                states.primary_active = true;
+                states.primary_state = kControllerStateActive;
+            }
+        }
+        return states;
+    }
+
     bool fetch_controller_states(
         ControllerStates &states,
         std::string &error_message)
     {
+        RCLCPP_INFO(
+            get_logger(),
+            "Controller state query start: list_service=%s timeout=%.2f",
+            controller_manager_list_service_.c_str(),
+            controller_switch_timeout_sec_);
         if (!wait_for_client_service(
                 controller_manager_list_service_,
                 list_controllers_client_,
@@ -1819,17 +1959,28 @@ private:
 
         auto request = std::make_shared<controller_manager_msgs::srv::ListControllers::Request>();
         auto future = list_controllers_client_->async_send_request(request);
+        RCLCPP_INFO(get_logger(), "Controller state query sent.");
         const auto status = future.wait_for(std::chrono::duration<double>(controller_switch_timeout_sec_));
         if (status != std::future_status::ready) {
             error_message = "Timed out waiting for controller list response.";
+            RCLCPP_WARN(
+                get_logger(),
+                "Controller state query timeout: service=%s error=%s",
+                controller_manager_list_service_.c_str(),
+                error_message.c_str());
             return false;
         }
 
         const auto response = future.get();
         if (!response) {
             error_message = "Controller list request returned no response.";
+            RCLCPP_WARN(get_logger(), "Controller state query returned no response.");
             return false;
         }
+        RCLCPP_INFO(
+            get_logger(),
+            "Controller state query response received: count=%zu",
+            response->controller.size());
 
         states = ControllerStates{};
         for (const auto &controller : response->controller) {
@@ -1852,6 +2003,15 @@ private:
         if (!trajectory_controller_name_.empty() && !states.trajectory_exists) {
             states.trajectory_state = kControllerStateMissing;
         }
+        RCLCPP_INFO(
+            get_logger(),
+            "Controller state snapshot: primary_exists=%s primary_active=%s primary_state=%s trajectory_exists=%s trajectory_active=%s trajectory_state=%s",
+            to_bool_string(states.primary_exists).c_str(),
+            to_bool_string(states.primary_active).c_str(),
+            states.primary_state.c_str(),
+            to_bool_string(states.trajectory_exists).c_str(),
+            to_bool_string(states.trajectory_active).c_str(),
+            states.trajectory_state.c_str());
         return true;
     }
 
@@ -1902,6 +2062,11 @@ private:
 
     bool ensure_primary_controller_active(std::string &error_message)
     {
+        RCLCPP_INFO(
+            get_logger(),
+            "Ensure primary controller active start: primary=%s trajectory=%s",
+            primary_controller_name_.c_str(),
+            trajectory_controller_name_.c_str());
         if (primary_controller_name_.empty()) {
             error_message = "Primary controller name is not configured.";
             return false;
@@ -1928,6 +2093,21 @@ private:
             deactivate.push_back(trajectory_controller_name_);
         }
         std::string switch_error;
+        const auto join_controller_names = [](const std::vector<std::string> &names) {
+            std::string joined;
+            for (size_t i = 0; i < names.size(); ++i) {
+                if (i > 0) {
+                    joined += ",";
+                }
+                joined += names[i];
+            }
+            return joined;
+        };
+        RCLCPP_INFO(
+            get_logger(),
+            "Ensure primary controller active switch request: activate=[%s] deactivate=[%s]",
+            join_controller_names(activate).c_str(),
+            join_controller_names(deactivate).c_str());
         if (!switch_controllers(activate, deactivate, switch_error) &&
             !wait_for_controller_state(true, false, states, error_message)) {
             error_message = switch_error.empty() ? error_message : switch_error;
@@ -1941,6 +2121,7 @@ private:
                 "Failed to activate primary controller and deactivate trajectory controller.";
             return false;
         }
+        RCLCPP_INFO(get_logger(), "Ensure primary controller active complete.");
         return true;
     }
 
@@ -2001,13 +2182,13 @@ private:
             if (!ensure_primary_controller_active(error_message)) {
                 return false;
             }
-            if (!ensure_mode_control_profile(kModeSafeHold, error_message)) {
-                return false;
-            }
             if (!call_teleop_set_enabled(false, error_message)) {
                 return false;
             }
             if (!call_teleop_set_armed(false, error_message)) {
+                return false;
+            }
+            if (!ensure_mode_control_profile(kModeSafeHold, error_message)) {
                 return false;
             }
             if (teleop_disable_collision_guard_ &&
@@ -2234,7 +2415,9 @@ private:
         attached.object.primitives.push_back(primitive);
         attached.object.primitive_poses.push_back(make_gripper_collision_pose(height_m));
         for (const auto *touch_link : kGripperTouchLinks[index]) {
-            attached.touch_links.emplace_back(touch_link);
+            if (escape_robot_model_ && escape_robot_model_->hasLinkModel(touch_link)) {
+                attached.touch_links.emplace_back(touch_link);
+            }
         }
         return attached;
     }
@@ -2526,7 +2709,16 @@ private:
         moveit::core::MoveItErrorCode result;
         {
             std::lock_guard<std::mutex> lock(moveit_mutex_);
-            move_group_->setStartStateToCurrentState();
+            auto current_state = move_group_->getCurrentState();
+            if (!current_state) {
+                error_message =
+                    "MoveIt current state is unavailable from " + joint_state_topic_ + ".";
+                return false;
+            }
+            moveit::core::RobotState start_state = *current_state;
+            apply_aux_joint_positions_to_state(start_state);
+            start_state.update();
+            move_group_->setStartState(start_state);
             if (!move_group_->setJointValueTarget(target)) {
                 error_message = "Failed to set MoveIt joint target for pose '" + pose_id + "'.";
                 return false;
@@ -2612,10 +2804,6 @@ private:
 
     bool collect_status(MotionStatusSnapshot &status)
     {
-        ControllerStates controllers;
-        std::string error_message;
-        const bool controllers_ok = fetch_controller_states(controllers, error_message);
-
         std::string teleop_state;
         std::string fallback_mode;
         bool motion_busy = false;
@@ -2627,6 +2815,16 @@ private:
         }
         if (teleop_state.empty()) {
             teleop_state = kTeleopStateUnknown;
+        }
+
+        ControllerStates controllers;
+        std::string error_message;
+        bool controllers_ok = false;
+        if (motion_busy) {
+            controllers = inferred_controller_states_for_mode(fallback_mode);
+            controllers_ok = true;
+        } else {
+            controllers_ok = fetch_controller_states(controllers, error_message);
         }
 
         status.teleop_state = teleop_state;
@@ -2648,6 +2846,26 @@ private:
         }
 
         const auto observation = latest_dynamic_observation_copy();
+        if (motion_busy) {
+            status.primary_controller_state = controllers.primary_state;
+            status.trajectory_controller_state = controllers.trajectory_state;
+            if (dynamic_observation_has_hardware_error(observation)) {
+                status.success = false;
+                status.mode = kModeFault;
+                status.controller_interlock_ok = true;
+                status.message = dynamic_hardware_error_message(observation);
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                current_mode_ = kModeFault;
+                return false;
+            }
+            status.controller_interlock_ok = true;
+            status.mode = infer_mode_from_snapshot(
+                controllers, teleop_state, motion_busy, fallback_mode);
+            status.success = true;
+            status.message = "Motion status inferred while motion is busy.";
+            return true;
+        }
+
         if (dynamic_observation_has_hardware_error(observation)) {
             status.success = false;
             status.mode = kModeFault;
@@ -2812,8 +3030,16 @@ private:
         }
 
         set_busy(true);
+        RCLCPP_INFO(
+            get_logger(),
+            "GoHome start. backend=%s return_mode=%s preflight=%s recovery=%s",
+            backend_.c_str(),
+            go_home_return_mode_.c_str(),
+            to_bool_string(go_home_preflight_enabled_).c_str(),
+            to_bool_string(recovery_enabled_).c_str());
 
         const auto finish = [this](const std::string &mode) {
+            RCLCPP_INFO(get_logger(), "GoHome finish. next_mode=%s", mode.c_str());
             set_busy(false);
             if (mode == kModeFault) {
                 std::lock_guard<std::mutex> lock(state_mutex_);
@@ -2832,6 +3058,7 @@ private:
                 wait_for_legacy_home_completion = go_home_ok;
             }
         } else if (backend_ == "moveit") {
+            RCLCPP_INFO(get_logger(), "GoHome step: disable collision guard before motion.");
             if (!call_collision_guard_set_enabled(false, error_message)) {
                 finish(kModeSafeHold);
                 response->success = false;
@@ -2853,6 +3080,7 @@ private:
                 start_state_requires_escape = !start_state_evaluation.safe;
             }
 
+            RCLCPP_INFO(get_logger(), "GoHome step: transition to MOTION mode.");
             if (transition_to_mode(kModeMotion, error_message)) {
                 if (start_state_requires_escape) {
                     RCLCPP_WARN(
@@ -2870,7 +3098,13 @@ private:
                     }
                 }
 
+                RCLCPP_INFO(get_logger(), "GoHome step: execute MoveIt home sequence.");
                 go_home_ok = execute_moveit_go_home(error_message);
+                RCLCPP_INFO(
+                    get_logger(),
+                    "GoHome step complete: MoveIt home sequence result=%s message=%s",
+                    to_bool_string(go_home_ok).c_str(),
+                    error_message.empty() ? "<none>" : error_message.c_str());
                 if (!go_home_ok &&
                     (error_message.rfind("MoveIt planning failed", 0) == 0 ||
                      error_message.rfind("MoveIt execution failed", 0) == 0) &&
@@ -2888,7 +3122,13 @@ private:
                                 "unknown contact" : current_evaluation.contact_pair.c_str(),
                             current_evaluation.distance);
                         if (execute_collision_escape(error_message, true)) {
+                            RCLCPP_INFO(get_logger(), "GoHome step: retry MoveIt home after collision escape.");
                             go_home_ok = execute_moveit_go_home(error_message);
+                            RCLCPP_INFO(
+                                get_logger(),
+                                "GoHome step complete: retry MoveIt home result=%s message=%s",
+                                to_bool_string(go_home_ok).c_str(),
+                                error_message.empty() ? "<none>" : error_message.c_str());
                         }
                     }
                 }
@@ -2924,6 +3164,7 @@ private:
         }
 
         if (go_home_ok && wait_for_legacy_home_completion) {
+            RCLCPP_INFO(get_logger(), "GoHome step: wait for legacy home completion.");
             std::string completion_error;
             if (!wait_for_named_pose_reached(
                     home_pose_id_,
@@ -2946,6 +3187,7 @@ private:
         const bool returning_to_primary_controller =
             go_home_return_mode_ == kModeSafeHold || go_home_return_mode_ == kModeTeleop;
         if (go_home_ok && returning_to_primary_controller) {
+            RCLCPP_INFO(get_logger(), "GoHome step: reseed primary controller before mode restore.");
             std::string reseed_error;
             if (!reseed_primary_command_reference("before mode restore", reseed_error)) {
                 RCLCPP_WARN(
@@ -2956,9 +3198,19 @@ private:
         }
 
         std::string restore_error;
+        RCLCPP_INFO(
+            get_logger(),
+            "GoHome step: restore mode to %s.",
+            go_home_return_mode_.c_str());
         const bool restored_mode = transition_to_mode(go_home_return_mode_, restore_error);
+        RCLCPP_INFO(
+            get_logger(),
+            "GoHome step complete: restore mode result=%s message=%s",
+            to_bool_string(restored_mode).c_str(),
+            restore_error.empty() ? "<none>" : restore_error.c_str());
 
         if (go_home_ok && restored_mode && returning_to_primary_controller) {
+            RCLCPP_INFO(get_logger(), "GoHome step: reseed primary controller after mode restore.");
             std::string reseed_error;
             if (!reseed_primary_command_reference("after mode restore", reseed_error)) {
                 RCLCPP_WARN(
@@ -2969,9 +3221,15 @@ private:
         }
 
         std::string collision_guard_restore_error;
+        RCLCPP_INFO(get_logger(), "GoHome step: restore collision guard=%s.", collision_guard_disabled ? "true" : "skip");
         const bool restored_collision_guard =
             !collision_guard_disabled ||
             call_collision_guard_set_enabled(true, collision_guard_restore_error);
+        RCLCPP_INFO(
+            get_logger(),
+            "GoHome step complete: restore collision guard result=%s message=%s",
+            to_bool_string(restored_collision_guard).c_str(),
+            collision_guard_restore_error.empty() ? "<none>" : collision_guard_restore_error.c_str());
 
         if (!restored_mode || !restored_collision_guard) {
             finish(kModeFault);
@@ -3002,6 +3260,7 @@ private:
             return;
         }
 
+        RCLCPP_INFO(get_logger(), "GoHome step: returning success response.");
         finish(go_home_return_mode_);
         response->success = true;
         if (backend_ == "moveit") {
@@ -3035,6 +3294,8 @@ private:
     rclcpp_action::Client<FollowJointTrajectory>::SharedPtr trajectory_action_client_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr teleop_state_subscription_;
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_subscription_;
+    std::vector<rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr>
+        wujihand_joint_state_subscriptions_;
     rclcpp::Subscription<control_msgs::msg::DynamicJointState>::SharedPtr
         dynamic_joint_state_subscription_;
     rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr recovery_command_publisher_;
@@ -3081,7 +3342,9 @@ private:
     std::string primary_controller_name_;
     std::string collision_guard_service_name_;
     std::string control_profile_service_name_;
+    std::string joint_state_topic_{"/marvin/joint_states"};
     std::string dynamic_joint_state_topic_{"/dynamic_joint_states"};
+    std::vector<std::string> wujihand_joint_state_topics_;
     bool teleop_use_joint_impedance_{true};
     bool teleop_disable_collision_guard_{false};
     bool use_mock_hardware_{false};

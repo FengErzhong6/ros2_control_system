@@ -215,11 +215,14 @@ def launch_setup(context):
 
     # ── Core ──────────────────────────────────────────────────────────────
 
+    joint_state_remappings = [("/joint_states", "/marvin/joint_states")]
+
     ros2_control_node = Node(
         package="controller_manager",
         executable="ros2_control_node",
         output="both",
         parameters=[robot_description, controllers_yaml, trajectory_controllers_yaml],
+        remappings=joint_state_remappings,
     )
 
     robot_state_publisher_node = Node(
@@ -227,6 +230,7 @@ def launch_setup(context):
         executable="robot_state_publisher",
         output="both",
         parameters=[robot_description],
+        remappings=joint_state_remappings,
     )
 
     pkg_share = get_package_share_directory("marvin_system")
@@ -269,6 +273,7 @@ def launch_setup(context):
         executable="move_group_wrapper.py",
         output="screen",
         parameters=move_group_params,
+        remappings=joint_state_remappings,
         sigterm_timeout="15.0",
     )
 
@@ -277,6 +282,7 @@ def launch_setup(context):
         executable="motion_server",
         name="marvin_motion_server",
         output="screen",
+        remappings=joint_state_remappings,
         parameters=[
             robot_description,
             home_poses_file,
@@ -350,7 +356,7 @@ def launch_setup(context):
             {
                 "home_config_path": home_poses_file,
                 "publish_topic": "gui_joint_states",
-                "feedback_topic": "/joint_states",
+                "feedback_topic": "/marvin/joint_states",
                 "go_home_service": "/marvin_motion/go_home",
                 "go_home_timeout_sec": 20.0,
                 "feedback_timeout_sec": 0.0,
