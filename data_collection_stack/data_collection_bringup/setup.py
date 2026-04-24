@@ -41,6 +41,7 @@ setup(
     entry_points={
         "console_scripts": [
             "performance_smoke = data_collection_bringup.performance_smoke:main",
+            "timestamp_relay = data_collection_bringup.timestamp_relay:main",
         ],
     },
 )

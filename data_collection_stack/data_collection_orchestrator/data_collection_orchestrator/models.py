@@ -39,14 +39,17 @@ class RecordingPolicy:
     capture_git_state: bool = True
     preview_drop_policy: str = "latest_only"
     require_time_sync_healthy: bool = True
-    time_sync_mode: str = "hardware_trigger_or_common_clock"
-    canonical_timestamp_clock: str = "shared_dataset_clock"
+    time_sync_mode: str = "relay_ros_clock"
+    canonical_timestamp_clock: str = "relay_ros_clock"
     canonical_timestamp_semantics: dict[str, str] = field(
         default_factory=lambda: {
-            "image": "source_capture_time",
-            "joint_states": "controller_measurement_time",
+            "image": "relay_receive_time",
+            "joint_states": "relay_receive_time",
         }
     )
+    relay_record_topics: bool = False
+    relay_record_topic_prefix: str = "/record"
+    canonical_joint_state_topic: str = "/joint_states"
     time_sync_max_offset_ns: int = 1_000_000
     joint_state_min_rate_hz: float = 100.0
     joint_state_max_jitter_ms: float = 2.0

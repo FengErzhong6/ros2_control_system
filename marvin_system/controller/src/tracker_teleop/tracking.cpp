@@ -408,6 +408,30 @@ std::array<double, kJointsPerArm> TrackerTeleopController::lowPassFilterIkTarget
     return filtered_joints_rad;
 }
 
+void TrackerTeleopController::publishJointCommand(const rclcpp::Time &stamp)
+{
+    if (!rt_pub_joint_command_ || !rt_pub_joint_command_->trylock()) {
+        return;
+    }
+
+    auto &msg = rt_pub_joint_command_->msg_;
+    msg.header.stamp = stamp;
+    if (msg.name.size() != joint_names_.size()) {
+        msg.name = joint_names_;
+    }
+    msg.position.resize(kTotalJoints);
+    size_t index = 0;
+    for (size_t arm = 0; arm < kArmCount; ++arm) {
+        const auto &runtime = arm_state_[arm];
+        for (double joint : runtime.smoothed_joints_rad) {
+            msg.position[index++] = joint;
+        }
+    }
+    msg.velocity.clear();
+    msg.effort.clear();
+    rt_pub_joint_command_->unlockAndPublish();
+}
+
 void TrackerTeleopController::holdAllArms(double dt)
 {
     for (size_t arm = 0; arm < kArmCount; ++arm) {

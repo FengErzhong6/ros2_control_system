@@ -9,7 +9,9 @@
 
   <buildtool_depend>ament_python</buildtool_depend>
 
-  <depend>data_collection_interfaces</depend>
+  <build_depend>data_collection_interfaces</build_depend>
+  <build_export_depend>data_collection_interfaces</build_export_depend>
+  <exec_depend>data_collection_interfaces</exec_depend>
   <depend>data_collection_orchestrator</depend>
   <depend>data_collection_ui</depend>
   <depend>camera_system</depend>
@@ -21,6 +23,7 @@
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, EmitEvent, RegisterEventHandler
+from launch.actions import DeclareLaunchArgument, EmitEvent, OpaqueFunction, RegisterEventHandler
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.events import Shutdown
@@ -7,6 +9,8 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
+
+from data_collection_bringup.relay_launch import relay_setup
 
 
 def generate_launch_description():
@@ -111,6 +115,7 @@ def generate_launch_description():
             DeclareLaunchArgument("shutdown_on_supervisor_exit", default_value="false"),
             DeclareLaunchArgument("supervisor_sigterm_timeout_sec", default_value="20.0"),
             DeclareLaunchArgument("supervisor_sigkill_timeout_sec", default_value="20.0"),
+            OpaqueFunction(function=relay_setup),
             supervisor_node,
             ui_node,
             RegisterEventHandler(

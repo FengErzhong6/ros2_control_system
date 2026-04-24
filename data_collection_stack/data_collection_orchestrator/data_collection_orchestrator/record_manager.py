@@ -43,9 +43,10 @@ class RecordManager:
         normalized = self._normalize_topics(topics)
         if not normalized:
             raise RuntimeError("Recording topic list is empty after normalization.")
-        if "/joint_states" not in normalized:
+        if self._node.recording_policy().canonical_joint_state_topic not in normalized:
             self._node.get_logger().warn(
-                "Recording topic list does not include canonical /joint_states. "
+                "Recording topic list does not include canonical joint state topic "
+                f"{self._node.recording_policy().canonical_joint_state_topic}. "
                 "Session can still record, but it will not be training-ready under the plan contract."
             )
         if not any("image_raw" in topic for topic in normalized):

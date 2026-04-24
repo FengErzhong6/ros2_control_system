@@ -29,6 +29,9 @@ from data_collection_interfaces.srv import (
     ListRecipes,
 )
 
+from data_collection_bringup.relay_mapping import relay_output_topic
+from .topic_relay_utils import normalize_topic
+
 from .adapters import AdapterResult, create_adapter
 from .command_server import CommandServer
 from .event_log import EventLog
@@ -336,6 +339,19 @@ class DataCollectionSupervisor(Node):
                 str(key): str(value)
                 for key, value in canonical_timestamp_semantics.items()
             },
+            relay_record_topics=_coerce_bool(
+                raw_policy.get("relay_record_topics", defaults.relay_record_topics)
+            ),
+            relay_record_topic_prefix=str(
+                raw_policy.get(
+                    "relay_record_topic_prefix", defaults.relay_record_topic_prefix
+                )
+            ),
+            canonical_joint_state_topic=str(
+                raw_policy.get(
+                    "canonical_joint_state_topic", defaults.canonical_joint_state_topic
+                )
+            ),
             time_sync_max_offset_ns=_nonnegative_int(
                 raw_policy.get("time_sync_max_offset_ns"), defaults.time_sync_max_offset_ns
             ),
@@ -359,6 +375,7 @@ class DataCollectionSupervisor(Node):
             ),
         )
 
+
     def _publish_state(self) -> None:
         with self._state_lock:
             if not rclpy.ok():
@@ -376,11 +393,21 @@ class DataCollectionSupervisor(Node):
         except Exception:
             return
 
+    def recording_policy(self) -> RecordingPolicy:
+        return self._recording_policy
+
+    def _record_topic(self, topic: str) -> str:
+        normalized = normalize_topic(topic)
+        if not self._recording_policy.relay_record_topics:
+            return normalized
+        return relay_output_topic(normalized, self._recording_policy.relay_record_topic_prefix)
+
     def _session_record_topics(self) -> list[str]:
         if self._current_recipe is None:
             return []
         if self._current_recipe.record_topics:
-            return self._record_manager.validate_record_topics(self._current_recipe.record_topics)
+            topics = [self._record_topic(topic) for topic in self._current_recipe.record_topics]
+            return self._record_manager.validate_record_topics(topics)
 
         topics: list[str] = []
         seen: set[str] = set()
@@ -389,7 +416,7 @@ class DataCollectionSupervisor(Node):
             if adapter is None:
                 continue
             for topic in adapter.record_topics():
-                normalized = str(topic).strip()
+                normalized = self._record_topic(str(topic).strip())
                 if not normalized or normalized in seen:
                     continue
                 topics.append(normalized)
@@ -405,7 +432,10 @@ class DataCollectionSupervisor(Node):
     def _time_sync_health_summary(self, topics: list[str]) -> dict[str, Any]:
         image_topics = [topic for topic in topics if "image_raw" in topic]
         has_any_joint_state = any(topic.endswith("/joint_states") for topic in topics)
-        has_canonical_joint_states = "/joint_states" in topics
+        canonical_joint_state_topic = normalize_topic(
+            self._recording_policy.canonical_joint_state_topic
+        )
+        has_canonical_joint_states = canonical_joint_state_topic in topics
         healthy = bool(image_topics) and has_any_joint_state
         summary = {
             "healthy": healthy,
@@ -413,6 +443,7 @@ class DataCollectionSupervisor(Node):
             "required": self._recording_policy.require_time_sync_healthy,
             "camera_topics": image_topics,
             "joint_states_present": has_any_joint_state,
+            "canonical_joint_state_topic": canonical_joint_state_topic,
             "canonical_topics_ok": bool(image_topics) and has_canonical_joint_states,
             "joint_state_rate_hz": self._recording_policy.joint_state_min_rate_hz,
             "joint_state_jitter_ms": self._recording_policy.joint_state_max_jitter_ms,
@@ -1287,7 +1318,6 @@ class DataCollectionSupervisor(Node):
     ) -> str | None:
         layer_device_ids = [device.device_id for device in layer]
         layer_name = ", ".join(layer_device_ids)
-        started_device_ids: list[str] = []
 
         self._publish_feedback(
             goal_handle,
@@ -1309,15 +1339,12 @@ class DataCollectionSupervisor(Node):
             bringup_failures: list[str] = []
             for device in layer:
                 failure = bringup_futures[device.device_id].result()
-                if failure is None:
-                    started_device_ids.append(device.device_id)
-                    continue
-                bringup_failures.append(failure)
+                if failure is not None:
+                    bringup_failures.append(failure)
 
             if bringup_failures:
-                rollback_failure = self._shutdown_layer_devices(started_device_ids)
-                if rollback_failure is not None:
-                    return f"{bringup_failures[0]}\nLayer cleanup failure: {rollback_failure}"
+                # Do not roll back unrelated siblings in the same dependency layer.
+                # Startup failure cleanup will disconnect the whole runtime afterwards.
                 return bringup_failures[0]
 
             start_futures = {
@@ -1336,9 +1363,8 @@ class DataCollectionSupervisor(Node):
                     start_failures.append(failure)
 
             if start_failures:
-                rollback_failure = self._shutdown_layer_devices(started_device_ids)
-                if rollback_failure is not None:
-                    return f"{start_failures[0]}\nLayer cleanup failure: {rollback_failure}"
+                # Keep successful siblings alive until the outer startup failure reset.
+                # Otherwise one independent device failure can spuriously flap another.
                 return start_failures[0]
 
         return None

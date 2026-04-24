@@ -418,34 +418,36 @@ TrackerTeleopController::on_deactivate(const rclcpp_lifecycle::State &)
  *     instead of continuing toward the last IK target.
  */
 controller_interface::return_type
-TrackerTeleopController::update(const rclcpp::Time &, const rclcpp::Duration &period)
+TrackerTeleopController::update(const rclcpp::Time &time, const rclcpp::Duration &period)
 {
     if (!kine_initialized_) {
         return controller_interface::return_type::OK;
     }
 
     const double dt = period.seconds();
-    const auto now = get_node()->get_clock()->now();
     (void)updateTfSnapshot();
     if (go_home_requested_.load(std::memory_order_relaxed) ||
         go_home_active_.load(std::memory_order_relaxed)) {
         processGoHome(dt);
+        publishJointCommand(time);
         return controller_interface::return_type::OK;
     }
 
-    const bool teleop_enabled = isTeleopEnabled(now);
+    const bool teleop_enabled = isTeleopEnabled(time);
     const bool force_reacquire = teleop_enabled &&
         force_tracker_reacquire_.exchange(false, std::memory_order_relaxed);
 
     if (!teleop_enabled) {
         holdAllArms(dt);
+        publishJointCommand(time);
         return controller_interface::return_type::OK;
     }
 
     for (size_t arm = 0; arm < kArmCount; ++arm) {
-        processArmUpdate(arm, tf_snapshot_[arm], now, dt, force_reacquire);
+        processArmUpdate(arm, tf_snapshot_[arm], time, dt, force_reacquire);
     }
 
+    publishJointCommand(time);
     return controller_interface::return_type::OK;
 }
 

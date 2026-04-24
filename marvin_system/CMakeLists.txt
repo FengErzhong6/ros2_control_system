@@ -163,6 +163,7 @@ ament_target_dependencies(marvin_system_tracker_teleop_controller PUBLIC
   std_srvs
   tf2_ros
   visualization_msgs
+  realtime_tools
 )
 target_link_libraries(marvin_system_tracker_teleop_controller PUBLIC
   controller_interface::controller_interface

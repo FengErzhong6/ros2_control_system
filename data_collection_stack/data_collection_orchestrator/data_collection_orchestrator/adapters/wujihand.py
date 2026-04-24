@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from controller_manager_msgs.srv import ListControllers
+from controller_manager_msgs.srv import ListControllers, SwitchController
 import os
 from pathlib import Path
 import shlex
@@ -45,14 +45,21 @@ class WujihandAdapter(AdapterBase):
         self._generated_teleop_config_path: Path | None = None
         self._service_callback_group = None
         self._list_controllers_client = None
+        self._switch_controller_client = None
         self._set_enabled_client = None
         self._neutral_command_publisher = None
+        self._last_forward_controller_activation_attempt_monotonic = 0.0
 
         if self.node is not None:
             self._service_callback_group = ReentrantCallbackGroup()
             self._list_controllers_client = self.node.create_client(
                 ListControllers,
                 self._controller_manager_service_name(),
+                callback_group=self._service_callback_group,
+            )
+            self._switch_controller_client = self.node.create_client(
+                SwitchController,
+                self._controller_manager_switch_service_name(),
                 callback_group=self._service_callback_group,
             )
             self._set_enabled_client = self.node.create_client(
@@ -155,6 +162,13 @@ class WujihandAdapter(AdapterBase):
             controllers = self._list_controllers()
             if controllers is not None:
                 last_controllers = controllers
+                if self._should_activate_forward_controller(controllers):
+                    activation_result = self._activate_forward_controller(timeout_sec=2.0)
+                    if activation_result.status == "OK":
+                        refreshed_controllers = self._list_controllers()
+                        if refreshed_controllers is not None:
+                            controllers = refreshed_controllers
+                            last_controllers = controllers
                 if self._controllers_ready(controllers) and self._service_available(
                     self._set_enabled_client,
                     timeout_sec=0.2,
@@ -347,6 +361,9 @@ class WujihandAdapter(AdapterBase):
     def _controller_manager_service_name(self) -> str:
         return f"{self._absolute_namespace(self._hand_namespace())}/controller_manager/list_controllers"
 
+    def _controller_manager_switch_service_name(self) -> str:
+        return f"{self._absolute_namespace(self._hand_namespace())}/controller_manager/switch_controller"
+
     def _pipeline_set_enabled_service_name(self) -> str:
         namespace = self._absolute_namespace(self._pipeline_namespace())
         return f"{namespace}/wujihand_manus_pipeline/set_enabled"
@@ -520,6 +537,7 @@ class WujihandAdapter(AdapterBase):
             "robot_state_publisher",
             "spawner",
             "wujihand_manus_pipeline.py",
+            "ros2",
         }
         if process_name in executable_markers:
             return True
@@ -641,13 +659,70 @@ class WujihandAdapter(AdapterBase):
 
     def _missing_required_controllers(self, controllers: dict[str, str]) -> list[str]:
         missing = []
-        for controller_name, required_states in self.REQUIRED_CONTROLLER_STATES.items():
+        for controller_name, required_states in self._required_controller_states().items():
             actual_state = controllers.get(controller_name)
             if actual_state not in required_states:
                 actual_label = "missing" if actual_state is None else actual_state
                 expected_label = "/".join(sorted(required_states))
                 missing.append(f"{controller_name}={actual_label} (expected {expected_label})")
         return missing
+
+    def _required_controller_states(self) -> dict[str, set[str]]:
+        required = {
+            controller_name: set(required_states)
+            for controller_name, required_states in self.REQUIRED_CONTROLLER_STATES.items()
+        }
+        if not self._launch_arg_enabled(self._runtime_arguments().get("activate_forward_controller", False)):
+            required["forward_position_controller"] = {"inactive", "active"}
+        return required
+
+    def _launch_arg_enabled(self, value: object) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() == "true"
+        return bool(value)
+
+    def _should_activate_forward_controller(self, controllers: dict[str, str]) -> bool:
+        if not self._launch_arg_enabled(self._runtime_arguments().get("activate_forward_controller", False)):
+            return False
+        if controllers.get("joint_state_broadcaster") != "active":
+            return False
+        return controllers.get("forward_position_controller") == "inactive"
+
+    def _activate_forward_controller(self, timeout_sec: float) -> AdapterResult:
+        now = time.monotonic()
+        if now - self._last_forward_controller_activation_attempt_monotonic < 1.0:
+            return AdapterResult.degraded(
+                f"{self.device.device_id}: forward_position_controller activation already in progress."
+            )
+        self._last_forward_controller_activation_attempt_monotonic = now
+
+        request = SwitchController.Request()
+        request.activate_controllers = ["forward_position_controller"]
+        request.deactivate_controllers = []
+        request.strictness = SwitchController.Request.STRICT
+        request.activate_asap = True
+        whole_seconds = int(timeout_sec)
+        request.timeout.sec = whole_seconds
+        request.timeout.nanosec = int((timeout_sec - whole_seconds) * 1_000_000_000)
+
+        response, error_message = self._call_service_response(
+            client=self._switch_controller_client,
+            request=request,
+            timeout_sec=timeout_sec,
+        )
+        if response is None:
+            return AdapterResult.failed(
+                f"{self.device.device_id}: failed to activate forward_position_controller: {error_message}"
+            )
+        if not bool(getattr(response, "ok", False)):
+            return AdapterResult.failed(
+                f"{self.device.device_id}: forward_position_controller activation rejected: {getattr(response, 'message', '')}"
+            )
+        return AdapterResult.ok(
+            f"{self.device.device_id}: forward_position_controller activated."
+        )
 
     def _service_available(self, client, timeout_sec: float) -> bool:
         if client is None or not self._ros_context_is_usable():

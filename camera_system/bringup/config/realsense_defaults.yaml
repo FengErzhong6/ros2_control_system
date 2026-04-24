@@ -30,3 +30,4 @@ profiles:
       initial_reset: true
       wait_for_device_timeout: 15.0
       reconnect_timeout: 6.0
+      rgb_camera.power_line_frequency: 1

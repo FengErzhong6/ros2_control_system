@@ -15,6 +15,8 @@
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "rclcpp/publisher.hpp"
 #include "rclcpp_lifecycle/node_interfaces/lifecycle_node_interface.hpp"
+#include "realtime_tools/realtime_publisher.hpp"
+#include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "std_srvs/srv/set_bool.hpp"
 #include "std_srvs/srv/trigger.hpp"
@@ -102,6 +104,9 @@ private:
     std::array<rclcpp::Publisher<std_msgs::msg::String>::SharedPtr, kArmCount> pub_ik_status_;
     std::array<rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr, kArmCount>
         pub_current_pose_;
+    rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr pub_joint_command_;
+    realtime_tools::RealtimePublisher<sensor_msgs::msg::JointState>::SharedPtr
+        rt_pub_joint_command_;
     rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_viz_markers_;
     rclcpp::TimerBase::SharedPtr diagnostics_timer_;
     std::mutex diagnostics_mutex_;
@@ -364,6 +369,7 @@ private:
                      ArmDiagnostics *diag);
     void computeAndPublishFK();
     void publishIKStatus(size_t arm, IKResult result);
+    void publishJointCommand(const rclcpp::Time &stamp);
     void queueDiagnostics(size_t arm, const ArmDiagnostics &diag);
     void diagnosticsTimerCallback();
     void publishVizMarkers(size_t arm, const ArmDiagnostics &diag);

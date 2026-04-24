@@ -75,3 +75,6 @@ record_topics:
   - /marvin/joint_states
   - /left_hand/joint_states
   - /right_hand/joint_states
+  - /tracker_teleop_controller/joint_command
+  - /left_hand/forward_position_controller/commands
+  - /right_hand/forward_position_controller/commands

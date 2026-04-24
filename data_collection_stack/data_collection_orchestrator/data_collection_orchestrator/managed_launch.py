@@ -171,17 +171,30 @@ class ManagedLaunchSession:
             self._finished_event.set()
             return True
 
-        pgids = []
+        current_pid = os.getpid()
+        current_pgid = os.getpgrp()
+        target_pgids = []
+        direct_pids = []
         for pid in pids:
             try:
-                pgids.append(os.getpgid(pid))
+                pgid = os.getpgid(pid)
             except OSError:
                 continue
+            if pid == current_pid:
+                continue
+            if pgid == current_pgid:
+                direct_pids.append(pid)
+            else:
+                target_pgids.append(pgid)
 
-        unique_pgids = sorted({pgid for pgid in pgids if pgid not in {os.getpid(), os.getpgrp()}})
-        if not unique_pgids:
-            self._finished_event.set()
-            return True
+        unique_pgids = sorted(set(target_pgids))
+        unique_pids = sorted(set(direct_pids))
+        if not unique_pgids and not unique_pids:
+            with self._lock:
+                if self._all_processes_exited_locked():
+                    self._finished_event.set()
+                    return True
+            return self.wait_finished(timeout_sec)
 
         for sig, wait_s in (
             (signal.SIGINT, min(timeout_sec, 6.0)),
@@ -191,6 +204,11 @@ class ManagedLaunchSession:
             for pgid in unique_pgids:
                 try:
                     os.killpg(pgid, sig)
+                except ProcessLookupError:
+                    continue
+            for pid in unique_pids:
+                try:
+                    os.kill(pid, sig)
                 except ProcessLookupError:
                     continue
             if self.wait_finished(wait_s):

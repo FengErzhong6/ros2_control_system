@@ -69,6 +69,7 @@ private:
     bool send_position_hold_command(
         const std::array<std::array<double, kJointsPerArm>, kArmCount> &hold_deg,
         bool request_position_state);
+    bool send_joint_impedance_setup_command();
     bool send_joint_impedance_hold_command(
         const std::array<std::array<double, kJointsPerArm>, kArmCount> &hold_deg,
         bool request_torque_state);
@@ -105,11 +106,13 @@ private:
         kIdle = 0,
         kRequested = 1,
         kCaptureHold = 2,
-        kSendSwitchPacket = 3,
-        kWaitArmState = 4,
-        kStabilize = 5,
-        kCompleted = 6,
-        kFailed = 7,
+        kSendSwitchSetupPacket = 3,
+        kWaitSwitchSetupAck = 4,
+        kSendSwitchPacket = 5,
+        kWaitArmState = 6,
+        kStabilize = 7,
+        kCompleted = 8,
+        kFailed = 9,
     };
     mutable std::mutex control_profile_mutex_;
     std::condition_variable control_profile_cv_;
@@ -121,6 +124,24 @@ private:
     uint64_t control_profile_completed_sequence_{0};
     uint64_t control_profile_inflight_sequence_{0};
     uint64_t control_profile_resend_count_{0};
+    std::array<int, kArmCount> control_profile_send_in_frame_serial_{{-1, -1}};
+    std::array<int, kArmCount> control_profile_send_out_frame_serial_{{-1, -1}};
+    std::array<std::array<long, kJointsPerArm>, kArmCount> control_profile_last_servo_error_codes_{};
+    bool control_profile_servo_error_snapshot_valid_{false};
+    std::chrono::steady_clock::time_point control_profile_last_servo_error_log_at_{};
+    std::chrono::steady_clock::time_point control_profile_last_send_attempt_at_{};
+    bool control_profile_waiting_for_send_ack_{false};
+    bool control_profile_initial_send_acked_{false};
+    int control_profile_last_send_result_{0};
+    bool control_profile_send_progressed_since_last_ack_{false};
+    bool control_profile_send_ack_seen_transition_state_{false};
+    bool control_profile_send_ack_seen_target_state_{false};
+    bool control_profile_send_ack_seen_error_{false};
+    bool control_profile_send_ack_seen_out_progress_{false};
+    bool control_profile_send_ack_seen_in_progress_{false};
+    bool control_profile_send_ack_seen_any_progress_{false};
+    std::string control_profile_last_send_attempt_context_;
+    std::string control_profile_last_send_attempt_summary_;
     ControlProfile control_profile_pending_target_{ControlProfile::kUnknown};
     ControlProfile control_profile_source_profile_{ControlProfile::kUnknown};
     std::array<std::array<double, kJointsPerArm>, kArmCount> control_profile_hold_deg_{};

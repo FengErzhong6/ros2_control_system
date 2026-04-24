@@ -231,6 +231,7 @@ std::string MarvinHardware::build_sdk_arm_status_summary() const
     return stream.str();
 }
 
+
 std::string MarvinHardware::build_write_command_summary(
     const double *cmd_a,
     const double *cmd_b,
@@ -355,6 +356,59 @@ bool MarvinHardware::send_position_hold_command(
             request_position_state ? "true" : "false",
             build_write_command_summary(hold_a, hold_b, false).c_str(),
             build_sdk_arm_status_summary().c_str());
+    }
+    return ok;
+}
+
+bool MarvinHardware::send_joint_impedance_setup_command()
+{
+    double tool_kine_a[6];
+    double tool_kine_b[6];
+    double tool_dyn_a[10];
+    double tool_dyn_b[10];
+    double joint_k_a[kJointsPerArm];
+    double joint_k_b[kJointsPerArm];
+    double joint_d_a[kJointsPerArm];
+    double joint_d_b[kJointsPerArm];
+
+    for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+        joint_k_a[joint] = joint_impedance_k_[0][joint];
+        joint_k_b[joint] = joint_impedance_k_[1][joint];
+        joint_d_a[joint] = joint_impedance_d_[0][joint];
+        joint_d_b[joint] = joint_impedance_d_[1][joint];
+    }
+    for (size_t i = 0; i < 6; ++i) {
+        tool_kine_a[i] = tool_kine_[0][i];
+        tool_kine_b[i] = tool_kine_[1][i];
+    }
+    for (size_t i = 0; i < 10; ++i) {
+        tool_dyn_a[i] = tool_dyn_[0][i];
+        tool_dyn_b[i] = tool_dyn_[1][i];
+    }
+
+    if (!OnClearSet()) {
+        RCLCPP_ERROR(get_logger(), "Joint-impedance setup command failed at OnClearSet.");
+        return false;
+    }
+    bool ok = true;
+    const char *failed_step = "";
+    if (!(ok = OnSetTool_A(tool_kine_a, tool_dyn_a))) {
+        failed_step = "OnSetTool_A";
+    } else if (!(ok = OnSetTool_B(tool_kine_b, tool_dyn_b))) {
+        failed_step = "OnSetTool_B";
+    } else if (!(ok = OnSetJointKD_A(joint_k_a, joint_d_a))) {
+        failed_step = "OnSetJointKD_A";
+    } else if (!(ok = OnSetJointKD_B(joint_k_b, joint_d_b))) {
+        failed_step = "OnSetJointKD_B";
+    } else if (!(ok = OnSetJointLmt_A(joint_vel_ratio_, joint_acc_ratio_))) {
+        failed_step = "OnSetJointLmt_A";
+    } else if (!(ok = OnSetJointLmt_B(joint_vel_ratio_, joint_acc_ratio_))) {
+        failed_step = "OnSetJointLmt_B";
+    } else if (!(ok = OnSetSend())) {
+        failed_step = "OnSetSend";
+    }
+    if (!ok) {
+        RCLCPP_ERROR(get_logger(), "Joint-impedance setup command failed at %s.", failed_step);
     }
     return ok;
 }
@@ -502,6 +556,130 @@ bool MarvinHardware::process_control_profile_transition()
         return stream.str();
     };
 
+    auto build_servo_error_summary = [this]() {
+        std::ostringstream stream;
+        stream << "servo_err_A=[";
+        for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+            if (joint > 0) {
+                stream << ' ';
+            }
+            stream << control_profile_last_servo_error_codes_[0][joint];
+        }
+        stream << "] servo_err_B=[";
+        for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+            if (joint > 0) {
+                stream << ' ';
+            }
+            stream << control_profile_last_servo_error_codes_[1][joint];
+        }
+        stream << ']';
+        return stream.str();
+    };
+
+    auto refresh_servo_error_codes_locked = [this]() {
+        long servo_err_a[kJointsPerArm]{};
+        long servo_err_b[kJointsPerArm]{};
+        OnGetServoErr_A(servo_err_a);
+        OnGetServoErr_B(servo_err_b);
+        for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+            control_profile_last_servo_error_codes_[0][joint] = servo_err_a[joint];
+            control_profile_last_servo_error_codes_[1][joint] = servo_err_b[joint];
+        }
+        control_profile_servo_error_snapshot_valid_ = true;
+        control_profile_last_servo_error_log_at_ = Clock::now();
+    };
+
+    auto build_send_progress_summary = [this]() {
+        std::ostringstream stream;
+        stream << "send_waiting=" << (control_profile_waiting_for_send_ack_ ? "true" : "false")
+               << " initial_acked=" << (control_profile_initial_send_acked_ ? "true" : "false")
+               << " in_serial_before=[" << control_profile_send_in_frame_serial_[0] << ' ' << control_profile_send_in_frame_serial_[1] << ']'
+               << " out_serial_before=[" << control_profile_send_out_frame_serial_[0] << ' ' << control_profile_send_out_frame_serial_[1] << ']';
+        return stream.str();
+    };
+
+    auto capture_send_attempt_locked = [this]() {
+        control_profile_last_send_attempt_at_ = Clock::now();
+        control_profile_waiting_for_send_ack_ = true;
+        for (size_t arm = 0; arm < kArmCount; ++arm) {
+            control_profile_send_in_frame_serial_[arm] =
+                current_sdk_in_frame_serial_[arm].load(std::memory_order_relaxed);
+            control_profile_send_out_frame_serial_[arm] =
+                current_sdk_out_frame_serial_[arm].load(std::memory_order_relaxed);
+        }
+    };
+
+    auto note_send_progress_locked = [this](ControlProfile target_profile, bool *any_arm_in_transition_state_out) {
+        bool any_arm_in_transition_state = false;
+        bool saw_progress = false;
+        const int transition_state_code = target_arm_transition_state_code(target_profile);
+        const int target_state_code = target_arm_state_code(target_profile);
+        for (size_t arm = 0; arm < kArmCount; ++arm) {
+            const int current_in = current_sdk_in_frame_serial_[arm].load(std::memory_order_relaxed);
+            const int current_out = current_sdk_out_frame_serial_[arm].load(std::memory_order_relaxed);
+            const int current_state = current_sdk_cur_state_[arm].load(std::memory_order_relaxed);
+            const int current_err = current_sdk_err_code_[arm].load(std::memory_order_relaxed);
+            any_arm_in_transition_state =
+                any_arm_in_transition_state || current_state == transition_state_code;
+            saw_progress = saw_progress ||
+                           current_in != control_profile_send_in_frame_serial_[arm] ||
+                           current_out != control_profile_send_out_frame_serial_[arm] ||
+                           current_state == transition_state_code ||
+                           current_state == target_state_code ||
+                           current_err != 0;
+        }
+        if (any_arm_in_transition_state_out != nullptr) {
+            *any_arm_in_transition_state_out = any_arm_in_transition_state;
+        }
+        if (saw_progress) {
+            control_profile_waiting_for_send_ack_ = false;
+        }
+        return saw_progress;
+    };
+
+    auto resend_allowed_locked =
+        [this, &note_send_progress_locked](ControlProfile target_profile, const Clock::time_point &now, bool *any_arm_in_transition_state_out) {
+            if (note_send_progress_locked(target_profile, any_arm_in_transition_state_out)) {
+                if (!control_profile_initial_send_acked_) {
+                    control_profile_initial_send_acked_ = true;
+                }
+            }
+            if (control_profile_waiting_for_send_ack_) {
+                return false;
+            }
+            const auto elapsed_since_start =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - control_profile_transition_started_at_);
+            const bool initial_delay_elapsed =
+                elapsed_since_start >=
+                std::chrono::milliseconds(profile_switch_initial_resend_delay_ms_);
+            const bool resend_interval_elapsed =
+                control_profile_last_send_attempt_at_ == Clock::time_point{} ||
+                (now - control_profile_last_send_attempt_at_) >=
+                    std::chrono::milliseconds(profile_switch_resend_interval_ms_);
+            if (!initial_delay_elapsed || !resend_interval_elapsed) {
+                return false;
+            }
+            bool any_arm_in_transition_state = false;
+            note_send_progress_locked(target_profile, &any_arm_in_transition_state);
+            if (any_arm_in_transition_state_out != nullptr) {
+                *any_arm_in_transition_state_out = any_arm_in_transition_state;
+            }
+            if (control_profile_source_profile_ == ControlProfile::kJointImpedance &&
+                target_profile == ControlProfile::kPositionFollow) {
+                return !any_arm_in_transition_state;
+            }
+            return true;
+        };
+
+    auto append_failure_context_locked =
+        [&build_send_progress_summary, &build_servo_error_summary](std::string &message) {
+            message += " ";
+            message += build_send_progress_summary();
+            message += " ";
+            message += build_servo_error_summary();
+        };
+
     auto diagnostic_transition_active = [this]() {
         return control_profile_source_profile_ == ControlProfile::kJointImpedance &&
                control_profile_pending_target_ == ControlProfile::kPositionFollow;
@@ -566,9 +744,14 @@ bool MarvinHardware::process_control_profile_transition()
     };
 
     auto complete_locked =
-        [this, &lock, &build_arm_status_summary, &diagnostic_transition_active](
+        [this, &lock, &build_arm_status_summary, &diagnostic_transition_active,
+         &refresh_servo_error_codes_locked, &append_failure_context_locked](
             bool success,
-            const std::string &message) {
+            std::string message) {
+         if (!success) {
+             refresh_servo_error_codes_locked();
+             append_failure_context_locked(message);
+         }
         const auto completed_at = Clock::now();
         const bool diagnostic = diagnostic_transition_active();
         const auto elapsed_ms =
@@ -630,6 +813,7 @@ bool MarvinHardware::process_control_profile_transition()
         complete_locked(false, message);
     };
 
+    ControlProfile target_profile_for_transition = ControlProfile::kUnknown;
     switch (control_profile_transition_phase_) {
     case ControlProfileTransitionPhase::kRequested:
         control_profile_transition_phase_ = ControlProfileTransitionPhase::kCaptureHold;
@@ -665,9 +849,13 @@ bool MarvinHardware::process_control_profile_transition()
         control_profile_last_progress_log_at_ = Clock::time_point{};
         control_profile_stabilize_cycles_remaining_ =
             std::max(1, profile_switch_stabilize_cycles_);
-        control_profile_transition_phase_ = ControlProfileTransitionPhase::kSendSwitchPacket;
+        target_profile_for_transition = control_profile_pending_target_;
+        control_profile_transition_phase_ =
+            target_profile_for_transition == ControlProfile::kJointImpedance ?
+                ControlProfileTransitionPhase::kSendSwitchSetupPacket :
+                ControlProfileTransitionPhase::kSendSwitchPacket;
         control_profile_last_message_ =
-            std::string("Captured current feedback hold target; sending ") +
+            std::string("Captured current feedback hold target; preparing ") +
             control_profile_to_string(control_profile_pending_target_) +
             " switch packet.";
         if (diagnostic_transition_active()) {
@@ -678,6 +866,87 @@ bool MarvinHardware::process_control_profile_transition()
                 build_arm_status_summary().c_str());
         }
         return true;
+    case ControlProfileTransitionPhase::kSendSwitchSetupPacket: {
+        const auto now = Clock::now();
+        if ((now - control_profile_transition_started_at_) >
+            std::chrono::milliseconds(profile_switch_timeout_ms_)) {
+            fail_locked(
+                std::string("Timed out sending the setup packet for ") +
+                control_profile_to_string(control_profile_pending_target_) +
+                ". " + build_arm_status_summary());
+            return true;
+        }
+        if (control_profile_pending_target_ != ControlProfile::kJointImpedance) {
+            control_profile_transition_phase_ = ControlProfileTransitionPhase::kSendSwitchPacket;
+            return true;
+        }
+        capture_send_attempt_locked();
+        lock.unlock();
+        const bool ok = send_joint_impedance_setup_command();
+        lock.lock();
+        if (!ok) {
+            control_profile_waiting_for_send_ack_ = false;
+        }
+        if (!control_profile_request_pending_) {
+            return true;
+        }
+        if (!ok) {
+            control_profile_last_message_ =
+                std::string("Joint-impedance setup packet send failed; retrying. ") +
+                build_arm_status_summary();
+            return true;
+        }
+        control_profile_last_packet_sent_at_ = now;
+        control_profile_last_send_attempt_at_ = now;
+        control_profile_transition_phase_ = ControlProfileTransitionPhase::kWaitSwitchSetupAck;
+        control_profile_last_message_ =
+            "Joint-impedance setup packet sent; waiting for transport progress before requesting torque mode.";
+        return true;
+    }
+    case ControlProfileTransitionPhase::kWaitSwitchSetupAck: {
+        const auto now = Clock::now();
+        if ((now - control_profile_transition_started_at_) >
+            std::chrono::milliseconds(profile_switch_timeout_ms_)) {
+            fail_locked(
+                "Timed out waiting for the joint-impedance setup packet to progress. " +
+                build_arm_status_summary());
+            return true;
+        }
+        bool any_arm_in_transition_state = false;
+        const bool setup_progress =
+            note_send_progress_locked(ControlProfile::kJointImpedance, &any_arm_in_transition_state);
+        if (!setup_progress) {
+            const bool resend_setup_packet =
+                resend_allowed_locked(ControlProfile::kJointImpedance, now, &any_arm_in_transition_state);
+            if (!resend_setup_packet) {
+                return true;
+            }
+            capture_send_attempt_locked();
+            lock.unlock();
+            const bool ok = send_joint_impedance_setup_command();
+            lock.lock();
+            if (!ok) {
+                control_profile_waiting_for_send_ack_ = false;
+            }
+            if (!control_profile_request_pending_) {
+                return true;
+            }
+            if (!ok) {
+                fail_locked(
+                    "Failed to resend the joint-impedance setup packet. " +
+                    build_arm_status_summary());
+                return true;
+            }
+            control_profile_resend_count_++;
+            control_profile_last_packet_sent_at_ = now;
+            control_profile_last_send_attempt_at_ = now;
+            return true;
+        }
+        control_profile_transition_phase_ = ControlProfileTransitionPhase::kSendSwitchPacket;
+        control_profile_last_message_ =
+            "Joint-impedance setup packet progressed; sending torque-mode switch packet.";
+        return true;
+    }
     case ControlProfileTransitionPhase::kSendSwitchPacket: {
         const auto now = Clock::now();
         if ((now - control_profile_transition_started_at_) >
@@ -690,12 +959,16 @@ bool MarvinHardware::process_control_profile_transition()
         }
         const ControlProfile target_profile = control_profile_pending_target_;
         const auto hold_deg = control_profile_hold_deg_;
+        capture_send_attempt_locked();
         lock.unlock();
         const bool ok =
             target_profile == ControlProfile::kJointImpedance ?
                 send_joint_impedance_hold_command(hold_deg, true) :
                 send_position_hold_command(hold_deg, true);
         lock.lock();
+        if (!ok) {
+            control_profile_waiting_for_send_ack_ = false;
+        }
         if (!control_profile_request_pending_) {
             return true;
         }
@@ -713,6 +986,7 @@ bool MarvinHardware::process_control_profile_transition()
             control_profile_to_string(target_profile),
             build_arm_status_summary().c_str());
         control_profile_last_packet_sent_at_ = now;
+        control_profile_last_send_attempt_at_ = now;
         maybe_log_diagnostic_progress_locked("send_switch_packet", true);
         control_profile_transition_phase_ = ControlProfileTransitionPhase::kWaitArmState;
         control_profile_last_message_ =
@@ -753,52 +1027,29 @@ bool MarvinHardware::process_control_profile_transition()
         if (!all_position) {
             const auto hold_deg = control_profile_hold_deg_;
             const auto now = Clock::now();
-            const bool paced_position_restore =
-                control_profile_source_profile_ == ControlProfile::kJointImpedance &&
-                target_profile == ControlProfile::kPositionFollow;
             bool any_arm_in_transition_state = false;
-            bool resend_switch_packet = false;
-            if (paced_position_restore) {
-                const auto elapsed_since_start =
-                    std::chrono::duration_cast<std::chrono::milliseconds>(
-                        now - control_profile_transition_started_at_);
-                const int transition_state_code = target_arm_transition_state_code(target_profile);
-                for (size_t arm = 0; arm < kArmCount; ++arm) {
-                    any_arm_in_transition_state =
-                        any_arm_in_transition_state ||
-                        current_sdk_cur_state_[arm].load(std::memory_order_relaxed) ==
-                            transition_state_code;
-                }
-                const bool initial_delay_elapsed =
-                    elapsed_since_start >=
-                    std::chrono::milliseconds(profile_switch_initial_resend_delay_ms_);
-                const bool resend_interval_elapsed =
-                    control_profile_last_packet_sent_at_ == Clock::time_point{} ||
-                    (now - control_profile_last_packet_sent_at_) >=
-                        std::chrono::milliseconds(profile_switch_resend_interval_ms_);
-                resend_switch_packet =
-                    initial_delay_elapsed &&
-                    resend_interval_elapsed &&
-                    !any_arm_in_transition_state;
-            } else {
-                resend_switch_packet =
-                    control_profile_last_packet_sent_at_ == Clock::time_point{} ||
-                    (now - control_profile_last_packet_sent_at_) >=
-                        std::chrono::milliseconds(profile_switch_resend_interval_ms_);
-            }
+            const bool resend_switch_packet =
+                resend_allowed_locked(target_profile, now, &any_arm_in_transition_state);
             if (!resend_switch_packet) {
                 if (diagnostic_transition_active() && any_arm_in_transition_state) {
                     maybe_log_diagnostic_progress_locked(
-                        "wait_arm_state_transition_seen", false);
+                        control_profile_waiting_for_send_ack_ ?
+                            "wait_arm_state_waiting_send_progress" :
+                            "wait_arm_state_transition_seen",
+                        false);
                 }
                 return true;
             }
+            capture_send_attempt_locked();
             lock.unlock();
             const bool ok =
                 target_profile == ControlProfile::kJointImpedance ?
                     send_joint_impedance_hold_command(hold_deg, true) :
                     send_position_hold_command(hold_deg, true);
             lock.lock();
+            if (!ok) {
+                control_profile_waiting_for_send_ack_ = false;
+            }
             if (!control_profile_request_pending_) {
                 return true;
             }
@@ -811,6 +1062,7 @@ bool MarvinHardware::process_control_profile_transition()
             }
             control_profile_resend_count_++;
             control_profile_last_packet_sent_at_ = now;
+            control_profile_last_send_attempt_at_ = now;
             maybe_log_diagnostic_progress_locked("wait_arm_state_resend", true);
             return true;
         }
@@ -1640,6 +1892,24 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
             "Expected 6 kine values and 10 dyn values per arm.");
         return hardware_interface::CallbackReturn::ERROR;
     }
+
+    for (size_t arm = 0; arm < kArmCount; ++arm) {
+        for (size_t i = 0; i < 3; ++i) {
+            tool_kine_[arm][i] *= 1000.0;
+        }
+        for (size_t i = 3; i < 6; ++i) {
+            tool_kine_[arm][i] = tool_kine_[arm][i] * kRad2Deg;
+        }
+    }
+
+    RCLCPP_INFO(
+        get_logger(),
+        "Tool parameters loaded: left_kine=[%.3f %.3f %.3f %.3f %.3f %.3f] left_dyn=[%.5f %.5f %.5f %.5f %.8f %.8f %.8f %.8f %.8f %.8f] "
+        "right_kine=[%.3f %.3f %.3f %.3f %.3f %.3f] right_dyn=[%.5f %.5f %.5f %.5f %.8f %.8f %.8f %.8f %.8f %.8f]",
+        tool_kine_[0][0], tool_kine_[0][1], tool_kine_[0][2], tool_kine_[0][3], tool_kine_[0][4], tool_kine_[0][5],
+        tool_dyn_[0][0], tool_dyn_[0][1], tool_dyn_[0][2], tool_dyn_[0][3], tool_dyn_[0][4], tool_dyn_[0][5], tool_dyn_[0][6], tool_dyn_[0][7], tool_dyn_[0][8], tool_dyn_[0][9],
+        tool_kine_[1][0], tool_kine_[1][1], tool_kine_[1][2], tool_kine_[1][3], tool_kine_[1][4], tool_kine_[1][5],
+        tool_dyn_[1][0], tool_dyn_[1][1], tool_dyn_[1][2], tool_dyn_[1][3], tool_dyn_[1][4], tool_dyn_[1][5], tool_dyn_[1][6], tool_dyn_[1][7], tool_dyn_[1][8], tool_dyn_[1][9]);
 
     Ip4 ip{};
     const auto ip_str = param_str(p, "ip", "192.168.1.190");
@@ -2780,6 +3050,26 @@ hardware_interface::return_type MarvinHardware::read(
             dcss.m_Out[arm].m_OutFrameSerial, std::memory_order_relaxed);
         const auto state = static_cast<ArmState>(dcss.m_State[arm].m_CurState);
         if (state == ARM_STATE_ERROR) {
+            long servo_err_a[kJointsPerArm]{};
+            long servo_err_b[kJointsPerArm]{};
+            OnGetServoErr_A(servo_err_a);
+            OnGetServoErr_B(servo_err_b);
+            std::ostringstream servo_stream;
+            servo_stream << "servo_err_A=[";
+            for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+                if (joint > 0) {
+                    servo_stream << ' ';
+                }
+                servo_stream << servo_err_a[joint];
+            }
+            servo_stream << "] servo_err_B=[";
+            for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+                if (joint > 0) {
+                    servo_stream << ' ';
+                }
+                servo_stream << servo_err_b[joint];
+            }
+            servo_stream << ']';
             if (control_profile_post_monitor_active_) {
                 const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                             Clock::now() - control_profile_post_monitor_started_at_)
@@ -2787,14 +3077,15 @@ hardware_interface::return_type MarvinHardware::read(
                 RCLCPP_ERROR(
                     get_logger(),
                     "Post-transition diagnostic caught ERROR after successful profile switch: "
-                    "source=%s target=%s elapsed=%lldms %s",
+                    "source=%s target=%s elapsed=%lldms %s %s",
                     control_profile_to_string(control_profile_post_monitor_source_),
                     control_profile_to_string(control_profile_post_monitor_target_),
                     static_cast<long long>(elapsed_ms),
-                    build_post_monitor_summary().c_str());
+                    build_post_monitor_summary().c_str(),
+                    servo_stream.str().c_str());
             }
-            RCLCPP_ERROR(get_logger(), "Arm %zu in ERROR state (err=%d).",
-                         arm, dcss.m_State[arm].m_ERRCode);
+            RCLCPP_ERROR(get_logger(), "Arm %zu in ERROR state (err=%d). %s",
+                         arm, dcss.m_State[arm].m_ERRCode, servo_stream.str().c_str());
             return hardware_interface::return_type::ERROR;
         }
 

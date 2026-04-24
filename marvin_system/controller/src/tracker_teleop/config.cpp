@@ -604,6 +604,10 @@ void TrackerTeleopController::createRosInterfaces()
         "~/ik_status_right", rclcpp::SystemDefaultsQoS());
     pub_teleop_state_ = node->create_publisher<std_msgs::msg::String>(
         "~/teleop_state", rclcpp::QoS(1).transient_local());
+    pub_joint_command_ = node->create_publisher<sensor_msgs::msg::JointState>(
+        "~/joint_command", rclcpp::SystemDefaultsQoS());
+    rt_pub_joint_command_ = std::make_shared<
+        realtime_tools::RealtimePublisher<sensor_msgs::msg::JointState>>(pub_joint_command_);
 
     auto fk_qos = rclcpp::QoS(1).transient_local();
     pub_current_pose_[kLeft] = node->create_publisher<geometry_msgs::msg::PoseStamped>(

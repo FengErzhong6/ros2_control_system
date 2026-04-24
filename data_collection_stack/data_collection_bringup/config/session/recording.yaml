@@ -22,11 +22,14 @@ compression_format: zstd
 capture_git_state: true
 preview_drop_policy: latest_only
 require_time_sync_healthy: true
-time_sync_mode: hardware_trigger_or_common_clock
-canonical_timestamp_clock: shared_dataset_clock
+time_sync_mode: relay_ros_clock
+canonical_timestamp_clock: relay_ros_clock
 canonical_timestamp_semantics:
-  image: source_capture_time
-  joint_states: controller_measurement_time
+  image: relay_receive_time
+  joint_states: relay_receive_time
+relay_record_topics: true
+relay_record_topic_prefix: /record
+canonical_joint_state_topic: /record/marvin/joint_states
 time_sync_max_offset_ns: 1000000
 joint_state_min_rate_hz: 100.0
 joint_state_max_jitter_ms: 2.0

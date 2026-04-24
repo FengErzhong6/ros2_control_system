@@ -15,6 +15,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DeviceState.msg"
   "msg/FaultEvent.msg"
   "msg/SessionInfo.msg"
+  "msg/StampedFloat64MultiArray.msg"
   "msg/SystemState.msg"
   "srv/AcknowledgeFault.srv"
   "srv/GetSystemState.srv"
