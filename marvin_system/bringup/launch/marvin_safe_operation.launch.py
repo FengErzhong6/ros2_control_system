@@ -130,9 +130,6 @@ def launch_setup(context):
     collision_guard_service_name = (
         "" if use_mock_hardware_value else "/marvin_dual/set_collision_guard_enabled"
     )
-    control_profile_service_name = (
-        "" if use_mock_hardware_value else "/marvin_dual/set_control_profile"
-    )
 
     pkg = LaunchConfiguration("description_package").perform(context)
     desc_file = LaunchConfiguration("description_file").perform(context)
@@ -281,6 +278,9 @@ def launch_setup(context):
                 "get_status_service_name": "/marvin_motion/get_status",
                 "set_enabled_service_name": "/marvin_motion/set_enabled",
                 "legacy_go_home_service": "/tracker_teleop_controller/go_home",
+                "tracker_set_armed_service": "",
+                "tracker_set_enabled_service": "",
+                "teleop_state_topic": "",
                 "planning_group": "dual_arm",
                 "home_pose_id": "home",
                 "go_home_return_mode": "MOTION",
@@ -303,8 +303,6 @@ def launch_setup(context):
                 "primary_controller_name": "",
                 "joint_state_topic": "/marvin/joint_states",
                 "collision_guard_service_name": collision_guard_service_name,
-                "control_profile_service_name": control_profile_service_name,
-                "teleop_use_joint_impedance": False,
                 "allow_legacy_go_home_fallback": ParameterValue(
                     LaunchConfiguration("motion_allow_legacy_home_fallback"),
                     value_type=bool,

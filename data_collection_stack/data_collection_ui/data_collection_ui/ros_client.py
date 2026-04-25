@@ -93,6 +93,15 @@ class MotionStatusSnapshot:
     trajectory_controller_state: str = "-"
     motion_busy: bool = False
     controller_interlock_ok: bool = True
+    hardware_joint_impedance_ok: bool = False
+    active_control_profile: int = 0
+    requested_control_profile: int = 0
+    left_sdk_cur_state: int = 0
+    right_sdk_cur_state: int = 0
+    left_sdk_err_code: int = 0
+    right_sdk_err_code: int = 0
+    left_sdk_imp_type: int = 0
+    right_sdk_imp_type: int = 0
     message: str = ""
 
 
@@ -608,6 +617,17 @@ class RosClient:
             ),
             motion_busy=bool(getattr(response, "motion_busy", False)),
             controller_interlock_ok=bool(getattr(response, "controller_interlock_ok", True)),
+            hardware_joint_impedance_ok=bool(
+                getattr(response, "hardware_joint_impedance_ok", False)
+            ),
+            active_control_profile=int(getattr(response, "active_control_profile", 0)),
+            requested_control_profile=int(getattr(response, "requested_control_profile", 0)),
+            left_sdk_cur_state=int(getattr(response, "left_sdk_cur_state", 0)),
+            right_sdk_cur_state=int(getattr(response, "right_sdk_cur_state", 0)),
+            left_sdk_err_code=int(getattr(response, "left_sdk_err_code", 0)),
+            right_sdk_err_code=int(getattr(response, "right_sdk_err_code", 0)),
+            left_sdk_imp_type=int(getattr(response, "left_sdk_imp_type", 0)),
+            right_sdk_imp_type=int(getattr(response, "right_sdk_imp_type", 0)),
             message=str(getattr(response, "message", "")).strip(),
         )
         self._set_motion_status_snapshot(snapshot)

@@ -1,7 +1,0 @@
-string profile
----
-bool success
-string message
-string active_profile
-string requested_profile
-bool transition_active

@@ -22,6 +22,7 @@ inline constexpr char kRequestedControlProfileStateInterface[] = "requested_cont
 inline constexpr char kSdkCurrentStateStateInterface[] = "sdk_cur_state";
 inline constexpr char kSdkCommandStateStateInterface[] = "sdk_cmd_state";
 inline constexpr char kSdkErrorCodeStateInterface[] = "sdk_err_code";
+inline constexpr char kSdkImpTypeStateInterface[] = "sdk_imp_type";
 inline constexpr char kSdkInFrameSerialStateInterface[] = "sdk_in_frame_serial";
 inline constexpr char kSdkOutFrameSerialStateInterface[] = "sdk_out_frame_serial";
 

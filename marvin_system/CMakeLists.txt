@@ -41,7 +41,6 @@ endforeach()
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/GetMotionMode.srv"
   "srv/GetMotionStatus.srv"
-  "srv/SetControlProfile.srv"
   "srv/SetMotionMode.srv"
 )
 

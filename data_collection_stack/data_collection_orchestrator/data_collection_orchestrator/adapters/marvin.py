@@ -30,6 +30,7 @@ class MarvinAdapter(AdapterBase):
     DEFAULT_LAUNCH_FILE = "marvin_tracker_teleop.launch.py"
     DEFAULT_HOME_POSES_RELATIVE_PATH = "motion/config/home_poses.yaml"
     DEFAULT_CONTROLLER_CONFIG_RELATIVE_PATH = "bringup/config/marvin_tracker_teleop_controllers.yaml"
+    DEFAULT_HOME_TOLERANCE_DEG = 8.0
     TRAJECTORY_CONTROLLER_NAME = "dual_arm_trajectory_controller"
     REQUIRED_CONTROLLER_STATES = {
         "joint_state_broadcaster": "active",
@@ -51,7 +52,6 @@ class MarvinAdapter(AdapterBase):
         "/marvin_motion/get_status",
         "/marvin_motion/set_enabled",
         "/marvin_dual/set_collision_guard_enabled",
-        "/marvin_dual/set_control_profile",
     )
     GRAPH_CLEANUP_NODE_NAMES = (
         "/controller_manager",
@@ -444,6 +444,17 @@ class MarvinAdapter(AdapterBase):
                     "teleop_state": getattr(status_response, "teleop_state", self._latest_teleop_state),
                     "primary_controller_state": getattr(status_response, "primary_controller_state", ""),
                     "trajectory_controller_state": getattr(status_response, "trajectory_controller_state", ""),
+                    "hardware_joint_impedance_ok": getattr(
+                        status_response, "hardware_joint_impedance_ok", False
+                    ),
+                    "active_control_profile": getattr(status_response, "active_control_profile", 0),
+                    "requested_control_profile": getattr(status_response, "requested_control_profile", 0),
+                    "left_sdk_cur_state": getattr(status_response, "left_sdk_cur_state", 0),
+                    "right_sdk_cur_state": getattr(status_response, "right_sdk_cur_state", 0),
+                    "left_sdk_err_code": getattr(status_response, "left_sdk_err_code", 0),
+                    "right_sdk_err_code": getattr(status_response, "right_sdk_err_code", 0),
+                    "left_sdk_imp_type": getattr(status_response, "left_sdk_imp_type", 0),
+                    "right_sdk_imp_type": getattr(status_response, "right_sdk_imp_type", 0),
                     "log_path": None if self._log_path is None else str(self._log_path),
                     "command": self._launch_command,
                 },
@@ -452,10 +463,21 @@ class MarvinAdapter(AdapterBase):
         teleop_state = str(getattr(status_response, "teleop_state", "")).strip() or "unknown"
         mode = str(getattr(status_response, "mode", "")).strip() or "unknown"
         return AdapterResult.ok(
-            f"{self.device.device_id}: motion layer healthy (mode={mode}, teleop_state={teleop_state}).",
+            f"{self.device.device_id}: motion layer healthy (mode={mode}, teleop_state={teleop_state}, joint_impedance=ok).",
             metadata={
                 "mode": mode,
                 "teleop_state": teleop_state,
+                "hardware_joint_impedance_ok": getattr(
+                    status_response, "hardware_joint_impedance_ok", False
+                ),
+                "active_control_profile": getattr(status_response, "active_control_profile", 0),
+                "requested_control_profile": getattr(status_response, "requested_control_profile", 0),
+                "left_sdk_cur_state": getattr(status_response, "left_sdk_cur_state", 0),
+                "right_sdk_cur_state": getattr(status_response, "right_sdk_cur_state", 0),
+                "left_sdk_err_code": getattr(status_response, "left_sdk_err_code", 0),
+                "right_sdk_err_code": getattr(status_response, "right_sdk_err_code", 0),
+                "left_sdk_imp_type": getattr(status_response, "left_sdk_imp_type", 0),
+                "right_sdk_imp_type": getattr(status_response, "right_sdk_imp_type", 0),
                 "log_path": None if self._log_path is None else str(self._log_path),
                 "command": self._launch_command,
             },
@@ -789,6 +811,17 @@ class MarvinAdapter(AdapterBase):
                 )
             return AdapterResult.ok(
                 f"{self.device.device_id}: Marvin subprocesses stopped after {context_label}; lingering /move_group graph residue tolerated."
+            )
+
+        if not last_stale_services and not last_stale_nodes:
+            if self.node is not None:
+                self.node.get_logger().warn(
+                    f"{self.device.device_id}: ROS graph cleanup did not satisfy the "
+                    f"{stability_window_sec:.1f}s stability window after {context_label}, "
+                    "but no Marvin stale service or node was observed at the final check."
+                )
+            return AdapterResult.ok(
+                f"{self.device.device_id}: Marvin subprocesses stopped after {context_label}; no stale graph resources observed."
             )
 
         details = []
@@ -1313,6 +1346,27 @@ class MarvinAdapter(AdapterBase):
         package_share = Path(get_package_share_directory("marvin_system"))
         return package_share / self.DEFAULT_HOME_POSES_RELATIVE_PATH
 
+    def _home_tolerance_rad_from_params(self, params: dict | None = None) -> float:
+        configured_rad = self.device.config.get("home_tolerance_rad")
+        if configured_rad is None and isinstance(params, dict):
+            configured_rad = params.get("home_tolerance_rad")
+        if configured_rad is not None:
+            try:
+                return max(float(configured_rad), 1.0e-4)
+            except (TypeError, ValueError):
+                pass
+
+        configured_deg = self.device.config.get("home_tolerance_deg")
+        if configured_deg is None and isinstance(params, dict):
+            configured_deg = params.get("home_tolerance_deg")
+        if configured_deg is not None:
+            try:
+                return max(math.radians(float(configured_deg)), 1.0e-4)
+            except (TypeError, ValueError):
+                pass
+
+        return max(math.radians(self.DEFAULT_HOME_TOLERANCE_DEG), 1.0e-4)
+
     def _load_home_targets(self) -> tuple[dict[str, float], float]:
         motion_config_path = self._home_pose_config_path()
         try:
@@ -1349,7 +1403,7 @@ class MarvinAdapter(AdapterBase):
                         joint_name: float(value)
                         for joint_name, value in zip(joint_names, home_values)
                     },
-                    math.radians(0.5),
+                    self._home_tolerance_rad_from_params(motion_params),
                 )
 
         config_path = self._controller_config_path()
@@ -1357,19 +1411,19 @@ class MarvinAdapter(AdapterBase):
             with config_path.open("r", encoding="utf-8") as handle:
                 data = yaml.safe_load(handle) or {}
         except OSError:
-            return {}, math.radians(0.5)
+            return {}, self._home_tolerance_rad_from_params()
         except yaml.YAMLError:
-            return {}, math.radians(0.5)
+            return {}, self._home_tolerance_rad_from_params()
 
         params = data.get("tracker_teleop_controller", {}).get("ros__parameters", {})
         joint_names = params.get("joints", [])
         if not isinstance(joint_names, list):
-            return {}, math.radians(0.5)
+            return {}, self._home_tolerance_rad_from_params(params)
 
         home_left = params.get("home_joint_positions", {}).get("left", [])
         home_right = params.get("home_joint_positions", {}).get("right", [])
         if not isinstance(home_left, list) or not isinstance(home_right, list):
-            return {}, math.radians(0.5)
+            return {}, self._home_tolerance_rad_from_params(params)
 
         left_names = [str(name) for name in joint_names[: len(home_left)]]
         right_names = [str(name) for name in joint_names[len(home_left): len(home_left) + len(home_right)]]
@@ -1378,11 +1432,7 @@ class MarvinAdapter(AdapterBase):
             name: float(value)
             for name, value in zip(left_names + right_names, home_left + home_right)
         }
-        tolerance_deg = params.get("home_tolerance_deg", 0.5)
-        try:
-            tolerance_rad = math.radians(float(tolerance_deg))
-        except (TypeError, ValueError):
-            tolerance_rad = math.radians(0.5)
+        tolerance_rad = self._home_tolerance_rad_from_params(params)
         return home_targets, max(tolerance_rad, 1.0e-4)
 
     def _home_timeout_sec(self) -> float:

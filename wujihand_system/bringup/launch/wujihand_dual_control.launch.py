@@ -5,8 +5,7 @@ import yaml
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo, OpaqueFunction, RegisterEventHandler
-from launch.event_handlers import OnProcessExit
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo, OpaqueFunction
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -144,12 +143,13 @@ def launch_hand_stack(
 
     forward_position_controller_arguments = [
         "forward_position_controller",
-        "--inactive",
         "--param-file",
         namespaced_controllers_yaml,
         "--controller-manager",
         f"{abs_ns}/controller_manager",
     ]
+    if not start_forward_controller_active:
+        forward_position_controller_arguments.insert(1, "--inactive")
 
     forward_position_controller_spawner = Node(
         package="controller_manager",
@@ -209,29 +209,6 @@ def launch_hand_stack(
             output="screen",
         )
         actions.extend([joint_state_publisher_gui_node, gui_to_forward_bridge])
-
-    if start_forward_controller_active:
-        actions.append(
-            RegisterEventHandler(
-                OnProcessExit(
-                    target_action=forward_position_controller_spawner,
-                    on_exit=[
-                        ExecuteProcess(
-                            cmd=[
-                                "ros2",
-                                "control",
-                                "switch_controllers",
-                                "--controller-manager",
-                                f"{abs_ns}/controller_manager",
-                                "--activate",
-                                "forward_position_controller",
-                            ],
-                            output="screen",
-                        )
-                    ],
-                )
-            )
-        )
 
     return actions
 

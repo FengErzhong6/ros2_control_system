@@ -35,6 +35,14 @@ def get_sensor_data_qos() -> QoSProfile:
     )
 
 
+def get_command_qos() -> QoSProfile:
+    return QoSProfile(
+        reliability=ReliabilityPolicy.RELIABLE,
+        history=HistoryPolicy.KEEP_LAST,
+        depth=10,
+    )
+
+
 class WujihandManusPipelineNode(Node):
     def __init__(self, config: WujihandManusPipelineConfig) -> None:
         super().__init__("wujihand_manus_pipeline")
@@ -63,9 +71,18 @@ class WujihandManusPipelineNode(Node):
                 config_snapshot=asdict(config),
             )
 
-        qos = get_sensor_data_qos()
-        self._left_pub = self.create_publisher(Float64MultiArray, config.left_command_topic, qos)
-        self._right_pub = self.create_publisher(Float64MultiArray, config.right_command_topic, qos)
+        sensor_qos = get_sensor_data_qos()
+        command_qos = get_command_qos()
+        self._left_pub = self.create_publisher(
+            Float64MultiArray,
+            config.left_command_topic,
+            command_qos,
+        )
+        self._right_pub = self.create_publisher(
+            Float64MultiArray,
+            config.right_command_topic,
+            command_qos,
+        )
         self._hand_input_pub = None
         self._debug_left_pub = None
         self._debug_right_pub = None
@@ -75,10 +92,22 @@ class WujihandManusPipelineNode(Node):
         self._right_qpos_debug_pub = None
 
         if config.publish_hand_input:
-            self._hand_input_pub = self.create_publisher(Float32MultiArray, config.output_topic, qos)
+            self._hand_input_pub = self.create_publisher(
+                Float32MultiArray,
+                config.output_topic,
+                sensor_qos,
+            )
         if config.publish_debug_topics:
-            self._debug_left_pub = self.create_publisher(Float32MultiArray, config.debug_left_topic, qos)
-            self._debug_right_pub = self.create_publisher(Float32MultiArray, config.debug_right_topic, qos)
+            self._debug_left_pub = self.create_publisher(
+                Float32MultiArray,
+                config.debug_left_topic,
+                sensor_qos,
+            )
+            self._debug_right_pub = self.create_publisher(
+                Float32MultiArray,
+                config.debug_right_topic,
+                sensor_qos,
+            )
         if config.publish_debug_markers:
             marker_config = KeypointMarkerConfig(
                 left_topic=config.left_marker_topic,
@@ -96,16 +125,21 @@ class WujihandManusPipelineNode(Node):
             self._left_qpos_debug_pub = self.create_publisher(
                 Float64MultiArray,
                 config.left_debug_qpos_topic,
-                qos,
+                command_qos,
             )
             self._right_qpos_debug_pub = self.create_publisher(
                 Float64MultiArray,
                 config.right_debug_qpos_topic,
-                qos,
+                command_qos,
             )
 
         self.create_service(SetBool, "~/set_enabled", self._handle_set_enabled)
-        self.create_subscription(ManusGloveRawArray, config.input_topic, self._on_gloves_raw, qos)
+        self.create_subscription(
+            ManusGloveRawArray,
+            config.input_topic,
+            self._on_gloves_raw,
+            sensor_qos,
+        )
         publish_rate_hz = max(float(config.publish_rate_hz), 1.0)
         self.create_timer(1.0 / publish_rate_hz, self._process_latest_frame)
         self.create_timer(max(config.command_timeout_sec / 2.0, 0.05), self._on_timeout_timer)
@@ -279,4 +313,5 @@ def main(argv: Optional[list[str]] = None) -> None:
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()

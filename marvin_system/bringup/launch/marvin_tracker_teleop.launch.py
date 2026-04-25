@@ -870,9 +870,6 @@ def launch_setup(context):
     collision_guard_service_name = (
         "" if use_mock_hardware_value else "/marvin_dual/set_collision_guard_enabled"
     )
-    control_profile_service_name = (
-        "" if use_mock_hardware_value else "/marvin_dual/set_control_profile"
-    )
     use_keyboard_gate_value = LaunchConfiguration("use_keyboard_gate").perform(context).lower() == "true"
     start_tracker_publisher_value = (
         LaunchConfiguration("start_tracker_publisher").perform(context).lower() == "true"
@@ -886,6 +883,7 @@ def launch_setup(context):
     teleop_disable_collision_guard_value = (
         LaunchConfiguration("teleop_disable_collision_guard").perform(context).lower() == "true"
     )
+    startup_control_profile_value = "JOINT_IMPEDANCE"
     allow_unsafe_legacy_go_home_value = (
         LaunchConfiguration("allow_unsafe_legacy_go_home").perform(context).lower() == "true"
     )
@@ -979,6 +977,7 @@ def launch_setup(context):
         f" use_gripper_L:={'true' if grip_L else 'false'}",
         f" use_gripper_R:={'true' if grip_R else 'false'}",
         f" mock_grippers:={'true' if mock_grippers else 'false'}",
+        f' startup_control_profile:="{startup_control_profile_value}"',
         ' collision_guard_enabled:="', collision_guard_enabled, '"',
         ' collision_guard_check_rate_hz:="', collision_guard_check_rate_hz, '"',
         ' collision_guard_min_command_delta_deg:="', collision_guard_min_command_delta_deg, '"',
@@ -1245,8 +1244,8 @@ def launch_setup(context):
                     "planning_time_sec": 5.0,
                     "move_group_wait_sec": 10.0,
                     "num_planning_attempts": 3,
-                    "max_velocity_scaling": 0.2,
-                    "max_acceleration_scaling": 0.2,
+                    "max_velocity_scaling": 0.1,
+                    "max_acceleration_scaling": 0.1,
                     "execute_trajectory": True,
                     "planning_pipeline_id": "ompl",
                     "planner_id": "RRTConnect",
@@ -1261,9 +1260,7 @@ def launch_setup(context):
                     "trajectory_controller_name": "dual_arm_trajectory_controller",
                     "primary_controller_name": "tracker_teleop_controller",
                     "collision_guard_service_name": collision_guard_service_name,
-                    "control_profile_service_name": control_profile_service_name,
                     "wujihand_joint_state_topics": wujihand_joint_state_topics,
-                    "teleop_use_joint_impedance": True,
                     "teleop_disable_collision_guard": teleop_disable_collision_guard_value,
                     "allow_legacy_go_home_fallback": ParameterValue(
                         LaunchConfiguration("motion_allow_legacy_home_fallback"),
@@ -1305,9 +1302,7 @@ def launch_setup(context):
                     "trajectory_controller_name": "dual_arm_trajectory_controller",
                     "primary_controller_name": "tracker_teleop_controller",
                     "collision_guard_service_name": collision_guard_service_name,
-                    "control_profile_service_name": control_profile_service_name,
                     "wujihand_joint_state_topics": wujihand_joint_state_topics,
-                    "teleop_use_joint_impedance": True,
                     "teleop_disable_collision_guard": teleop_disable_collision_guard_value,
                     "allow_legacy_go_home_fallback": ParameterValue(
                         LaunchConfiguration("motion_allow_legacy_home_fallback"),

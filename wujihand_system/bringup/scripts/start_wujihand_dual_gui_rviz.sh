@@ -82,6 +82,8 @@ fct_execute_this() {
     ros2 launch wujihand_system "${LAUNCH_FILE}" \
         use_left_gui:=true \
         use_right_gui:=true \
+        left_namespace:=left_hand \
+        right_namespace:=right_hand \
         activate_forward_controller:=true \
         use_mock_hardware:="${G_USE_MOCK_HARDWARE}" &
     G_LAUNCH_PID="$!"

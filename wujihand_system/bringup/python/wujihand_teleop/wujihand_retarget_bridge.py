@@ -29,6 +29,14 @@ def get_sensor_data_qos() -> QoSProfile:
     )
 
 
+def get_command_qos() -> QoSProfile:
+    return QoSProfile(
+        reliability=ReliabilityPolicy.RELIABLE,
+        history=HistoryPolicy.KEEP_LAST,
+        depth=10,
+    )
+
+
 def _load_retargeter_class():
     try:
         from wuji_retargeting import Retargeter
@@ -108,16 +116,38 @@ class WujihandRetargetBridgeNode(Node):
         self._last_input_monotonic = 0.0
         self._timeout_action_sent = False
 
-        qos = get_sensor_data_qos()
-        self._left_pub = self.create_publisher(Float64MultiArray, config.left_command_topic, qos)
-        self._right_pub = self.create_publisher(Float64MultiArray, config.right_command_topic, qos)
+        sensor_qos = get_sensor_data_qos()
+        command_qos = get_command_qos()
+        self._left_pub = self.create_publisher(
+            Float64MultiArray,
+            config.left_command_topic,
+            command_qos,
+        )
+        self._right_pub = self.create_publisher(
+            Float64MultiArray,
+            config.right_command_topic,
+            command_qos,
+        )
         self._left_debug_pub = None
         self._right_debug_pub = None
         if config.publish_debug_qpos:
-            self._left_debug_pub = self.create_publisher(Float64MultiArray, config.left_debug_qpos_topic, qos)
-            self._right_debug_pub = self.create_publisher(Float64MultiArray, config.right_debug_qpos_topic, qos)
+            self._left_debug_pub = self.create_publisher(
+                Float64MultiArray,
+                config.left_debug_qpos_topic,
+                command_qos,
+            )
+            self._right_debug_pub = self.create_publisher(
+                Float64MultiArray,
+                config.right_debug_qpos_topic,
+                command_qos,
+            )
 
-        self.create_subscription(Float32MultiArray, config.hand_input_topic, self._on_hand_input, qos)
+        self.create_subscription(
+            Float32MultiArray,
+            config.hand_input_topic,
+            self._on_hand_input,
+            sensor_qos,
+        )
         self.create_timer(max(config.command_timeout_sec / 2.0, 0.05), self._on_timeout_timer)
         self.get_logger().info(
             "Wujihand retarget bridge ready. "
@@ -219,4 +249,5 @@ def main(argv: Optional[list[str]] = None) -> None:
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()

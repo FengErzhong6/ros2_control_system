@@ -23,15 +23,15 @@
   <xacro:arg name="marvin_ip" default="192.168.1.190" />
   <xacro:arg name="connect_timeout_ms" default="1500" />
   <xacro:arg name="state_timeout_ms" default="8000" />
-  <xacro:arg name="profile_switch_timeout_ms" default="5000" />
+  <xacro:arg name="startup_control_profile" default="JOINT_IMPEDANCE" />
   <xacro:arg name="joint_vel_ratio" default="100" />
   <xacro:arg name="joint_acc_ratio" default="100" />
   <xacro:arg name="joint_impedance_enabled" default="true" />
   <xacro:property name="joint_impedance_config" value="${xacro.load_yaml('../config/joint_impedance.yaml')['joint_impedance']}" />
-  <xacro:arg name="tool_kine_left" default="0 -111 0 90 0 -135" />
-  <xacro:arg name="tool_dyn_left" default="0.51806 -0.337 -200.328 9.832 0.00173392 0.00075813 0.00191507 0.00229797 0.00233479 0.00199411" />
-  <xacro:arg name="tool_kine_right" default="0 -111 0 90 0 -45" />
-  <xacro:arg name="tool_dyn_right" default="0.51806 0.343 -200.343 9.839 0.00174036 0.00075810 0.00191119 0.00173212 0.00168514 0.00200584" />
+  <xacro:arg name="tool_kine_left" default="0 0 120 0 0 0" />
+  <xacro:arg name="tool_dyn_left" default="0.95 0 0 90 0 0 0 0 0 0" />
+  <xacro:arg name="tool_kine_right" default="0 0 120 0 0 0" />
+  <xacro:arg name="tool_dyn_right" default="0.95 0 0 90 0 0 0 0 0 0" />
   <xacro:arg name="gripper_velocity" default="255" />
   <xacro:arg name="gripper_acceleration" default="255" />
   <xacro:arg name="collision_guard_enabled" default="false" />
@@ -158,7 +158,7 @@
     marvin_ip="$(arg marvin_ip)"
     connect_timeout_ms="$(arg connect_timeout_ms)"
     state_timeout_ms="$(arg state_timeout_ms)"
-    profile_switch_timeout_ms="$(arg profile_switch_timeout_ms)"
+    startup_control_profile="$(arg startup_control_profile)"
     joint_vel_ratio="$(arg joint_vel_ratio)"
     joint_acc_ratio="$(arg joint_acc_ratio)"
     joint_impedance_enabled="$(arg joint_impedance_enabled)"

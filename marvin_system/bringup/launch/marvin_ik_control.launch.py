@@ -48,10 +48,6 @@ def generate_launch_description():
             description="Hardware state timeout in milliseconds.",
         ),
         DeclareLaunchArgument(
-            "profile_switch_timeout_ms", default_value="5000",
-            description="Profile switch timeout in milliseconds.",
-        ),
-        DeclareLaunchArgument(
             "use_gripper_R", default_value="false",
             description="Enable OmniPicker gripper on right arm.",
         ),
@@ -91,7 +87,6 @@ def launch_setup(context):
     marvin_ip = LaunchConfiguration("marvin_ip")
     connect_timeout_ms = LaunchConfiguration("connect_timeout_ms")
     state_timeout_ms = LaunchConfiguration("state_timeout_ms")
-    profile_switch_timeout_ms = LaunchConfiguration("profile_switch_timeout_ms")
     left_xyz = LaunchConfiguration("left_xyz")
     left_rpy = LaunchConfiguration("left_rpy")
     right_xyz = LaunchConfiguration("right_xyz")
@@ -115,7 +110,6 @@ def launch_setup(context):
         ' marvin_ip:="', marvin_ip, '"',
         ' connect_timeout_ms:="', connect_timeout_ms, '"',
         ' state_timeout_ms:="', state_timeout_ms, '"',
-        ' profile_switch_timeout_ms:="', profile_switch_timeout_ms, '"',
         f" use_gripper_L:={'true' if grip_L else 'false'}",
         f" use_gripper_R:={'true' if grip_R else 'false'}",
         ' collision_guard_enabled:="', collision_guard_enabled, '"',

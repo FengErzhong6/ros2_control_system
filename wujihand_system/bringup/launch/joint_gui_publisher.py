@@ -211,7 +211,8 @@ def main():
     if robot_description["xml"] is None:
         node.get_logger().fatal("Timed out waiting for /robot_description")
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
         sys.exit(1)
 
     free_joints = parse_urdf(robot_description["xml"])
@@ -230,7 +231,8 @@ def main():
 
     exit_code = app.exec_()
     node.destroy_node()
-    rclpy.shutdown()
+    if rclpy.ok():
+        rclpy.shutdown()
     sys.exit(exit_code)
 
 

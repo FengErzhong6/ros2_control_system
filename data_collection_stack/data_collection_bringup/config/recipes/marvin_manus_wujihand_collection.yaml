@@ -45,6 +45,7 @@ devices:
     required: true
     depends_on:
       - manus_glove
+      - left_wujihand
     use_managed_launch: true
     ready_timeout_sec: 30.0
     hand_side: right
@@ -57,6 +58,8 @@ devices:
     depends_on:
       - htc_tracker
       - manus_glove
+      - left_wujihand
+      - right_wujihand
     use_managed_launch: false
     ready_timeout_sec: 90.0
     startup_no_ready_restart_timeout_sec: 0.0

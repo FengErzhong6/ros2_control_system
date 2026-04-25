@@ -7,17 +7,17 @@
                        marvin_ip:='192.168.1.190'
                        connect_timeout_ms:=1500
                        state_timeout_ms:=8000
-                       profile_switch_timeout_ms:=5000
+                       startup_control_profile:='JOINT_IMPEDANCE'
                        joint_vel_ratio:=100  joint_acc_ratio:=100
                        joint_impedance_enabled:=true
                        joint_impedance_k_left:='2 2 2 2 2 1 1'
                        joint_impedance_d_left:='0.4 0.4 0.4 0.4 0.4 0.4 0.4'
                        joint_impedance_k_right:='2 2 2 2 2 1 1'
                        joint_impedance_d_right:='0.4 0.4 0.4 0.4 0.4 0.4 0.4'
-                       tool_kine_left:='0 -111 0 90 0 -135'
-                       tool_dyn_left:='0.51806 -0.337 -200.328 9.832 0.00173392 0.00075813 0.00191507 0.00229797 0.00233479 0.00199411'
-                       tool_kine_right:='0 -111 0 90 0 -45'
-                       tool_dyn_right:='0.51806 0.343 -200.343 9.839 0.00174036 0.00075810 0.00191119 0.00173212 0.00168514 0.00200584'
+                       tool_kine_left:='0 0 120 0 0 0'
+                       tool_dyn_left:='0.95 0 0 90 0 0 0 0 0 0'
+                       tool_kine_right:='0 0 120 0 0 0'
+                       tool_dyn_right:='0.95 0 0 90 0 0 0 0 0 0'
                        gripper_velocity:=255  gripper_acceleration:=255
                        gripper_command_rate_hz:=50.0  gripper_command_epsilon:=0.001
                        collision_guard_enabled:=false
@@ -60,10 +60,7 @@
           <param name="mock_grippers">${mock_grippers}</param>
           <param name="connect_timeout_ms">${connect_timeout_ms}</param>
           <param name="state_timeout_ms">${state_timeout_ms}</param>
-          <param name="profile_switch_timeout_ms">${profile_switch_timeout_ms}</param>
-          <param name="profile_switch_post_monitor_ms">500</param>
-          <param name="profile_switch_initial_resend_delay_ms">80</param>
-          <param name="profile_switch_resend_interval_ms">20</param>
+          <param name="startup_control_profile">${startup_control_profile}</param>
           <param name="activation_retry_settle_ms">2000</param>
           <param name="activation_max_attempts">3</param>
           <param name="no_frame_timeout_ms">800</param>
@@ -115,6 +112,7 @@
         <state_interface name="sdk_cur_state"/>
         <state_interface name="sdk_cmd_state"/>
         <state_interface name="sdk_err_code"/>
+        <state_interface name="sdk_imp_type"/>
         <state_interface name="sdk_in_frame_serial"/>
         <state_interface name="sdk_out_frame_serial"/>
       </joint>
@@ -192,6 +190,7 @@
         <state_interface name="sdk_cur_state"/>
         <state_interface name="sdk_cmd_state"/>
         <state_interface name="sdk_err_code"/>
+        <state_interface name="sdk_imp_type"/>
         <state_interface name="sdk_in_frame_serial"/>
         <state_interface name="sdk_out_frame_serial"/>
       </joint>

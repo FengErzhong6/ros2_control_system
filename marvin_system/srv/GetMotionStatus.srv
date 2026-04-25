@@ -8,4 +8,13 @@ string primary_controller_state
 string trajectory_controller_state
 bool motion_busy
 bool controller_interlock_ok
+bool hardware_joint_impedance_ok
+int32 active_control_profile
+int32 requested_control_profile
+int32 left_sdk_cur_state
+int32 right_sdk_cur_state
+int32 left_sdk_err_code
+int32 right_sdk_err_code
+int32 left_sdk_imp_type
+int32 right_sdk_imp_type
 string message
