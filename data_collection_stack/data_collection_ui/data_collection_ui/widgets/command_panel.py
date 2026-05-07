@@ -17,11 +17,14 @@ class CommandPanelModel:
 _BUTTON_DEFINITIONS = [
     ("StartSystem", "Connect"),
     ("ShutdownSystem", "Shutdown System"),
-    ("StartSession", "Start Collection"),
-    ("StopSession", "Stop Collection"),
+    ("StartTeleoperation", "Start Teleoperation"),
+    ("StopTeleoperation", "Stop Teleoperation"),
+    ("StartSession", "Start Record"),
+    ("StopSession", "Stop Record"),
     ("GoHome", "Go Home"),
     ("AcknowledgeFault", "Acknowledge Fault"),
 ]
+_BUTTON_LABELS = dict(_BUTTON_DEFINITIONS)
 
 
 class CommandPanel(QWidget):
@@ -82,8 +85,18 @@ class CommandPanel(QWidget):
             button.setEnabled((command_name in allowed_command_set) and not any_pending)
 
         if pending_commands:
-            self._status_label.setText("In Progress: " + ", ".join(pending_commands))
+            self._status_label.setText(
+                "In Progress: "
+                + ", ".join(self._command_label(command) for command in pending_commands)
+            )
         elif allowed_commands:
-            self._status_label.setText("Available: " + ", ".join(allowed_commands))
+            self._status_label.setText(
+                "Available: "
+                + ", ".join(self._command_label(command) for command in allowed_commands)
+            )
         else:
             self._status_label.setText("No command is currently available.")
+
+    @staticmethod
+    def _command_label(command_name: str) -> str:
+        return _BUTTON_LABELS.get(command_name, command_name)

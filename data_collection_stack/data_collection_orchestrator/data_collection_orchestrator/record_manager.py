@@ -20,6 +20,7 @@ from .models import (
     SessionArtifacts,
     SupervisorConfig,
 )
+from .session_paths import sanitize_session_name
 
 
 class RecordManager:
@@ -66,7 +67,11 @@ class RecordManager:
         event_log_snapshot_source: Callable[[], list[str]],
     ) -> tuple[SessionArtifacts, RecorderRuntime]:
         del event_log_snapshot_source
-        session_dir = self._create_session_dir(recording_policy.session_root, active_session.session_id)
+        session_dir = self._create_session_dir(
+            active_session.session_root or recording_policy.session_root,
+            active_session.session_name,
+            active_session.session_id,
+        )
         bag_dir = session_dir / recording_policy.bag_directory_name
         artifacts = SessionArtifacts(
             session_dir=session_dir,
@@ -307,9 +312,13 @@ class RecordManager:
         command.extend(topics)
         return command
 
-    def _create_session_dir(self, session_root: Path, session_id: str) -> Path:
-        dated_dir = session_root.expanduser() / datetime.now().strftime("%Y-%m-%d")
-        session_dir = dated_dir / session_id
+    def _create_session_dir(
+        self,
+        session_root: Path,
+        session_name: str,
+        session_id: str,
+    ) -> Path:
+        session_dir = session_root.expanduser() / sanitize_session_name(session_name) / session_id
         session_dir.mkdir(parents=True, exist_ok=False)
         return session_dir
 
@@ -423,7 +432,9 @@ class RecordManager:
             "recipe_id": active_session.recipe_id,
             "operator_id": active_session.operator_id,
             "site_name": active_session.site_name,
-            "session_tag": active_session.session_tag,
+            "session_name": active_session.session_name,
+            "session_tag": active_session.session_name,
+            "session_root": "" if active_session.session_root is None else str(active_session.session_root),
             "status": status,
             "session_dir": str(artifacts.session_dir),
             "bag_dir": str(artifacts.bag_dir),

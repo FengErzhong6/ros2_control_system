@@ -20,7 +20,9 @@ from data_collection_interfaces.action import (
     ShutdownSystem,
     StartSession,
     StartSystem,
+    StartTeleoperation,
     StopSession,
+    StopTeleoperation,
 )
 from data_collection_interfaces.msg import DeviceState, FaultEvent, SystemState
 from data_collection_interfaces.srv import (
@@ -49,7 +51,7 @@ from .recipe_loader import discover_recipes, load_recipe
 from .record_manager import RecordManager
 from .runtime_manifest import RuntimeManifest
 from .session_manager import SessionManager
-from .state_machine import Commands, SystemStates, allowed_commands_for, is_command_allowed
+from .state_machine import Commands, SystemStates, allowed_commands_for
 
 
 def _optional_path(raw_value: str) -> Optional[Path]:
@@ -134,6 +136,11 @@ class DataCollectionSupervisor(Node):
         self._current_recipe: RecipeSpec | None = None
         self._current_operator_id = ""
         self._current_site_name = ""
+        self._teleop_active = False
+        # StartSession may bootstrap teleop itself when the operator uses the old
+        # one-button flow. This flag tells session shutdown whether it must unwind
+        # that temporary teleop state again.
+        self._teleop_auto_started_by_session = False
         self._adapters = {}
         self._device_specs: dict[str, DeviceSpec] = {}
         self._devices: dict[str, DeviceState] = {}
@@ -455,11 +462,28 @@ class DataCollectionSupervisor(Node):
         }
         return summary
 
+    def _allowed_commands_for_state(self, system_state: str) -> list[str]:
+        commands = allowed_commands_for(system_state)
+        if system_state in {SystemStates.RECORDING, SystemStates.PAUSED}:
+            if self._teleop_active:
+                commands = [
+                    command
+                    for command in commands
+                    if command != Commands.START_TELEOPERATION
+                ]
+            else:
+                commands = [
+                    command
+                    for command in commands
+                    if command != Commands.STOP_TELEOPERATION
+                ]
+        return commands
+
     def _set_system_state(self, system_state: str, summary: str) -> None:
         with self._state_lock:
             self._state.system_state = system_state
             self._state.summary = summary
-            self._state.allowed_commands = allowed_commands_for(system_state)
+            self._state.allowed_commands = self._allowed_commands_for_state(system_state)
             self._state.recipe_id = self._selected_recipe_id
             self._event_log.record(f"{system_state}: {summary}")
             self._runtime_manifest.set_context(
@@ -508,7 +532,12 @@ class DataCollectionSupervisor(Node):
         self._runtime_manifest.clear()
         self._current_operator_id = ""
         self._current_site_name = ""
+        self._teleop_active = False
+        self._teleop_auto_started_by_session = False
         self._selected_recipe_id = self._config.recipe_id
+
+    def _idle_or_teleop_state(self) -> str:
+        return SystemStates.ARMED if self._teleop_active else SystemStates.READY
 
     def _load_recipe_or_fail(self, recipe_id: str) -> RecipeSpec | None:
         recipe = load_recipe(self._config.recipe_directory, recipe_id)
@@ -770,7 +799,7 @@ class DataCollectionSupervisor(Node):
                 f"{command} is temporarily blocked because {active_command_name} "
                 f"is already in progress ({elapsed_sec:.1f}s)."
             )
-        if is_command_allowed(system_state, command):
+        if command in allowed_commands:
             return None
         return (
             f"{command} is not allowed while system_state={system_state}. "
@@ -1492,25 +1521,42 @@ class DataCollectionSupervisor(Node):
             )
         except Exception as exc:
             return None, str(exc)
-        after_failure = self._run_after_session()
-        if after_failure is not None:
-            return None, after_failure
-        disarm_failure = self._run_disarm_sequence()
-        if disarm_failure is not None:
-            return None, disarm_failure
+
+        if self._teleop_auto_started_by_session:
+            # Only auto-stop teleop when StartSession started it. Manually started
+            # teleop must remain under operator control after the session ends.
+            after_failure = self._run_after_session()
+            if after_failure is not None:
+                return None, after_failure
+            disarm_failure = self._run_disarm_sequence()
+            if disarm_failure is not None:
+                return None, disarm_failure
+            self._teleop_active = False
+            self._teleop_auto_started_by_session = False
 
         ended_session = self._session_manager.end_session()
+        next_state = self._idle_or_teleop_state()
         if stop_summary.get("success", False):
+            if next_state == SystemStates.ARMED:
+                summary = (
+                    f"Session {session.session_id} stopped; teleoperation remains active."
+                )
+            else:
+                summary = (
+                    f"Session {session.session_id} stopped and system returned to READY."
+                )
             self._set_system_state(
-                SystemStates.READY,
-                f"Session {session.session_id} stopped and system returned to READY.",
+                next_state,
+                summary,
             )
             return ended_session, None
 
         warning = (
             f"Session {session.session_id} stopped with preserved incomplete artifacts."
         )
-        self._set_system_state(SystemStates.READY, warning)
+        if next_state == SystemStates.ARMED:
+            warning = f"{warning} Teleoperation remains active."
+        self._set_system_state(next_state, warning)
         return ended_session, warning
 
     def _reset_after_startup_failure(self, failure: str) -> None:
@@ -1549,6 +1595,8 @@ class DataCollectionSupervisor(Node):
 
         self._current_operator_id = request.operator_id
         self._current_site_name = request.site_name
+        self._teleop_active = False
+        self._teleop_auto_started_by_session = False
         self._install_recipe(recipe)
         self._set_system_state(
             SystemStates.PREFLIGHT,
@@ -1663,6 +1711,195 @@ class DataCollectionSupervisor(Node):
         result.message = "System shutdown complete"
         return result
 
+    def execute_start_teleoperation(self, goal_handle):
+        result = StartTeleoperation.Result()
+
+        blocked_reason = self._command_blocked(Commands.START_TELEOPERATION)
+        if blocked_reason is not None:
+            goal_handle.abort()
+            result.success = False
+            result.message = blocked_reason
+            return result
+
+        if self._current_recipe is None:
+            goal_handle.abort()
+            result.success = False
+            result.message = "No active recipe. StartSystem must succeed first."
+            return result
+
+        if self._teleop_active:
+            next_state = (
+                SystemStates.RECORDING
+                if self._session_manager.active_session is not None
+                else SystemStates.ARMED
+            )
+            self._teleop_auto_started_by_session = False
+            if self._state.system_state != next_state:
+                self._set_system_state(next_state, "Teleoperation is already active.")
+            self._publish_feedback(
+                goal_handle,
+                StartTeleoperation,
+                "Teleoperation is already active.",
+            )
+            goal_handle.succeed()
+            result.success = True
+            result.message = "Teleoperation already active"
+            return result
+
+        arm_attempted = False
+        before_session_attempted = False
+        try:
+            self._publish_feedback(
+                goal_handle,
+                StartTeleoperation,
+                "Arming supported devices for teleoperation.",
+            )
+            arm_attempted = True
+            arm_failure = self._run_arm_sequence()
+            if arm_failure is not None:
+                raise RuntimeError(arm_failure)
+
+            self._publish_feedback(
+                goal_handle,
+                StartTeleoperation,
+                "Enabling teleoperation hooks.",
+            )
+            before_session_attempted = True
+            before_session_failure = self._run_before_session()
+            if before_session_failure is not None:
+                raise RuntimeError(before_session_failure)
+        except Exception as exc:
+            failure_message = str(exc)
+            rollback_failure = None
+            if before_session_attempted:
+                rollback_failure = self._run_after_session()
+            if rollback_failure is None and arm_attempted:
+                rollback_failure = self._run_disarm_sequence()
+            if rollback_failure is not None:
+                self._set_fault(rollback_failure)
+                goal_handle.abort()
+                result.success = False
+                result.message = f"{failure_message}\nRollback failure: {rollback_failure}"
+                return result
+
+            next_state = (
+                SystemStates.RECORDING
+                if self._session_manager.active_session is not None
+                else SystemStates.READY
+            )
+            self._set_system_state(
+                next_state,
+                f"StartTeleoperation failed: {failure_message}",
+            )
+            goal_handle.abort()
+            result.success = False
+            result.message = failure_message
+            return result
+
+        self._teleop_active = True
+        self._teleop_auto_started_by_session = False
+        next_state = (
+            SystemStates.RECORDING
+            if self._session_manager.active_session is not None
+            else SystemStates.ARMED
+        )
+        summary = (
+            "Teleoperation started while recording continues."
+            if next_state == SystemStates.RECORDING
+            else "Teleoperation started and system is ARMED."
+        )
+        self._set_system_state(next_state, summary)
+        self._publish_feedback(goal_handle, StartTeleoperation, summary)
+        goal_handle.succeed()
+        result.success = True
+        result.message = "Teleoperation started"
+        return result
+
+    def execute_stop_teleoperation(self, goal_handle):
+        result = StopTeleoperation.Result()
+
+        blocked_reason = self._command_blocked(Commands.STOP_TELEOPERATION)
+        if blocked_reason is not None:
+            goal_handle.abort()
+            result.success = False
+            result.message = blocked_reason
+            return result
+
+        if self._current_recipe is None:
+            goal_handle.abort()
+            result.success = False
+            result.message = "No active recipe. StartSystem must succeed first."
+            return result
+
+        if not self._teleop_active:
+            next_state = (
+                SystemStates.RECORDING
+                if self._session_manager.active_session is not None
+                else SystemStates.READY
+            )
+            if self._state.system_state != next_state:
+                self._set_system_state(next_state, "Teleoperation is already stopped.")
+            self._publish_feedback(
+                goal_handle,
+                StopTeleoperation,
+                "Teleoperation is already stopped.",
+            )
+            goal_handle.succeed()
+            result.success = True
+            result.message = "Teleoperation already stopped"
+            return result
+
+        self._publish_feedback(
+            goal_handle,
+            StopTeleoperation,
+            "Disabling teleoperation hooks.",
+        )
+        after_failure = self._run_after_session()
+        if after_failure is not None:
+            self._set_system_state(
+                self._state.system_state,
+                f"StopTeleoperation failed: {after_failure}",
+            )
+            goal_handle.abort()
+            result.success = False
+            result.message = after_failure
+            return result
+
+        self._publish_feedback(
+            goal_handle,
+            StopTeleoperation,
+            "Disarming supported devices.",
+        )
+        disarm_failure = self._run_disarm_sequence()
+        if disarm_failure is not None:
+            self._set_system_state(
+                self._state.system_state,
+                f"StopTeleoperation failed: {disarm_failure}",
+            )
+            goal_handle.abort()
+            result.success = False
+            result.message = disarm_failure
+            return result
+
+        self._teleop_active = False
+        self._teleop_auto_started_by_session = False
+        next_state = (
+            SystemStates.RECORDING
+            if self._session_manager.active_session is not None
+            else SystemStates.READY
+        )
+        summary = (
+            "Teleoperation stopped while recording continues."
+            if next_state == SystemStates.RECORDING
+            else "Teleoperation stopped and system returned to READY."
+        )
+        self._set_system_state(next_state, summary)
+        self._publish_feedback(goal_handle, StopTeleoperation, summary)
+        goal_handle.succeed()
+        result.success = True
+        result.message = "Teleoperation stopped"
+        return result
+
     def execute_start_session(self, goal_handle):
         request = goal_handle.request
         result = StartSession.Result()
@@ -1682,12 +1919,18 @@ class DataCollectionSupervisor(Node):
             result.message = "No active recipe. StartSystem must succeed first."
             return result
 
-        armed_this_session = False
-        before_session_ran = False
+        auto_started_teleop = False
         session: ActiveSession | None = None
         try:
-            if self._state.system_state == SystemStates.READY:
-                self._publish_feedback(goal_handle, StartSession, "Arming supported devices.")
+            if not self._teleop_active:
+                # Preserve the historical collection contract: if the operator
+                # jumps straight to StartSession, we still arm the devices and
+                # enter teleop before recording starts.
+                self._publish_feedback(
+                    goal_handle,
+                    StartSession,
+                    "Arming supported devices before recording.",
+                )
                 arm_failure = self._run_arm_sequence()
                 if arm_failure is not None:
                     self._set_fault(arm_failure)
@@ -1696,28 +1939,44 @@ class DataCollectionSupervisor(Node):
                     result.session_id = ""
                     result.message = arm_failure
                     return result
-                armed_this_session = True
-                self._set_system_state(
-                    SystemStates.ARMED,
-                    "System armed and ready to enter RECORDING.",
+
+                self._publish_feedback(
+                    goal_handle,
+                    StartSession,
+                    "Enabling teleoperation hooks before recording.",
                 )
+                before_session_failure = self._run_before_session()
+                if before_session_failure is not None:
+                    try:
+                        self._run_disarm_sequence()
+                    except Exception:
+                        pass
+                    self._set_fault(before_session_failure)
+                    goal_handle.abort()
+                    result.success = False
+                    result.session_id = ""
+                    result.message = before_session_failure
+                    return result
+                self._teleop_active = True
+                self._teleop_auto_started_by_session = True
+                auto_started_teleop = True
 
-            self._publish_feedback(goal_handle, StartSession, "Running before_session hooks.")
-            before_session_failure = self._run_before_session()
-            if before_session_failure is not None:
-                self._set_fault(before_session_failure)
-                goal_handle.abort()
-                result.success = False
-                result.session_id = ""
-                result.message = before_session_failure
-                return result
-            before_session_ran = True
+            session_name = request.session_name.strip() or request.session_tag.strip()
+            if not session_name:
+                session_name = self._current_recipe.recipe_id or "session"
+            session_root = _optional_path(request.session_root) or self._recording_policy.session_root
 
+            self._publish_feedback(
+                goal_handle,
+                StartSession,
+                f"Preparing recording session name={session_name} root={session_root}.",
+            )
             operator_id = request.operator_id or self._current_operator_id or "unknown"
             session = self._session_manager.begin_session(
                 recipe_id=self._current_recipe.recipe_id,
                 operator_id=operator_id,
-                session_tag=request.session_tag,
+                session_name=session_name,
+                session_root=session_root,
                 site_name=self._current_site_name,
             )
             record_topics = self._session_record_topics()
@@ -1758,19 +2017,21 @@ class DataCollectionSupervisor(Node):
                 except Exception:
                     pass
                 self._session_manager.end_session()
-            rollback_failure = None
-            if before_session_ran:
-                rollback_failure = self._run_after_session()
-            if rollback_failure is None and armed_this_session:
-                rollback_failure = self._run_disarm_sequence()
-            if rollback_failure is not None:
-                self._set_fault(rollback_failure)
-                goal_handle.abort()
-                result.success = False
-                result.session_id = ""
-                result.message = f"{failure_message}\nRollback failure: {rollback_failure}"
-                return result
-            self._set_system_state(SystemStates.READY, f"StartSession failed: {failure_message}")
+            if auto_started_teleop:
+                try:
+                    self._run_after_session()
+                except Exception:
+                    pass
+                try:
+                    self._run_disarm_sequence()
+                except Exception:
+                    pass
+                self._teleop_active = False
+                self._teleop_auto_started_by_session = False
+            self._set_system_state(
+                self._idle_or_teleop_state(),
+                f"StartSession failed: {failure_message}",
+            )
             goal_handle.abort()
             result.success = False
             result.session_id = ""
@@ -1791,7 +2052,10 @@ class DataCollectionSupervisor(Node):
         goal_handle.succeed()
         result.success = True
         result.session_id = session.session_id
-        result.message = "Session started"
+        if session.artifacts is not None:
+            result.message = f"Session started at {session.artifacts.session_dir}"
+        else:
+            result.message = "Session started"
         return result
 
     def execute_stop_session(self, goal_handle):
@@ -1858,7 +2122,7 @@ class DataCollectionSupervisor(Node):
                 self._set_fault(home_result.summary, device_id=failing_device_id)
             else:
                 self._set_system_state(
-                    SystemStates.READY,
+                    self._idle_or_teleop_state(),
                     f"GoHome degraded: {home_result.summary}",
                 )
             goal_handle.abort()
@@ -1866,9 +2130,9 @@ class DataCollectionSupervisor(Node):
             result.message = home_result.summary
             return result
 
-        next_state = SystemStates.READY
+        next_state = self._idle_or_teleop_state()
         if request.arm_after_home:
-            self._publish_feedback(goal_handle, GoHome, "Arming after home.")
+            self._publish_feedback(goal_handle, GoHome, "Starting teleoperation after home.")
             arm_failure = self._run_arm_sequence()
             if arm_failure is not None:
                 self._set_fault(arm_failure)
@@ -1876,6 +2140,15 @@ class DataCollectionSupervisor(Node):
                 result.success = False
                 result.message = arm_failure
                 return result
+            before_session_failure = self._run_before_session()
+            if before_session_failure is not None:
+                self._set_fault(before_session_failure)
+                goal_handle.abort()
+                result.success = False
+                result.message = before_session_failure
+                return result
+            self._teleop_active = True
+            self._teleop_auto_started_by_session = False
             next_state = SystemStates.ARMED
 
         self._set_system_state(

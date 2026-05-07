@@ -946,6 +946,9 @@ hardware_interface::CallbackReturn MarvinHardware::on_configure(
     collision_guard_.disarm();
     current_feedback_valid_.store(false, std::memory_order_relaxed);
     collision_guard_approved_valid_.store(false, std::memory_order_relaxed);
+    startup_transition_pending_ = false;
+    startup_transition_setup_sent_ = false;
+    startup_transition_started_at_ = Clock::time_point{};
     active_control_profile_.store(ControlProfile::kUnknown, std::memory_order_relaxed);
     requested_control_profile_.store(ControlProfile::kUnknown, std::memory_order_relaxed);
     for (size_t arm = 0; arm < kArmCount; ++arm) {
@@ -1548,9 +1551,132 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
         return true;
     };
 
+    auto wait_for_stable_position_before_startup_switch = [&](const char *phase) {
+        constexpr auto kStablePositionWindow = std::chrono::milliseconds(300);
+        const auto deadline = Clock::now() + std::chrono::milliseconds(state_timeout_ms_);
+        auto stable_since = Clock::time_point{};
+        auto last_log_at = Clock::time_point{};
+
+        while (true) {
+            for (size_t arm = 0; arm < kArmCount; ++arm) {
+                const auto &state = dcss.m_State[arm];
+                if (static_cast<ArmState>(state.m_CurState) == ARM_STATE_ERROR ||
+                    state.m_ERRCode != 0) {
+                    RCLCPP_ERROR(
+                        get_logger(),
+                        "Cannot request %s startup switch during %s because arm %s is unhealthy "
+                        "(state=%s(%d), err=%d, low=%d).",
+                        control_profile_to_string(startup_profile),
+                        phase,
+                        arm == 0 ? "A" : "B",
+                        arm_state_name(static_cast<ArmState>(state.m_CurState)),
+                        state.m_CurState,
+                        state.m_ERRCode,
+                        static_cast<int>(dcss.m_Out[arm].m_LowSpdFlag));
+                    return false;
+                }
+            }
+
+            const bool stable_position_ready =
+                both_arms_in_position_bootstrap() && low_speed_ready();
+            const auto now = Clock::now();
+            if (stable_position_ready) {
+                if (stable_since == Clock::time_point{}) {
+                    stable_since = now;
+                }
+                if (now - stable_since >= kStablePositionWindow) {
+                    refresh_hold_positions();
+                    return true;
+                }
+            } else {
+                stable_since = Clock::time_point{};
+            }
+
+            if (last_log_at == Clock::time_point{} ||
+                (now - last_log_at) >= std::chrono::milliseconds(500)) {
+                RCLCPP_WARN(
+                    get_logger(),
+                    "Waiting for stable POSITION before %s startup switch "
+                    "(A: state=%s(%d), err=%d, low=%d; "
+                    "B: state=%s(%d), err=%d, low=%d).",
+                    phase,
+                    arm_state_name(static_cast<ArmState>(dcss.m_State[0].m_CurState)),
+                    dcss.m_State[0].m_CurState,
+                    dcss.m_State[0].m_ERRCode,
+                    static_cast<int>(dcss.m_Out[0].m_LowSpdFlag),
+                    arm_state_name(static_cast<ArmState>(dcss.m_State[1].m_CurState)),
+                    dcss.m_State[1].m_CurState,
+                    dcss.m_State[1].m_ERRCode,
+                    static_cast<int>(dcss.m_Out[1].m_LowSpdFlag));
+                last_log_at = now;
+            }
+
+            if (now >= deadline) {
+                RCLCPP_ERROR(
+                    get_logger(),
+                    "Timed out waiting for stable POSITION before %s startup switch "
+                    "(A: state=%s(%d), err=%d, low=%d; "
+                    "B: state=%s(%d), err=%d, low=%d).",
+                    phase,
+                    arm_state_name(static_cast<ArmState>(dcss.m_State[0].m_CurState)),
+                    dcss.m_State[0].m_CurState,
+                    dcss.m_State[0].m_ERRCode,
+                    static_cast<int>(dcss.m_Out[0].m_LowSpdFlag),
+                    arm_state_name(static_cast<ArmState>(dcss.m_State[1].m_CurState)),
+                    dcss.m_State[1].m_CurState,
+                    dcss.m_State[1].m_ERRCode,
+                    static_cast<int>(dcss.m_Out[1].m_LowSpdFlag));
+                return false;
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if (!OnGetBuf(&dcss)) {
+                RCLCPP_ERROR(
+                    get_logger(),
+                    "OnGetBuf failed while waiting for stable POSITION before %s startup switch.",
+                    phase);
+                return false;
+            }
+            refresh_hold_positions();
+        }
+    };
+
     refresh_hold_positions();
 
-    bool mode_switch_succeeded = false;
+    // Keep activation in POSITION when the startup profile is JOINT_IMPEDANCE.
+    // The impedance handoff is intentionally finished later in write(), after
+    // ros2_control has come up and the controller manager can own the position interfaces.
+    startup_transition_pending_ = startup_profile == ControlProfile::kJointImpedance;
+    startup_transition_setup_sent_ = false;
+    startup_transition_started_at_ = Clock::now();
+    if (startup_transition_pending_) {
+        if (!both_arms_in_position_bootstrap()) {
+            if (!request_position_bootstrap() || !wait_for_position_bootstrap()) {
+                RCLCPP_ERROR(
+                    get_logger(),
+                    "Failed to bootstrap POSITION before deferred %s startup switch.",
+                    control_profile_to_string(startup_profile));
+                return hardware_interface::CallbackReturn::ERROR;
+            }
+            if (!OnGetBuf(&dcss)) {
+                RCLCPP_ERROR(
+                    get_logger(),
+                    "OnGetBuf failed after deferred startup position bootstrap.");
+                return hardware_interface::CallbackReturn::ERROR;
+            }
+            refresh_hold_positions();
+        }
+        if (!wait_for_stable_position_before_startup_switch("deferred")) {
+            return hardware_interface::CallbackReturn::ERROR;
+        }
+        startup_transition_started_at_ = Clock::now();
+    }
+    for (size_t joint = 0; joint < kJointsPerArm; ++joint) {
+        startup_transition_hold_deg_[0][joint] = hold_a[joint];
+        startup_transition_hold_deg_[1][joint] = hold_b[joint];
+    }
+
+    bool mode_switch_succeeded = startup_transition_pending_;
     std::array<bool, kArmCount> timeout_has_status{{false, false}};
     std::array<int, kArmCount> timeout_cur_state{};
     std::array<int, kArmCount> timeout_cmd_state{};
@@ -1558,6 +1684,7 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
     bool timeout_arm_ready_a = false;
     bool timeout_arm_ready_b = false;
 
+    if (!startup_transition_pending_) {
     for (int attempt = 1; attempt <= activation_max_attempts_; ++attempt) {
         bool attempt_faulted = false;
         size_t fault_arm = 0;
@@ -1670,6 +1797,33 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
         }
 
         if (request_target_state &&
+            startup_profile == ControlProfile::kJointImpedance &&
+            !wait_for_stable_position_before_startup_switch("initial")) {
+            if (attempt == activation_max_attempts_) {
+                return hardware_interface::CallbackReturn::ERROR;
+            }
+            RCLCPP_WARN(
+                get_logger(),
+                "Stable POSITION gate blocked %s startup switch on attempt %d/%d. "
+                "Waiting %d ms and retrying.",
+                control_profile_to_string(startup_profile),
+                attempt,
+                activation_max_attempts_,
+                activation_retry_settle_ms_);
+            request_idle_mode();
+            if (activation_retry_settle_ms_ > 0) {
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(activation_retry_settle_ms_));
+            }
+            if (!OnGetBuf(&dcss)) {
+                RCLCPP_ERROR(get_logger(), "OnGetBuf failed before activation retry.");
+                return hardware_interface::CallbackReturn::ERROR;
+            }
+            refresh_hold_positions();
+            continue;
+        }
+
+        if (request_target_state &&
             !wait_for_low_speed_before_startup_switch("initial")) {
             if (attempt == activation_max_attempts_) {
                 return hardware_interface::CallbackReturn::ERROR;
@@ -1738,6 +1892,33 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
             }
         }
         request_target_state = !both_arms_at_startup_target();
+
+        if (request_target_state &&
+            startup_profile == ControlProfile::kJointImpedance &&
+            !wait_for_stable_position_before_startup_switch("post-hold seed")) {
+            if (attempt == activation_max_attempts_) {
+                return hardware_interface::CallbackReturn::ERROR;
+            }
+            RCLCPP_WARN(
+                get_logger(),
+                "Stable POSITION gate after hold seed blocked %s startup switch on attempt %d/%d. "
+                "Waiting %d ms and retrying.",
+                control_profile_to_string(startup_profile),
+                attempt,
+                activation_max_attempts_,
+                activation_retry_settle_ms_);
+            request_idle_mode();
+            if (activation_retry_settle_ms_ > 0) {
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(activation_retry_settle_ms_));
+            }
+            if (!OnGetBuf(&dcss)) {
+                RCLCPP_ERROR(get_logger(), "OnGetBuf failed before activation retry.");
+                return hardware_interface::CallbackReturn::ERROR;
+            }
+            refresh_hold_positions();
+            continue;
+        }
 
         if (!request_startup_profile(request_target_state)) {
             if (attempt == activation_max_attempts_) {
@@ -2135,6 +2316,7 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
         }
         refresh_hold_positions();
     }
+    }
 
     if (!mode_switch_succeeded) {
         RCLCPP_ERROR(
@@ -2157,6 +2339,22 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
         return hardware_interface::CallbackReturn::ERROR;
     }
     for (size_t arm = 0; arm < kArmCount; ++arm) {
+        if (startup_transition_pending_) {
+            if (dcss.m_State[arm].m_CurState != ARM_STATE_POSITION ||
+                dcss.m_State[arm].m_ERRCode != 0) {
+                RCLCPP_ERROR(
+                    get_logger(),
+                    "Refusing activation: arm %s is not in clean POSITION for deferred "
+                    "joint-impedance startup switch (state=%s(%d), err=%d, imp=%d).",
+                    arm == 0 ? "A" : "B",
+                    arm_state_name(static_cast<ArmState>(dcss.m_State[arm].m_CurState)),
+                    dcss.m_State[arm].m_CurState,
+                    dcss.m_State[arm].m_ERRCode,
+                    dcss.m_In[arm].m_ImpType);
+                return hardware_interface::CallbackReturn::ERROR;
+            }
+            continue;
+        }
         if (dcss.m_State[arm].m_CurState != ARM_STATE_TORQ ||
             dcss.m_In[arm].m_ImpType != 1 ||
             dcss.m_State[arm].m_ERRCode != 0) {
@@ -2211,9 +2409,17 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
     }
     current_feedback_valid_.store(true, std::memory_order_relaxed);
     collision_guard_approved_valid_.store(true, std::memory_order_relaxed);
-    active_control_profile_.store(startup_profile, std::memory_order_relaxed);
+    active_control_profile_.store(
+        startup_transition_pending_ ? ControlProfile::kPositionFollow : startup_profile,
+        std::memory_order_relaxed);
     requested_control_profile_.store(startup_profile, std::memory_order_relaxed);
     update_sdk_observation_states(dcss);
+    if (startup_transition_pending_) {
+        RCLCPP_INFO(
+            get_logger(),
+            "Hardware activation completed in POSITION; deferred %s startup switch to the write loop.",
+            control_profile_to_string(startup_profile));
+    }
 
     // Seed gripper state & command (query_states blocks briefly, OK during activation)
     for (size_t g = 0; g < gripper_count_; ++g) {
@@ -2403,6 +2609,9 @@ hardware_interface::CallbackReturn MarvinHardware::on_deactivate(
     const rclcpp_lifecycle::State &)
 {
     activated_ = false;
+    startup_transition_pending_ = false;
+    startup_transition_setup_sent_ = false;
+    startup_transition_started_at_ = Clock::time_point{};
     stop_collision_guard_worker();
     stop_gripper_worker();
     workspace_guard_.disarm();
@@ -2519,6 +2728,9 @@ hardware_interface::return_type MarvinHardware::read(
 {
     if (!activated_) return hardware_interface::return_type::OK;
 
+    // During deferred startup we expect POSITION here; write() still owns the
+    // eventual move to TORQ/JOINT_IMPEDANCE.
+    const bool deferred_startup_transition = startup_transition_pending_;
     DCSS dcss{};
     if (!OnGetBuf(&dcss)) {
         RCLCPP_ERROR(get_logger(), "OnGetBuf failed.");
@@ -2587,7 +2799,8 @@ hardware_interface::return_type MarvinHardware::read(
                          arm, dcss.m_State[arm].m_ERRCode, servo_stream.str().c_str());
             return hardware_interface::return_type::ERROR;
         }
-        if (state != ARM_STATE_TORQ || dcss.m_In[arm].m_ImpType != 1) {
+        if (!deferred_startup_transition &&
+            (state != ARM_STATE_TORQ || dcss.m_In[arm].m_ImpType != 1)) {
             active_control_profile_.store(ControlProfile::kUnknown, std::memory_order_relaxed);
             requested_control_profile_.store(
                 ControlProfile::kJointImpedance, std::memory_order_relaxed);
@@ -2630,7 +2843,9 @@ hardware_interface::return_type MarvinHardware::read(
         }
     }
     current_feedback_valid_.store(true, std::memory_order_relaxed);
-    active_control_profile_.store(ControlProfile::kJointImpedance, std::memory_order_relaxed);
+    active_control_profile_.store(
+        deferred_startup_transition ? ControlProfile::kPositionFollow : ControlProfile::kJointImpedance,
+        std::memory_order_relaxed);
     requested_control_profile_.store(ControlProfile::kJointImpedance, std::memory_order_relaxed);
     update_sdk_observation_states(dcss);
 
@@ -2652,6 +2867,66 @@ hardware_interface::return_type MarvinHardware::write(
     const rclcpp::Time &, const rclcpp::Duration &)
 {
     if (!activated_) return hardware_interface::return_type::OK;
+
+    if (startup_transition_pending_) {
+        // This handoff must happen from the real control loop, not from activation.
+        // If we force TORQ here, controller_manager never gets a stable window to
+        // activate joint_state_broadcaster / tracker_teleop_controller.
+        const auto now = Clock::now();
+        if (now - startup_transition_started_at_ >
+            std::chrono::milliseconds(state_timeout_ms_)) {
+            RCLCPP_ERROR(
+                get_logger(),
+                "Deferred JOINT_IMPEDANCE startup switch timed out while waiting for the write loop.");
+            return hardware_interface::return_type::ERROR;
+        }
+
+        const bool startup_complete =
+            current_sdk_cur_state_[0].load(std::memory_order_relaxed) == ARM_STATE_TORQ &&
+            current_sdk_cur_state_[1].load(std::memory_order_relaxed) == ARM_STATE_TORQ &&
+            current_sdk_err_code_[0].load(std::memory_order_relaxed) == 0 &&
+            current_sdk_err_code_[1].load(std::memory_order_relaxed) == 0 &&
+            current_sdk_imp_type_[0].load(std::memory_order_relaxed) == 1 &&
+            current_sdk_imp_type_[1].load(std::memory_order_relaxed) == 1;
+        if (startup_complete) {
+            startup_transition_pending_ = false;
+            startup_transition_setup_sent_ = false;
+            active_control_profile_.store(ControlProfile::kJointImpedance, std::memory_order_relaxed);
+            requested_control_profile_.store(ControlProfile::kJointImpedance, std::memory_order_relaxed);
+        } else {
+            const bool position_ready =
+                current_sdk_cur_state_[0].load(std::memory_order_relaxed) == ARM_STATE_POSITION &&
+                current_sdk_cur_state_[1].load(std::memory_order_relaxed) == ARM_STATE_POSITION &&
+                current_sdk_err_code_[0].load(std::memory_order_relaxed) == 0 &&
+                current_sdk_err_code_[1].load(std::memory_order_relaxed) == 0 &&
+                current_sdk_low_spd_flag_[0].load(std::memory_order_relaxed) == 1 &&
+                current_sdk_low_spd_flag_[1].load(std::memory_order_relaxed) == 1;
+            if (!position_ready) {
+                return hardware_interface::return_type::OK;
+            }
+
+            if (!startup_transition_setup_sent_) {
+                if (!send_joint_impedance_setup_command()) {
+                    RCLCPP_WARN(
+                        get_logger(),
+                        "Deferred JOINT_IMPEDANCE startup setup packet failed; retrying in the next write cycle.");
+                    return hardware_interface::return_type::OK;
+                }
+                startup_transition_setup_sent_ = true;
+                return hardware_interface::return_type::OK;
+            }
+
+            std::array<std::array<double, kJointsPerArm>, kArmCount> hold_deg{};
+            hold_deg = startup_transition_hold_deg_;
+            if (!send_joint_impedance_hold_command(hold_deg, true)) {
+                RCLCPP_WARN(
+                    get_logger(),
+                    "Deferred JOINT_IMPEDANCE startup hold packet failed; retrying in the next write cycle.");
+                return hardware_interface::return_type::OK;
+            }
+            return hardware_interface::return_type::OK;
+        }
+    }
 
     double desired_a[kJointsPerArm];
     double desired_b[kJointsPerArm];

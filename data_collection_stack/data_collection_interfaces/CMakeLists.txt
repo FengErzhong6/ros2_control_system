@@ -24,7 +24,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "action/ShutdownSystem.action"
   "action/StartSession.action"
   "action/StartSystem.action"
+  "action/StartTeleoperation.action"
   "action/StopSession.action"
+  "action/StopTeleoperation.action"
   DEPENDENCIES builtin_interfaces std_msgs
 )
 

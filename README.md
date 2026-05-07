@@ -55,6 +55,8 @@
 
 **marvin_system** 为 **Marvin 双臂机器人** 提供 ros2_control 硬件接口与启动、配置，当前为 **双臂一体** 描述：左臂 + 右臂共 14 个关节，通过同一硬件插件与 Marvin SDK 通信。可选集成 **OmniPicker 夹爪**（每臂最多 1 个，共最多 2 个）。
 
+Marvin 的当前正确启动契约见 [marvin_system/MARVIN_STARTUP_GUIDE.md](marvin_system/MARVIN_STARTUP_GUIDE.md)。
+
 | 项目 | 说明 |
 |------|------|
 | **机器人** | Marvin 双臂，每臂 7 关节，共 **14 个关节**（`Joint1_L`～`Joint7_L`、`Joint1_R`～`Joint7_R`） |

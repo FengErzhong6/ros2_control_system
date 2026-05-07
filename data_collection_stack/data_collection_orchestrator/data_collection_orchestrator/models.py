@@ -120,7 +120,8 @@ class ActiveSession:
     session_id: str
     recipe_id: str
     operator_id: str
-    session_tag: str
+    session_name: str
+    session_root: Path | None = None
     site_name: str = ""
     artifacts: SessionArtifacts | None = None
     record_topics: list[str] = field(default_factory=list)

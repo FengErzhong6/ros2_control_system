@@ -21,6 +21,7 @@ class UiRuntimeConfig:
     enable_hotkeys: bool = True
     camera_streams: tuple[CameraStreamConfig, ...] = ()
     recipe_id: str = ""
+    default_session_root: str = ""
 
 
 @dataclass

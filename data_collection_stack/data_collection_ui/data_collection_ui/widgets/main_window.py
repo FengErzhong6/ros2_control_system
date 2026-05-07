@@ -98,7 +98,12 @@ class MainWindow(QMainWindow):
         sidebar_layout = QVBoxLayout()
         sidebar_layout.setSpacing(12)
 
-        self._session_panel = SessionPanel(model=SessionPanelModel(), parent=self)
+        self._session_panel = SessionPanel(
+            model=SessionPanelModel(
+                default_save_directory=view_model.config.default_session_root,
+            ),
+            parent=self,
+        )
         sidebar_layout.addWidget(self._session_panel, 0)
 
         self._command_panel = CommandPanel(model=CommandPanelModel(), parent=self)
@@ -130,6 +135,14 @@ class MainWindow(QMainWindow):
     def _bind_commands(self) -> None:
         self._command_panel.set_command_handler("StartSystem", self._on_connect)
         self._command_panel.set_command_handler("ShutdownSystem", self._on_shutdown_system)
+        self._command_panel.set_command_handler(
+            "StartTeleoperation",
+            self._on_start_teleoperation,
+        )
+        self._command_panel.set_command_handler(
+            "StopTeleoperation",
+            self._on_stop_teleoperation,
+        )
         self._command_panel.set_command_handler("StartSession", self._on_start_collection)
         self._command_panel.set_command_handler("StopSession", self._on_stop_collection)
         self._command_panel.set_command_handler("GoHome", self._on_go_home)
@@ -150,6 +163,8 @@ class MainWindow(QMainWindow):
         command_handlers = {
             "StartSystem": self._on_connect,
             "ShutdownSystem": self._on_shutdown_system,
+            "StartTeleoperation": self._on_start_teleoperation,
+            "StopTeleoperation": self._on_stop_teleoperation,
             "StartSession": self._on_start_collection,
             "StopSession": self._on_stop_collection,
             "GoHome": self._on_go_home,
@@ -174,10 +189,17 @@ class MainWindow(QMainWindow):
     def _on_shutdown_system(self) -> None:
         self._ros_client.disconnect_system(force=False)
 
+    def _on_start_teleoperation(self) -> None:
+        self._ros_client.start_teleoperation()
+
+    def _on_stop_teleoperation(self) -> None:
+        self._ros_client.stop_teleoperation()
+
     def _on_start_collection(self) -> None:
         self._ros_client.start_collection(
             operator_id=self._session_panel.operator_id(),
-            session_tag=self._session_panel.session_tag(),
+            session_name=self._session_panel.session_name(),
+            session_root=self._session_panel.save_directory(),
         )
 
     def _on_stop_collection(self) -> None:

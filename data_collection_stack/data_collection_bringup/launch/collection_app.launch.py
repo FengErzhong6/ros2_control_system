@@ -85,6 +85,7 @@ def generate_launch_description():
                 "recipe_directory": LaunchConfiguration("recipe_directory"),
                 "cameras_config": LaunchConfiguration("cameras_config"),
                 "ui_config": LaunchConfiguration("ui_config"),
+                "recording_config": LaunchConfiguration("recording_config"),
             }
         ],
         condition=IfCondition(LaunchConfiguration("use_ui")),

@@ -1,4 +1,6 @@
 string operator_id
+string session_name
+string session_root
 string session_tag
 ---
 bool success

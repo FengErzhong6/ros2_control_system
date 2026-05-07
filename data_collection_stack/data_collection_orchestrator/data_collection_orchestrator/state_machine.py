@@ -13,8 +13,10 @@ class SystemStates:
 class Commands:
     START_SYSTEM = "StartSystem"
     SHUTDOWN_SYSTEM = "ShutdownSystem"
+    START_TELEOPERATION = "StartTeleoperation"
     START_SESSION = "StartSession"
     STOP_SESSION = "StopSession"
+    STOP_TELEOPERATION = "StopTeleoperation"
     GO_HOME = "GoHome"
     ACKNOWLEDGE_FAULT = "AcknowledgeFault"
 
@@ -24,17 +26,23 @@ _ALLOWED_COMMANDS = {
     SystemStates.READY: [
         Commands.SHUTDOWN_SYSTEM,
         Commands.GO_HOME,
+        Commands.START_TELEOPERATION,
         Commands.START_SESSION,
     ],
     SystemStates.ARMED: [
         Commands.SHUTDOWN_SYSTEM,
         Commands.GO_HOME,
+        Commands.STOP_TELEOPERATION,
         Commands.START_SESSION,
     ],
     SystemStates.RECORDING: [
+        Commands.START_TELEOPERATION,
+        Commands.STOP_TELEOPERATION,
         Commands.STOP_SESSION,
     ],
     SystemStates.PAUSED: [
+        Commands.START_TELEOPERATION,
+        Commands.STOP_TELEOPERATION,
         Commands.START_SESSION,
         Commands.STOP_SESSION,
         Commands.SHUTDOWN_SYSTEM,

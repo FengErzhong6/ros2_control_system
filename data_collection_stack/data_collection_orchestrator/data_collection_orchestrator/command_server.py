@@ -7,7 +7,9 @@ from data_collection_interfaces.action import (
     ShutdownSystem,
     StartSession,
     StartSystem,
+    StartTeleoperation,
     StopSession,
+    StopTeleoperation,
 )
 from .state_machine import Commands
 
@@ -35,6 +37,28 @@ class CommandServer:
                     Commands.SHUTDOWN_SYSTEM, self._supervisor.execute_shutdown_system
                 ),
                 goal_callback=self._make_goal_callback(Commands.SHUTDOWN_SYSTEM),
+                cancel_callback=self._cancel_callback,
+            ),
+            ActionServer(
+                node,
+                StartTeleoperation,
+                "start_teleoperation",
+                execute_callback=self._wrap_execute(
+                    Commands.START_TELEOPERATION,
+                    self._supervisor.execute_start_teleoperation,
+                ),
+                goal_callback=self._make_goal_callback(Commands.START_TELEOPERATION),
+                cancel_callback=self._cancel_callback,
+            ),
+            ActionServer(
+                node,
+                StopTeleoperation,
+                "stop_teleoperation",
+                execute_callback=self._wrap_execute(
+                    Commands.STOP_TELEOPERATION,
+                    self._supervisor.execute_stop_teleoperation,
+                ),
+                goal_callback=self._make_goal_callback(Commands.STOP_TELEOPERATION),
                 cancel_callback=self._cancel_callback,
             ),
             ActionServer(
@@ -70,7 +94,7 @@ class CommandServer:
         ]
 
     def describe(self) -> str:
-        return "Action servers registered for start, shutdown, session, and home commands."
+        return "Action servers registered for start, shutdown, teleop, session, and home commands."
 
     def _make_goal_callback(self, command: str):
         def _goal_callback(goal_request):
@@ -115,7 +139,15 @@ class CommandServer:
     @staticmethod
     def _describe_goal(goal_request) -> str:
         fields = []
-        for name in ("recipe_id", "operator_id", "site_name", "session_tag", "reason"):
+        for name in (
+            "recipe_id",
+            "operator_id",
+            "site_name",
+            "session_name",
+            "session_root",
+            "session_tag",
+            "reason",
+        ):
             value = getattr(goal_request, name, None)
             if value not in {None, ""}:
                 fields.append(f"{name}={value}")

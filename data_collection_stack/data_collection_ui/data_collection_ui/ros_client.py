@@ -12,7 +12,9 @@ from data_collection_interfaces.action import (
     ShutdownSystem,
     StartSession,
     StartSystem,
+    StartTeleoperation,
     StopSession,
+    StopTeleoperation,
 )
 from data_collection_interfaces.msg import DeviceState, FaultEvent, SystemState
 from data_collection_interfaces.srv import AcknowledgeFault
@@ -146,6 +148,16 @@ class RosClient:
             "shutdown_system",
         )
         self._start_session_client = ActionClient(self._node, StartSession, "start_session")
+        self._start_teleoperation_client = ActionClient(
+            self._node,
+            StartTeleoperation,
+            "start_teleoperation",
+        )
+        self._stop_teleoperation_client = ActionClient(
+            self._node,
+            StopTeleoperation,
+            "stop_teleoperation",
+        )
         self._stop_session_client = ActionClient(self._node, StopSession, "stop_session")
         self._go_home_client = ActionClient(self._node, GoHome, "go_home")
         self._acknowledge_fault_client = self._node.create_client(
@@ -282,17 +294,38 @@ class RosClient:
             dispatch_message=f"Disconnect requested. force={force}.",
         )
 
-    def start_collection(self, *, operator_id: str, session_tag: str) -> None:
+    def start_teleoperation(self) -> None:
+        goal = StartTeleoperation.Goal()
+        self._send_action(
+            command_name="StartTeleoperation",
+            client=self._start_teleoperation_client,
+            goal=goal,
+            dispatch_message="Start Teleoperation requested.",
+        )
+
+    def stop_teleoperation(self) -> None:
+        goal = StopTeleoperation.Goal()
+        self._send_action(
+            command_name="StopTeleoperation",
+            client=self._stop_teleoperation_client,
+            goal=goal,
+            dispatch_message="Stop Teleoperation requested.",
+        )
+
+    def start_collection(self, *, operator_id: str, session_name: str, session_root: str) -> None:
         goal = StartSession.Goal()
         goal.operator_id = operator_id.strip()
-        goal.session_tag = session_tag.strip()
+        goal.session_name = session_name.strip()
+        goal.session_root = session_root.strip()
+        goal.session_tag = goal.session_name
         self._send_action(
             command_name="StartSession",
             client=self._start_session_client,
             goal=goal,
             dispatch_message=(
-                f"Start Collection requested "
-                f"(operator={goal.operator_id or 'unknown'}, tag={goal.session_tag or '-'})."
+                f"Start Record requested "
+                f"(operator={goal.operator_id or 'unknown'}, name={goal.session_name or '-'}, "
+                f"root={goal.session_root or '-'})."
             ),
         )
 
@@ -303,7 +336,7 @@ class RosClient:
             command_name="StopSession",
             client=self._stop_session_client,
             goal=goal,
-            dispatch_message=f"Stop Collection requested. reason={reason}.",
+            dispatch_message=f"Stop Record requested. reason={reason}.",
         )
 
     def go_home(self) -> None:
@@ -343,6 +376,7 @@ class RosClient:
         self._node.declare_parameter("recipe_directory", str(defaults["recipe_directory"]))
         self._node.declare_parameter("cameras_config", str(defaults["cameras_config"]))
         self._node.declare_parameter("ui_config", str(defaults["ui_config"]))
+        self._node.declare_parameter("recording_config", str(defaults["recording_config"]))
 
     def _default_paths(self) -> dict[str, Path]:
         try:
@@ -355,6 +389,7 @@ class RosClient:
             "recipe_directory": bringup_share / "config" / "recipes",
             "cameras_config": camera_share / "bringup" / "config" / "cameras.yaml",
             "ui_config": bringup_share / "config" / "session" / "ui.yaml",
+            "recording_config": bringup_share / "config" / "session" / "recording.yaml",
         }
 
     def _camera_system_share(self) -> Path:
@@ -368,12 +403,17 @@ class RosClient:
         recipe_directory = Path(str(self._node.get_parameter("recipe_directory").value)).expanduser()
         cameras_config = Path(str(self._node.get_parameter("cameras_config").value)).expanduser()
         ui_config_path = Path(str(self._node.get_parameter("ui_config").value)).expanduser()
+        recording_config_path = Path(str(self._node.get_parameter("recording_config").value)).expanduser()
 
         ui_data = _load_yaml_map(ui_config_path)
+        recording_data = _load_yaml_map(recording_config_path)
         refresh_hz = max(1, int(ui_data.get("refresh_hz", 20)))
         camera_grid_columns = max(1, int(ui_data.get("camera_grid_columns", 2)))
         enable_hotkeys = bool(ui_data.get("enable_hotkeys", True))
         window_title = str(ui_data.get("default_window_title", "Data Collection Console"))
+        default_session_root = str(
+            Path(str(recording_data.get("session_root", "~/.ros/data_collection"))).expanduser()
+        )
         camera_streams = tuple(
             self._load_camera_stream_configs(
                 recipe_id=recipe_id,
@@ -389,6 +429,7 @@ class RosClient:
             enable_hotkeys=enable_hotkeys,
             camera_streams=camera_streams,
             recipe_id=recipe_id,
+            default_session_root=default_session_root,
         )
 
     def _load_camera_stream_configs(
