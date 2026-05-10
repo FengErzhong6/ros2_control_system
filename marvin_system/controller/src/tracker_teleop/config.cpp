@@ -1,6 +1,7 @@
 #include "internal.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <functional>
@@ -32,6 +33,27 @@ tf2::Transform readRigidTransform(
         q.setValue(ori_vec[0], ori_vec[1], ori_vec[2], ori_vec[3]);
     }
     return tf2::Transform(q, t);
+}
+
+std::string normalizedActiveArms(std::string value)
+{
+    value.erase(
+        std::remove_if(
+            value.begin(),
+            value.end(),
+            [](unsigned char c) { return std::isspace(c) != 0; }),
+        value.end());
+    std::transform(
+        value.begin(),
+        value.end(),
+        value.begin(),
+        [](unsigned char c) {
+            if (c == '-') {
+                return '_';
+            }
+            return static_cast<char>(std::tolower(c));
+        });
+    return value;
 }
 
 }  // namespace
@@ -170,6 +192,9 @@ bool TrackerTeleopController::loadControllerParameters()
 
     loadTransformParameters();
     loadElbowCorrectionParameters();
+    if (!loadActiveArmParameters()) {
+        return false;
+    }
     for (size_t arm = 0; arm < kArmCount; ++arm) {
         double startup_ref_dir_sign = startup_ref_dir_sign_[arm];
         node->get_parameter(
@@ -244,6 +269,39 @@ void TrackerTeleopController::loadElbowCorrectionParameters()
 
         elbow_dir_correction_[arm] = tf2::Quaternion::getIdentity();
     }
+}
+
+bool TrackerTeleopController::loadActiveArmParameters()
+{
+    auto node = get_node();
+    const auto logger = node->get_logger();
+
+    std::string active_arms = "both";
+    node->get_parameter("active_arms", active_arms);
+    active_arms = normalizedActiveArms(active_arms);
+
+    if (active_arms == "both" || active_arms == "all" || active_arms == "dual") {
+        track_arm_ = {{true, true}};
+    } else if (active_arms == "left" || active_arms == "left_only") {
+        track_arm_ = {{true, false}};
+    } else if (active_arms == "right" || active_arms == "right_only") {
+        track_arm_ = {{false, true}};
+    } else if (active_arms == "none" || active_arms == "hold" || active_arms == "hold_all") {
+        track_arm_ = {{false, false}};
+    } else {
+        RCLCPP_ERROR(
+            logger,
+            "Invalid active_arms='%s'. Expected one of: both, left, right, none.",
+            active_arms.c_str());
+        return false;
+    }
+
+    RCLCPP_INFO(
+        logger,
+        "Tracker active arms: LEFT=%s RIGHT=%s",
+        track_arm_[kLeft] ? "ON" : "HOLD",
+        track_arm_[kRight] ? "ON" : "HOLD");
+    return true;
 }
 
 bool TrackerTeleopController::loadHomeJointParameters(
@@ -331,6 +389,11 @@ void TrackerTeleopController::logConfigurationSummary(double home_tolerance_deg)
     RCLCPP_INFO(
         logger, "Startup ref-dir sign: LEFT=%+.0f RIGHT=%+.0f",
         startup_ref_dir_sign_[kLeft], startup_ref_dir_sign_[kRight]);
+    RCLCPP_INFO(
+        logger,
+        "Tracker active arms: LEFT=%s RIGHT=%s",
+        track_arm_[kLeft] ? "ON" : "HOLD",
+        track_arm_[kRight] ? "ON" : "HOLD");
     RCLCPP_INFO(
         logger, "Teleop gate: startup=%s, control=service + keyboard helper",
         teleopStateToString(getTeleopState()));

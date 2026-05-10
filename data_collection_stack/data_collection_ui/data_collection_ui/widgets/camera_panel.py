@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import time
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtCore import QRectF, Qt
+from PyQt5.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -127,7 +127,37 @@ class CameraTileWidget(QFrame):
             Qt.KeepAspectRatio,
             Qt.FastTransformation,
         )
+        self._draw_crop_overlay(scaled)
         self._image_label.setPixmap(scaled)
+
+    def _draw_crop_overlay(self, pixmap: QPixmap) -> None:
+        overlay = self._stream_config.crop_overlay
+        if (
+            not overlay.enabled
+            or self._current_pixmap is None
+            or pixmap.isNull()
+            or self._current_pixmap.isNull()
+        ):
+            return
+
+        source_width = self._current_pixmap.width()
+        source_height = self._current_pixmap.height()
+        if source_width <= 0 or source_height <= 0:
+            return
+
+        scale_x = pixmap.width() / source_width
+        scale_y = pixmap.height() / source_height
+        rect_width = min(overlay.width, source_width) * scale_x
+        rect_height = min(overlay.height, source_height) * scale_y
+        left = (pixmap.width() - rect_width) / 2.0
+        top = (pixmap.height() - rect_height) / 2.0
+
+        painter = QPainter(pixmap)
+        pen = QPen(QColor("#ff2d2d"))
+        pen.setWidth(max(1, overlay.line_width))
+        painter.setPen(pen)
+        painter.drawRect(QRectF(left, top, rect_width, rect_height))
+        painter.end()
 
     def _set_waiting_text(self) -> None:
         self._stats_label.setText(
@@ -137,6 +167,7 @@ class CameraTileWidget(QFrame):
             "Preview RX FPS: 0.0\n"
             "UI Display FPS: 0.0\n"
             f"Preview Publish Cap: {self._preview_cap_text()}\n"
+            f"Crop Overlay: {self._crop_overlay_text()}\n"
             "Frame Age: n/a\n"
             "Resolution: waiting"
         )
@@ -158,6 +189,7 @@ class CameraTileWidget(QFrame):
             f"Preview RX FPS: {snapshot.rx_fps:.1f}\n"
             f"UI Display FPS: {self._display_fps:.1f}\n"
             f"Preview Publish Cap: {self._preview_cap_text()}\n"
+            f"Crop Overlay: {self._crop_overlay_text()}\n"
             f"Frame Age: {frame_age_text}\n"
             f"Resolution: {snapshot.image_msg.width}x{snapshot.image_msg.height}"
         )
@@ -179,6 +211,12 @@ class CameraTileWidget(QFrame):
         if preview_fps_limit is None:
             return "auto"
         return f"{preview_fps_limit:.1f} Hz"
+
+    def _crop_overlay_text(self) -> str:
+        overlay = self._stream_config.crop_overlay
+        if not overlay.enabled:
+            return "off"
+        return f"{overlay.width}x{overlay.height}"
 
 
 class CameraPanel(QWidget):

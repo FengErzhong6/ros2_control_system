@@ -12,6 +12,7 @@ void TrackerTeleopController::startGoHomeSequence()
         return;
     }
 
+    bool any_active_arm = false;
     for (size_t arm = 0; arm < kArmCount; ++arm) {
         if (!syncCommandStateToMeasuredPose(arm)) {
             RCLCPP_WARN(
@@ -20,6 +21,11 @@ void TrackerTeleopController::startGoHomeSequence()
                 "falling back to last commanded reference.",
                 kSideTags[arm]);
         }
+        if (!track_arm_[arm]) {
+            holdCurrentPosition(arm);
+            continue;
+        }
+        any_active_arm = true;
         auto &runtime = arm_state_[arm];
         for (size_t j = 0; j < kJointsPerArm; ++j) {
             runtime.target_joints_rad[j] = runtime.smoothed_joints_rad[j];
@@ -27,6 +33,13 @@ void TrackerTeleopController::startGoHomeSequence()
         runtime.has_valid_target = true;
         runtime.target_joints_rad[kJointsPerArm - 1] =
             runtime.home_joints_rad[kJointsPerArm - 1];
+    }
+
+    if (!any_active_arm) {
+        RCLCPP_WARN(
+            get_node()->get_logger(),
+            "Go-home ignored because active_arms disables both arms.");
+        return;
     }
 
     active_home_joint_index_.store(
@@ -71,6 +84,11 @@ void TrackerTeleopController::processGoHome(double dt)
 
     const size_t jt = static_cast<size_t>(joint_index);
     for (size_t arm = 0; arm < kArmCount; ++arm) {
+        if (!track_arm_[arm]) {
+            holdCurrentPosition(arm);
+            applySmoothedCommand(arm, dt);
+            continue;
+        }
         auto &runtime = arm_state_[arm];
         runtime.target_joints_rad[jt] = runtime.home_joints_rad[jt];
         runtime.has_valid_target = true;
@@ -79,6 +97,9 @@ void TrackerTeleopController::processGoHome(double dt)
 
     bool reached = true;
     for (size_t arm = 0; arm < kArmCount; ++arm) {
+        if (!track_arm_[arm]) {
+            continue;
+        }
         reached = reached && isHomeJointReached(arm, jt);
     }
     if (!reached) {
@@ -91,6 +112,9 @@ void TrackerTeleopController::processGoHome(double dt)
     if (next_joint_index >= 0) {
         const size_t next_jt = static_cast<size_t>(next_joint_index);
         for (size_t arm = 0; arm < kArmCount; ++arm) {
+            if (!track_arm_[arm]) {
+                continue;
+            }
             auto &runtime = arm_state_[arm];
             runtime.target_joints_rad[next_jt] = runtime.home_joints_rad[next_jt];
         }

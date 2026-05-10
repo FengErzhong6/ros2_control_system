@@ -1,4 +1,4 @@
-recipe_id: camera_preview_perf_collection
+recipe_id: marvin_collection
 devices:
   - id: cam_high
     adapter: camera
@@ -19,7 +19,18 @@ devices:
     depends_on: []
     ready_timeout_sec: 15.0
     use_managed_launch: true
+  - id: marvin_dual
+    adapter: marvin
+    required: true
+    depends_on:
+      - cam_high
+      - cam_left_wrist
+      - cam_right_wrist
+    use_managed_launch: false
+    ready_timeout_sec: 90.0
+    startup_no_ready_restart_timeout_sec: 0.0
 record_topics:
   - /cam_high/cam_high/color/image_raw
   - /cam_left_wrist/image_raw
   - /cam_right_wrist/image_raw
+  - /marvin/joint_states

@@ -37,6 +37,7 @@ tracker_teleop_controller:
       right_hand: "tracker_right_hand"
       left_upper_arm: "tracker_left_upper_arm"
       right_upper_arm: "tracker_right_upper_arm"
+    active_arms: "both"       # both/left/right/none; inactive arms hold current command
     tracker_timeout_sec: 0.1  # tracker 输入超时后进入 hold，停止追踪旧目标
 
     # ── 目标映射 / 末端跟踪 ───────────────────────────────────────────────

@@ -27,7 +27,7 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 import yaml
 
-from .view_model import CameraStreamConfig, UiRuntimeConfig
+from .view_model import CameraCropOverlayConfig, CameraStreamConfig, UiRuntimeConfig
 
 
 def _load_yaml_map(path: Path) -> dict:
@@ -484,6 +484,7 @@ class RosClient:
                     capture_topic=self._capture_topic(camera_cfg),
                     preview_fps_limit=self._preview_fps_limit(camera_cfg),
                     capture_fps_target=self._capture_fps_target(camera_cfg),
+                    crop_overlay=self._crop_overlay_config(camera_cfg),
                 )
             )
         return stream_configs
@@ -521,6 +522,55 @@ class RosClient:
         if preview_fps <= 0.0:
             return None
         return preview_fps
+
+    def _crop_overlay_config(self, camera_cfg: dict) -> CameraCropOverlayConfig:
+        raw_overlay = camera_cfg.get("crop_overlay")
+        if raw_overlay is None or raw_overlay is True:
+            return CameraCropOverlayConfig()
+        if raw_overlay is False:
+            return CameraCropOverlayConfig(enabled=False)
+        if not isinstance(raw_overlay, dict):
+            return CameraCropOverlayConfig()
+
+        width = 224
+        height = 224
+        raw_size = raw_overlay.get("size")
+        if isinstance(raw_size, (list, tuple)) and len(raw_size) == 2:
+            width = self._positive_int_or_default(raw_size[0], width)
+            height = self._positive_int_or_default(raw_size[1], height)
+        else:
+            width = self._positive_int_or_default(raw_overlay.get("width"), width)
+            height = self._positive_int_or_default(raw_overlay.get("height"), height)
+
+        return CameraCropOverlayConfig(
+            enabled=self._bool_or_default(raw_overlay.get("enabled"), True),
+            width=width,
+            height=height,
+            line_width=self._positive_int_or_default(raw_overlay.get("line_width"), 2),
+        )
+
+    def _bool_or_default(self, raw_value, default: bool) -> bool:
+        if raw_value is None:
+            return default
+        if isinstance(raw_value, bool):
+            return raw_value
+        if isinstance(raw_value, str):
+            normalized = raw_value.strip().lower()
+            if normalized in {"true", "1", "yes", "on"}:
+                return True
+            if normalized in {"false", "0", "no", "off"}:
+                return False
+            return default
+        return bool(raw_value)
+
+    def _positive_int_or_default(self, raw_value, default: int) -> int:
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            return default
+        if value <= 0:
+            return default
+        return value
 
     def _capture_topic(self, camera_cfg: dict) -> str | None:
         record_topics = camera_cfg.get("record_topics")

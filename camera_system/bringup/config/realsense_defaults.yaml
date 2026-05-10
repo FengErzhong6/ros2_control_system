@@ -1,8 +1,8 @@
 profiles:
   high_default:
     color_enabled: true
-    color_width: 640
-    color_height: 480
+    color_width: 960
+    color_height: 540
     color_fps: 60
     color_format: "RGB8"
 

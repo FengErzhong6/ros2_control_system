@@ -674,6 +674,10 @@ def generate_launch_description():
             description="Launch the HTC tracker publisher inside this bringup.",
         ),
         DeclareLaunchArgument(
+            "teleop_active_arms", default_value="both",
+            description="Tracker-controlled arms: both, left, right, or none. Unselected arms hold.",
+        ),
+        DeclareLaunchArgument(
             "start_cameras", default_value="true",
             description="Launch the three cameras when using real hardware.",
         ),
@@ -874,6 +878,27 @@ def launch_setup(context):
     start_tracker_publisher_value = (
         LaunchConfiguration("start_tracker_publisher").perform(context).lower() == "true"
     )
+    teleop_active_arms_value = (
+        LaunchConfiguration("teleop_active_arms").perform(context).strip().lower()
+        .replace("-", "_")
+    )
+    valid_teleop_active_arms = {
+        "both",
+        "all",
+        "dual",
+        "left",
+        "left_only",
+        "right",
+        "right_only",
+        "none",
+        "hold",
+        "hold_all",
+    }
+    if teleop_active_arms_value not in valid_teleop_active_arms:
+        raise RuntimeError(
+            "teleop_active_arms must be one of: both, left, right, none "
+            f"(got '{teleop_active_arms_value}')."
+        )
     start_cameras_value = LaunchConfiguration("start_cameras").perform(context).lower() == "true"
     show_camera_views_value = LaunchConfiguration("show_camera_views").perform(context).lower() == "true"
     enable_moveit_go_home_value = (
@@ -1034,6 +1059,7 @@ def launch_setup(context):
         f'tracker_teleop_controller:\n'
         f'  ros__parameters:\n'
         f'    kine_config_path: "{kine_config_path}"\n'
+        f'    active_arms: "{teleop_active_arms_value}"\n'
         f'    enable_ik_reference_logs: {"true" if enable_ik_reference_logs else "false"}\n'
         f'    set_armed_service_name: "/marvin_motion/internal/tracker_set_armed"\n'
         f'    set_enabled_service_name: "/marvin_motion/internal/tracker_set_enabled"\n'

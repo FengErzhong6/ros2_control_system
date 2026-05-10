@@ -4,6 +4,14 @@ from .hotkeys import DEFAULT_HOTKEYS, HotkeyBinding
 
 
 @dataclass(frozen=True)
+class CameraCropOverlayConfig:
+    enabled: bool = True
+    width: int = 224
+    height: int = 224
+    line_width: int = 2
+
+
+@dataclass(frozen=True)
 class CameraStreamConfig:
     camera_id: str
     title: str
@@ -11,6 +19,7 @@ class CameraStreamConfig:
     capture_topic: str | None = None
     preview_fps_limit: float | None = None
     capture_fps_target: float | None = None
+    crop_overlay: CameraCropOverlayConfig = field(default_factory=CameraCropOverlayConfig)
 
 
 @dataclass(frozen=True)

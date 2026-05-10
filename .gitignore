@@ -1,7 +1,9 @@
+.agents
 .vscode
 .claude
 .pytest_cache/
 .venv_ros2/
+.venv_policy/
 build
 install
 log

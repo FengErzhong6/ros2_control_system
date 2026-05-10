@@ -1,0 +1,69 @@
+recipe_id: marvin_manus_wujihand_right_collection
+devices:
+  - id: cam_high
+    adapter: camera
+    required: true
+    depends_on: []
+    ready_timeout_sec: 15.0
+    startup_no_image_restart_timeout_sec: 12.0
+    use_managed_launch: true
+  - id: cam_left_wrist
+    adapter: camera
+    required: true
+    depends_on: []
+    ready_timeout_sec: 15.0
+    use_managed_launch: true
+  - id: cam_right_wrist
+    adapter: camera
+    required: true
+    depends_on: []
+    ready_timeout_sec: 15.0
+    use_managed_launch: true
+  - id: htc_tracker
+    adapter: htc
+    required: true
+    depends_on: []
+    use_managed_launch: true
+  - id: manus_glove
+    adapter: manus
+    required: true
+    depends_on: []
+    use_managed_launch: true
+  - id: right_wujihand
+    adapter: wujihand
+    required: true
+    depends_on:
+      - manus_glove
+    use_managed_launch: true
+    ready_timeout_sec: 30.0
+    hand_side: right
+    namespace: right_hand
+    pipeline_namespace: right_hand
+    joint_state_topic: /right_hand/joint_states
+  - id: marvin_dual
+    adapter: marvin
+    required: true
+    depends_on:
+      - htc_tracker
+      - manus_glove
+      - right_wujihand
+    use_managed_launch: false
+    ready_timeout_sec: 90.0
+    startup_no_ready_restart_timeout_sec: 0.0
+    launch_arguments:
+      teleop_active_arms: right
+      use_gripper_L: false
+      use_gripper_R: false
+      start_manus_gripper_bridge: false
+      collision_description_package: marvin_system
+      collision_description_file: description/urdf/marvin_wuji_simplified_collision.urdf
+      collision_srdf_file: description/srdf/marvin_wuji_simplified_collision.srdf
+      wujihand_joint_state_topics: /right_hand/joint_states
+record_topics:
+  - /cam_high/cam_high/color/image_raw
+  - /cam_left_wrist/image_raw
+  - /cam_right_wrist/image_raw
+  - /marvin/joint_states
+  - /right_hand/joint_states
+  - /tracker_teleop_controller/joint_command
+  - /right_hand/forward_position_controller/commands

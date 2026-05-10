@@ -570,6 +570,7 @@ class MarvinAdapter(AdapterBase):
             "gui": False,
             "use_keyboard_gate": False,
             "start_tracker_publisher": False,
+            "teleop_active_arms": "both",
             "start_cameras": False,
             "show_camera_views": False,
             "use_mock_hardware": False,

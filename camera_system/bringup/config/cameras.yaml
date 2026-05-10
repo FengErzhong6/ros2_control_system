@@ -1,6 +1,7 @@
 # `preview_fps` only limits the UI preview bridge topic.
 # Driver capture fps comes from the selected profile in `orbbec_defaults.yaml`
 # or `realsense_defaults.yaml`.
+# `crop_overlay` is UI-only: it draws a centered crop guide and does not alter image topics.
 cameras:
   cam_left_wrist:
     driver: orbbec
@@ -9,7 +10,11 @@ cameras:
     namespace: "cam_left_wrist"
     profile: "wrist_default"
     preview_topic: /cam_left_wrist/preview/image_raw
-    preview_fps: 20.0
+    preview_fps: 60.0
+    crop_overlay:
+      enabled: true
+      size: [224, 224]
+      line_width: 2
     record_topics:
       - /cam_left_wrist/image_raw
 
@@ -20,7 +25,11 @@ cameras:
     namespace: "cam_right_wrist"
     profile: "wrist_default"
     preview_topic: /cam_right_wrist/preview/image_raw
-    preview_fps: 20.0
+    preview_fps: 60.0
+    crop_overlay:
+      enabled: true
+      size: [224, 224]
+      line_width: 2
     record_topics:
       - /cam_right_wrist/image_raw
 
@@ -31,7 +40,11 @@ cameras:
     namespace: "cam_high"
     profile: "high_default"
     preview_topic: /cam_high/preview/image_raw
-    preview_fps: 20.0
+    preview_fps: 60.0
+    crop_overlay:
+      enabled: true
+      size: [224, 224]
+      line_width: 2
     record_topics:
       - /cam_high/cam_high/color/image_raw
       - /cam_high/cam_high/color/camera_info

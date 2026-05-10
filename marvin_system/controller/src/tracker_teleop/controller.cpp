@@ -25,6 +25,7 @@ controller_interface::CallbackReturn TrackerTeleopController::on_init()
         auto_declare<std::string>("tracker_frames.right_hand", "tracker_right_hand");
         auto_declare<std::string>("tracker_frames.left_upper_arm", "tracker_left_upper_arm");
         auto_declare<std::string>("tracker_frames.right_upper_arm", "tracker_right_upper_arm");
+        auto_declare<std::string>("active_arms", "both");
 
         auto_declare<double>("position_scale", 1.0);
         auto_declare<bool>("enable_ik_reference_logs", false);
@@ -444,6 +445,11 @@ TrackerTeleopController::update(const rclcpp::Time &time, const rclcpp::Duration
     }
 
     for (size_t arm = 0; arm < kArmCount; ++arm) {
+        if (!track_arm_[arm]) {
+            holdCurrentPosition(arm);
+            applySmoothedCommand(arm, dt);
+            continue;
+        }
         processArmUpdate(arm, tf_snapshot_[arm], time, dt, force_reacquire);
     }
 

@@ -14,9 +14,15 @@ import sys
 from typing import Any
 
 import numpy as np
+from PIL import Image as PILImage
 from rclpy.serialization import deserialize_message
 from rosbag2_py import ConverterOptions, SequentialReader, StorageOptions
 from rosidl_runtime_py.utilities import get_message
+
+try:
+    PIL_RESAMPLE_LANCZOS = PILImage.Resampling.LANCZOS
+except AttributeError:  # pragma: no cover - older Pillow compatibility
+    PIL_RESAMPLE_LANCZOS = PILImage.LANCZOS
 
 
 IMAGE_TYPE = "sensor_msgs/msg/Image"
@@ -79,6 +85,8 @@ class SessionPlan:
     start_ns: int
     end_ns: int
     crop_size: tuple[int, int] | None
+    resize_size: tuple[int, int] | None
+    joint_name_filter: str | None
     feature_by_image_topic: dict[str, str]
     features: dict[str, dict[str, Any]]
     state_names: list[str]
@@ -99,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
         plans.append(build_session_plan(session_dir, args, expected_features=first_plan.features))
 
     if args.dry_run:
-        print_dry_run(plans)
+        print_dry_run(plans, args)
         return 0
 
     output = args.output.resolve()
@@ -126,6 +134,12 @@ def main(argv: list[str] | None = None) -> int:
             "enabled": bool(args.crop),
             "size": list(args.crop_size) if args.crop_size else None,
         },
+        "resize": {
+            "enabled": bool(args.resize_size),
+            "size": list(args.resize_size) if args.resize_size else None,
+            "square_crop_policy": "cam_high:right, wrist:center, other:center" if args.resize_size else None,
+        },
+        "joint_name_filter": args.joint_name_filter,
         "features": first_plan.features,
         "episodes": [],
     }
@@ -192,19 +206,49 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         metavar=("WIDTH", "HEIGHT"),
         help="Center crop size. Providing this implies --crop.",
     )
+    parser.add_argument(
+        "--resize-size",
+        nargs=2,
+        type=int,
+        metavar=("WIDTH", "HEIGHT"),
+        help="Resize every image after a topic-aware square crop. cam_high keeps the right square; wrist cameras keep the centered square.",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Remove an existing output directory before writing.")
     parser.add_argument("--dry-run", action="store_true", help="Scan sessions and print the inferred LeRobot features without writing.")
     parser.add_argument("--max-episodes", type=int, help="Convert at most this many sessions.")
     parser.add_argument("--limit-frames", type=int, help="Stop after writing this many frames across all episodes.")
+    parser.add_argument(
+        "--right-side-only",
+        action="store_true",
+        help="Keep only JointState entries whose names look like right-side joints: names ending in _R or starting with right_.",
+    )
+    parser.add_argument(
+        "--joint-name-filter",
+        help="Regex used to keep JointState entries by raw joint name. Applies to state and action JointState topics only.",
+    )
     parser.add_argument("--image-writer-threads", type=int, default=4, help="Passed to LeRobotDataset.create when supported.")
     parser.add_argument("--video-backend", help="Passed to LeRobotDataset.create when supported, for example pyav.")
     args = parser.parse_args(argv)
+
+    if args.right_side_only:
+        if args.joint_name_filter:
+            parser.error("--right-side-only cannot be combined with --joint-name-filter.")
+        args.joint_name_filter = r"(^right_|_R$)"
+    if args.joint_name_filter:
+        try:
+            re.compile(args.joint_name_filter)
+        except re.error as exc:
+            parser.error(f"--joint-name-filter is not a valid regex: {exc}")
 
     if args.crop_size is not None:
         args.crop = True
         width, height = args.crop_size
         if width <= 0 or height <= 0:
             parser.error("--crop-size WIDTH HEIGHT must be positive.")
+    if args.resize_size is not None:
+        width, height = args.resize_size
+        if width <= 0 or height <= 0:
+            parser.error("--resize-size WIDTH HEIGHT must be positive.")
     if args.fps is not None and args.fps <= 0:
         parser.error("--fps must be positive.")
     if args.max_episodes is not None and args.max_episodes <= 0:
@@ -292,6 +336,7 @@ def build_session_plan(
     ordered_topics = metadata_ordered_topics(metadata, topic_types)
     selection = infer_topic_selection(topic_types, ordered_topics, args)
     crop_size = tuple(args.crop_size) if args.crop else None
+    resize_size = tuple(args.resize_size) if args.resize_size else None
     probes = scan_topics(
         bag_dir=bag_dir,
         storage_id=storage_id,
@@ -299,6 +344,8 @@ def build_session_plan(
         topic_classes=topic_classes,
         selection=selection,
         crop_size=crop_size,
+        resize_size=resize_size,
+        joint_name_filter=args.joint_name_filter,
     )
     fps = args.fps or infer_fps(probes[selection.anchor_image_topic].anchor_timestamps_ns)
     start_ns, end_ns = common_time_window(probes, selection.all_topics)
@@ -328,6 +375,8 @@ def build_session_plan(
         start_ns=start_ns,
         end_ns=end_ns,
         crop_size=crop_size,
+        resize_size=resize_size,
+        joint_name_filter=args.joint_name_filter,
         feature_by_image_topic=feature_by_image_topic,
         features=features,
         state_names=state_names,
@@ -434,6 +483,8 @@ def scan_topics(
     topic_classes: dict[str, type],
     selection: TopicSelection,
     crop_size: tuple[int, int] | None,
+    resize_size: tuple[int, int] | None,
+    joint_name_filter: str | None,
 ) -> dict[str, TopicProbe]:
     selected_topics = set(selection.all_topics)
     probes = {
@@ -458,11 +509,15 @@ def scan_topics(
         msg = deserialize_message(raw_data, topic_classes[topic])
         if probe.msg_type == IMAGE_TYPE:
             image = decode_image_message(msg)
-            if crop_size is not None:
-                image = center_crop(image, crop_size)
+            image = preprocess_image_for_topic(
+                image,
+                topic,
+                crop_size=crop_size,
+                resize_size=resize_size,
+            )
             probe.image_shape = tuple(int(value) for value in image.shape)
         else:
-            vector, names = vector_from_message(msg, topic)
+            vector, names = vector_from_message(msg, topic, joint_name_filter=joint_name_filter)
             probe.vector_dim = int(vector.shape[0])
             probe.vector_names = names
 
@@ -610,8 +665,12 @@ def decode_selected_message(plan: SessionPlan, topic: str, msg: Any) -> np.ndarr
     msg_type = plan.topic_types[topic]
     if msg_type == IMAGE_TYPE:
         image = decode_image_message(msg)
-        if plan.crop_size is not None:
-            image = center_crop(image, plan.crop_size)
+        image = preprocess_image_for_topic(
+            image,
+            topic,
+            crop_size=plan.crop_size,
+            resize_size=plan.resize_size,
+        )
         expected_shape = plan.probes[topic].image_shape
         if expected_shape is None:
             raise RuntimeError(f"Missing expected image shape for {topic}")
@@ -619,7 +678,7 @@ def decode_selected_message(plan: SessionPlan, topic: str, msg: Any) -> np.ndarr
             raise RuntimeError(f"Image shape changed for {topic}: {image.shape} != {expected_shape}")
         return image
 
-    vector, _ = vector_from_message(msg, topic)
+    vector, _ = vector_from_message(msg, topic, joint_name_filter=plan.joint_name_filter)
     expected_dim = plan.probes[topic].vector_dim
     if expected_dim is not None and vector.shape[0] != expected_dim:
         raise RuntimeError(f"Vector dimension changed for {topic}: {vector.shape[0]} != {expected_dim}")
@@ -698,9 +757,62 @@ def center_crop(image: np.ndarray, crop_size: tuple[int, int]) -> np.ndarray:
     return image[top : top + crop_height, left : left + crop_width].copy()
 
 
-def vector_from_message(msg: Any, topic: str) -> tuple[np.ndarray, list[str]]:
+def preprocess_image_for_topic(
+    image: np.ndarray,
+    topic: str,
+    *,
+    crop_size: tuple[int, int] | None,
+    resize_size: tuple[int, int] | None,
+) -> np.ndarray:
+    if crop_size is not None:
+        image = center_crop(image, crop_size)
+    elif resize_size is not None:
+        image = crop_square_for_topic(image, topic)
+    if resize_size is not None:
+        image = resize_image(image, resize_size)
+    return image
+
+
+def crop_square_for_topic(image: np.ndarray, topic: str) -> np.ndarray:
+    topic_lower = normalize_topic(topic).lower()
+    if "cam_high" in topic_lower:
+        return crop_square(image, anchor="right")
+    return crop_square(image, anchor="center")
+
+
+def crop_square(image: np.ndarray, *, anchor: str) -> np.ndarray:
+    height, width = image.shape[:2]
+    side = min(height, width)
+    if side <= 0:
+        raise RuntimeError(f"Image has invalid shape: {image.shape}")
+    if anchor == "right":
+        left = width - side
+        top = 0
+    else:
+        left = (width - side) // 2
+        top = (height - side) // 2
+    return image[top : top + side, left : left + side].copy()
+
+
+def resize_image(image: np.ndarray, resize_size: tuple[int, int]) -> np.ndarray:
+    target_width, target_height = resize_size
+    if image.shape[1] == target_width and image.shape[0] == target_height:
+        return image.copy()
+    resized = PILImage.fromarray(image, mode="RGB").resize(
+        (target_width, target_height),
+        resample=PIL_RESAMPLE_LANCZOS,
+    )
+    return np.asarray(resized, dtype=np.uint8).copy()
+
+
+def vector_from_message(
+    msg: Any,
+    topic: str,
+    *,
+    joint_name_filter: str | None = None,
+) -> tuple[np.ndarray, list[str]]:
     if hasattr(msg, "position") and hasattr(msg, "name"):
-        return vector_from_joint_state(msg, topic)
+        return vector_from_joint_state(msg, topic, joint_name_filter=joint_name_filter)
 
     if hasattr(msg, "data"):
         values = list(msg.data)
@@ -711,7 +823,12 @@ def vector_from_message(msg: Any, topic: str) -> tuple[np.ndarray, list[str]]:
     raise RuntimeError(f"Unsupported vector message on {topic}: {type(msg)!r}")
 
 
-def vector_from_joint_state(msg: Any, topic: str) -> tuple[np.ndarray, list[str]]:
+def vector_from_joint_state(
+    msg: Any,
+    topic: str,
+    *,
+    joint_name_filter: str | None = None,
+) -> tuple[np.ndarray, list[str]]:
     values = list(msg.position)
     if not values:
         values = list(msg.velocity)
@@ -725,6 +842,19 @@ def vector_from_joint_state(msg: Any, topic: str) -> tuple[np.ndarray, list[str]
 
     if len(raw_names) != len(values):
         raw_names = [f"value_{index}" for index in range(len(values))]
+    if joint_name_filter is not None:
+        kept = [
+            (name, value)
+            for name, value in zip(raw_names, values, strict=True)
+            if re.search(joint_name_filter, name)
+        ]
+        if not kept:
+            raise RuntimeError(
+                f"JointState filter {joint_name_filter!r} removed every entry from {topic}. "
+                f"Available names: {raw_names}"
+            )
+        raw_names = [name for name, _ in kept]
+        values = [value for _, value in kept]
     names = [f"{topic_key}.{sanitize_component(name)}" for name in raw_names]
     return np.asarray(values, dtype=np.float32), names
 
@@ -838,11 +968,14 @@ def finalize_dataset(dataset: Any) -> None:
         dataset.consolidate(run_compute_stats=True)
 
 
-def print_dry_run(plans: list[SessionPlan]) -> None:
+def print_dry_run(plans: list[SessionPlan], args: argparse.Namespace) -> None:
     first_plan = plans[0]
     print("LeRobot conversion dry run")
     print(f"episodes: {len(plans)}")
     print(f"fps: {first_plan.fps}")
+    print(f"crop_size: {first_plan.crop_size}")
+    print(f"resize_size: {first_plan.resize_size}")
+    print(f"joint_name_filter: {args.joint_name_filter}")
     print("features:")
     print(json.dumps(first_plan.features, indent=2, ensure_ascii=False))
     for index, plan in enumerate(plans):

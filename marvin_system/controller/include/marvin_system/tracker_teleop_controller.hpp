@@ -195,6 +195,8 @@ private:
         {tf2::Quaternion::getIdentity(), tf2::Quaternion::getIdentity()}};
     /** startup seed 的 ref_dir 符号规范化，左右手分别配置. */
     std::array<double, kArmCount> startup_ref_dir_sign_{{1.0, -1.0}};
+    /** Tracker-controlled arms. Disabled arms keep holding their current command. */
+    std::array<bool, kArmCount> track_arm_{{true, true}};
 
     // Joint command conditioning parameters
     double smoothing_alpha_{0.3};
@@ -334,6 +336,7 @@ private:
     bool loadControllerParameters();
     void loadTransformParameters();
     void loadElbowCorrectionParameters();
+    bool loadActiveArmParameters();
     bool loadHomeJointParameters(const std::vector<double> &home_left,
                                  const std::vector<double> &home_right,
                                  double home_tolerance_deg);
