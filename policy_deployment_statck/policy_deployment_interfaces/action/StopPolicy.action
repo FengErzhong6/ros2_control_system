@@ -1,0 +1,7 @@
+string reason
+---
+bool success
+string message
+---
+string current_state
+string detail

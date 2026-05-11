@@ -1,0 +1,130 @@
+profiles:
+  pi05_tianji_wuji_pick_place:
+    title: Tianji + Wuji pick and place
+    server_host: 127.0.0.1
+    server_port: 8000
+    default_prompt: pick and place.
+    action_dim: 27
+    action_horizon: 8
+    open_loop_horizon: 8
+    control_rate_hz: 10.0
+    action_space: joint_position
+    image_inputs:
+      - name: cam_high
+        topic: /cam_high/cam_high/color/image_raw
+        required: true
+        square_crop_anchor: right
+        resize_size: [224, 224]
+      - name: cam_left_wrist
+        topic: /cam_left_wrist/image_raw
+        required: true
+        square_crop_anchor: center
+        resize_size: [224, 224]
+    state:
+      right_arm:
+        topic: /marvin/joint_states
+        joint_names:
+          - Joint1_R
+          - Joint2_R
+          - Joint3_R
+          - Joint4_R
+          - Joint5_R
+          - Joint6_R
+          - Joint7_R
+      right_hand:
+        topic: /right/joint_states
+        joint_names:
+          - right_finger1_joint1
+          - right_finger1_joint2
+          - right_finger1_joint3
+          - right_finger1_joint4
+          - right_finger2_joint1
+          - right_finger2_joint2
+          - right_finger2_joint3
+          - right_finger2_joint4
+          - right_finger3_joint1
+          - right_finger3_joint2
+          - right_finger3_joint3
+          - right_finger3_joint4
+          - right_finger4_joint1
+          - right_finger4_joint2
+          - right_finger4_joint3
+          - right_finger4_joint4
+          - right_finger5_joint1
+          - right_finger5_joint2
+          - right_finger5_joint3
+          - right_finger5_joint4
+    commands:
+      marvin:
+        topic: /forward_position_controller/commands
+        joint_names:
+          - Joint1_L
+          - Joint2_L
+          - Joint3_L
+          - Joint4_L
+          - Joint5_L
+          - Joint6_L
+          - Joint7_L
+          - Joint1_R
+          - Joint2_R
+          - Joint3_R
+          - Joint4_R
+          - Joint5_R
+          - Joint6_R
+          - Joint7_R
+      right_hand:
+        topic: /right/forward_position_controller/commands
+        joint_names:
+          - right_finger1_joint1
+          - right_finger1_joint2
+          - right_finger1_joint3
+          - right_finger1_joint4
+          - right_finger2_joint1
+          - right_finger2_joint2
+          - right_finger2_joint3
+          - right_finger2_joint4
+          - right_finger3_joint1
+          - right_finger3_joint2
+          - right_finger3_joint3
+          - right_finger3_joint4
+          - right_finger4_joint1
+          - right_finger4_joint2
+          - right_finger4_joint3
+          - right_finger4_joint4
+          - right_finger5_joint1
+          - right_finger5_joint2
+          - right_finger5_joint3
+          - right_finger5_joint4
+        home:
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+    action_mapping:
+      right_arm:
+        start: 0
+        length: 7
+        mode: absolute
+      right_hand:
+        start: 7
+        length: 20
+        mode: absolute
+    frozen_groups:
+      - left_arm
+    summary: 27D policy with right arm and right hand control. Left arm remains fixed.

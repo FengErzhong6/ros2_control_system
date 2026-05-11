@@ -42,6 +42,10 @@
   <xacro:arg name="collision_guard_escape_min_distance_improvement_m" default="0.001" />
   <xacro:arg name="collision_guard_interpolation_steps" default="6" />
   <xacro:arg name="collision_guard_binary_search_steps" default="5" />
+  <xacro:arg name="collision_guard_description_package" default="marvin_system" />
+  <xacro:arg name="collision_guard_description_file" default="description/urdf/marvin_dual.urdf" />
+  <xacro:arg name="collision_guard_semantic_package" default="marvin_system" />
+  <xacro:arg name="collision_guard_semantic_file" default="description/srdf/marvin_dual.srdf" />
 
   <link name="world" />
 
@@ -180,6 +184,10 @@
     collision_guard_escape_min_distance_improvement_m="$(arg collision_guard_escape_min_distance_improvement_m)"
     collision_guard_interpolation_steps="$(arg collision_guard_interpolation_steps)"
     collision_guard_binary_search_steps="$(arg collision_guard_binary_search_steps)"
+    collision_guard_description_package="$(arg collision_guard_description_package)"
+    collision_guard_description_file="$(arg collision_guard_description_file)"
+    collision_guard_semantic_package="$(arg collision_guard_semantic_package)"
+    collision_guard_semantic_file="$(arg collision_guard_semantic_file)"
     use_gripper_L="$(arg use_gripper_L)"
     use_gripper_R="$(arg use_gripper_R)"
     mock_grippers="$(arg mock_grippers)" />

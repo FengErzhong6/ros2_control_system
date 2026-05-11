@@ -1,0 +1,13 @@
+builtin_interfaces/Time stamp
+string system_state
+string recipe_id
+string active_profile_id
+string active_prompt
+string rollout_state
+DeviceState[] devices
+FaultEvent[] active_faults
+string[] allowed_commands
+string summary
+uint32 chunk_index
+uint32 step_index
+float32 last_infer_ms

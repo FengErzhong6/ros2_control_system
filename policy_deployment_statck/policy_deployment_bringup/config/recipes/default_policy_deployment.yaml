@@ -1,0 +1,119 @@
+recipe_id: default_policy_deployment
+summary: Start the two policy cameras, Wuji right hand, and Marvin forward-command chain for policy deployment.
+ready_timeout_sec: 45.0
+devices:
+  - id: cam_high
+    adapter: camera
+    package: camera_system
+    launch_file: bringup/launch/single_realsense.launch.py
+    required: true
+    depends_on: []
+    startup_timeout_sec: 20.0
+    ready_stability_window_sec: 2.0
+    ready_relaunch_attempts: 1
+    ready_relaunch_backoff_sec: 2.0
+    ready_topics:
+      - /cam_high/cam_high/color/image_raw
+    launch_arguments:
+      camera_name: cam_high
+      use_showimage: false
+      respawn: true
+  - id: cam_left_wrist
+    adapter: camera
+    package: camera_system
+    launch_file: bringup/launch/single_orbbec.launch.py
+    required: true
+    depends_on: []
+    startup_timeout_sec: 20.0
+    ready_stability_window_sec: 2.0
+    ready_relaunch_attempts: 1
+    ready_relaunch_backoff_sec: 2.0
+    ready_topics:
+      - /cam_left_wrist/image_raw
+    launch_arguments:
+      camera_name: cam_left_wrist
+      use_showimage: false
+      respawn: true
+  - id: right_wujihand
+    adapter: wujihand
+    package: policy_deployment_bringup
+    launch_file: launch/policy_wujihand_right.launch.py
+    required: true
+    depends_on:
+      - cam_high
+      - cam_left_wrist
+    startup_timeout_sec: 30.0
+    ready_stability_window_sec: 2.0
+    ready_relaunch_attempts: 1
+    ready_relaunch_backoff_sec: 2.0
+    ready_services:
+      - /right/controller_manager/list_controllers
+      - /right/controller_manager/switch_controller
+    ready_topics:
+      - /right/joint_states
+    ready_controllers:
+      joint_state_broadcaster: active
+      forward_position_controller: active
+    launch_arguments:
+      use_mock_hardware: false
+      namespace: right
+      gui: false
+      use_jsp_gui: false
+      activate_forward_controller: true
+      identity_file: config/wujihand_identities.yaml
+      controllers_file: config/wujihand_right_controllers.yaml
+  - id: marvin_dual
+    adapter: marvin
+    package: marvin_system
+    launch_file: bringup/launch/marvin_dual_joint_gui_control.launch.py
+    required: true
+    depends_on:
+      - cam_high
+      - cam_left_wrist
+      - right_wujihand
+    startup_timeout_sec: 90.0
+    ready_stability_window_sec: 2.0
+    ready_relaunch_attempts: 1
+    ready_relaunch_backoff_sec: 4.0
+    ready_services:
+      - /controller_manager/list_controllers
+      - /marvin_motion/get_status
+      - /marvin_motion/go_home
+    ready_topics:
+      - /marvin/joint_states
+    ready_controllers:
+      joint_state_broadcaster: active
+      forward_position_controller: active
+      dual_arm_trajectory_controller: inactive
+    ready_motion_status: true
+    ready_motion_status_timeout_sec: 12.0
+    launch_arguments:
+      gui: false
+      use_jsp_gui: false
+      shutdown_on_gui_exit: false
+      use_gripper_L: false
+      use_gripper_R: false
+      mock_grippers: false
+      use_mock_hardware: false
+      description_package: marvin_system
+      description_file: description/urdf/marvin_dual.urdf
+      left_xyz: "0 0.037 0.3618964"
+      left_rpy: "-1.5707963 0 0"
+      right_xyz: "0 -0.037 0.3618964"
+      right_rpy: "1.5707963 0 0"
+      collision_guard_enabled: false
+      collision_guard_check_rate_hz: 30.0
+      collision_guard_min_command_delta_deg: 0.0
+      collision_guard_near_distance_m: 0.04
+      collision_guard_hard_collision_distance_m: 0.01
+      collision_guard_escape_min_distance_improvement_m: 0.0002
+      collision_guard_interpolation_steps: 6
+      collision_guard_binary_search_steps: 5
+      collision_description_package: marvin_system
+      collision_description_file: description/urdf/marvin_wuji_simplified_collision.urdf
+      collision_srdf_file: description/srdf/marvin_wuji_simplified_collision.srdf
+      wujihand_joint_state_topics: /right/joint_states
+      motion_start_delay_sec: 4.0
+      initial_motion_mode: SAFE_HOLD
+      go_home_return_mode: SAFE_HOLD
+      controller_state_settle_timeout_sec: 10.0

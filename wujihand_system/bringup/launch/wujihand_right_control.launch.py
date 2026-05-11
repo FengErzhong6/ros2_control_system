@@ -1,11 +1,13 @@
 import os
+import tempfile
 
 import yaml
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, TimerAction
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction, RegisterEventHandler
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
 from launch.substitutions import Command, FindExecutable, LaunchConfiguration, PathJoinSubstitution
 
 from launch_ros.actions import Node
@@ -22,6 +24,48 @@ def resolve_config_path(config_path):
     if os.path.isabs(config_path):
         return config_path
     return os.path.join(get_package_share_directory("wujihand_system"), config_path)
+
+
+def resolve_share_path(package_name, relative_path):
+    if os.path.isabs(relative_path):
+        return relative_path
+    return os.path.join(get_package_share_directory(package_name), relative_path)
+
+
+def write_namespaced_controller_params(source_path, namespace):
+    data = load_yaml_file(source_path)
+    namespaced = {str(namespace).strip("/"): data}
+    handle = tempfile.NamedTemporaryFile(
+        mode="w",
+        prefix=f"wujihand_{str(namespace).strip('/')}_controllers_",
+        suffix=".yaml",
+        delete=False,
+        encoding="utf-8",
+    )
+    try:
+        yaml.safe_dump(namespaced, handle, sort_keys=False)
+    finally:
+        handle.close()
+    return handle.name
+
+
+def absolute_namespace(namespace):
+    namespace = str(namespace).strip().strip("/")
+    if not namespace:
+        raise RuntimeError("Namespace must not be empty.")
+    return f"/{namespace}"
+
+
+def robot_description_remappings(namespace):
+    topic = f"{absolute_namespace(namespace)}/robot_description"
+    return [
+        ("robot_description", topic),
+        ("/robot_description", topic),
+    ]
+
+
+def launch_bool(value):
+    return "true" if str(value).strip().lower() in {"1", "true", "yes", "on"} else "false"
 
 
 def load_hand_identity(config_path, side):
@@ -100,9 +144,23 @@ def generate_launch_description():
     )
     declared_arguments.append(
         DeclareLaunchArgument(
+            "namespace",
+            default_value="right",
+            description="ROS namespace for the right hand stack.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
             "use_jsp_gui",
             default_value="true",
             description="Start joint_state_publisher_gui for slider command input.",
+        )
+    )
+    declared_arguments.append(
+        DeclareLaunchArgument(
+            "activate_forward_controller",
+            default_value="true",
+            description="Activate forward_position_controller automatically.",
         )
     )
 
@@ -115,7 +173,22 @@ def launch_setup(context):
     description_file = LaunchConfiguration("description_file")
     use_mock_hardware = LaunchConfiguration("use_mock_hardware")
     controllers_file = LaunchConfiguration("controllers_file")
+    namespace = LaunchConfiguration("namespace")
     use_jsp_gui = LaunchConfiguration("use_jsp_gui")
+    activate_forward_controller_arg = LaunchConfiguration("activate_forward_controller")
+
+    description_package_arg = description_package.perform(context).strip() or "wujihand_system"
+    description_file_arg = description_file.perform(context).strip() or "urdf/wujihand-right.urdf.xacro"
+    controllers_file_arg = (
+        controllers_file.perform(context).strip() or "config/wujihand_right_controllers.yaml"
+    )
+    namespace_arg = namespace.perform(context).strip() or "right"
+    gui_enabled = launch_bool(gui.perform(context))
+    use_jsp_gui_enabled = launch_bool(use_jsp_gui.perform(context))
+    activate_forward_controller_enabled = launch_bool(
+        activate_forward_controller_arg.perform(context)
+    )
+    use_mock_hardware_arg = launch_bool(use_mock_hardware.perform(context))
 
     identity_file_arg = LaunchConfiguration("identity_file").perform(context).strip()
     usb_serial_number = LaunchConfiguration("usb_serial_number").perform(context).strip()
@@ -132,9 +205,9 @@ def launch_setup(context):
         [
             PathJoinSubstitution([FindExecutable(name="xacro")]),
             " ",
-            PathJoinSubstitution([FindPackageShare(description_package), description_file]),
+            resolve_share_path(description_package_arg, description_file_arg),
             ' use_mock_hardware:="',
-            use_mock_hardware,
+            use_mock_hardware_arg,
             '"',
             f' usb_serial_number:="{usb_serial_number}"',
             f' expected_handedness:="{expected_handedness}"',
@@ -144,22 +217,29 @@ def launch_setup(context):
         "robot_description": ParameterValue(robot_description_content, value_type=str)
     }
 
-    controllers_yaml = PathJoinSubstitution(
-        [FindPackageShare("wujihand_system"), controllers_file]
+    controllers_yaml = resolve_share_path("wujihand_system", controllers_file_arg)
+    namespaced_controllers_yaml = write_namespaced_controller_params(
+        controllers_yaml,
+        namespace_arg,
     )
+    remappings = robot_description_remappings(namespace_arg)
 
     ros2_control_node = Node(
         package="controller_manager",
         executable="ros2_control_node",
+        namespace=namespace_arg,
         output="both",
-        parameters=[robot_description, controllers_yaml],
+        parameters=[robot_description, namespaced_controllers_yaml],
+        remappings=remappings,
     )
 
     robot_state_publisher_node = Node(
         package="robot_state_publisher",
         executable="robot_state_publisher",
+        namespace=namespace_arg,
         output="both",
         parameters=[robot_description],
+        remappings=remappings,
     )
 
     rviz_config_file = PathJoinSubstitution(
@@ -171,7 +251,7 @@ def launch_setup(context):
         name="rviz2",
         output="log",
         arguments=["-d", rviz_config_file],
-        condition=IfCondition(gui),
+        condition=IfCondition(gui_enabled),
     )
 
     joint_state_publisher_gui_node = ExecuteProcess(
@@ -185,7 +265,7 @@ def launch_setup(context):
             "publish_topic:=gui_joint_states",
         ],
         output="screen",
-        condition=IfCondition(use_jsp_gui),
+        condition=IfCondition(use_jsp_gui_enabled),
     )
 
     gui_to_forward_bridge = ExecuteProcess(
@@ -198,16 +278,17 @@ def launch_setup(context):
             "-p",
             "input_topic:=gui_joint_states",
             "-p",
-            "output_topic:=/forward_position_controller/commands",
+            f"output_topic:=/{namespace_arg}/forward_position_controller/commands",
         ],
         output="screen",
-        condition=IfCondition(use_jsp_gui),
+        condition=IfCondition(use_jsp_gui_enabled),
     )
 
     joint_state_broadcaster_spawner = Node(
         package="controller_manager",
         executable="spawner",
         arguments=["joint_state_broadcaster"],
+        namespace=namespace_arg,
         output="screen",
     )
 
@@ -218,28 +299,31 @@ def launch_setup(context):
             "forward_position_controller",
             "--inactive",
             "--param-file",
-            controllers_yaml,
+            namespaced_controllers_yaml,
         ],
+        namespace=namespace_arg,
         output="screen",
     )
 
-    activate_forward_controller = TimerAction(
-        period=1.0,
-        actions=[
-            ExecuteProcess(
-                cmd=[
-                    "ros2",
-                    "control",
-                    "switch_controllers",
-                    "--controller-manager",
-                    "/controller_manager",
-                    "--activate",
-                    "forward_position_controller",
-                ],
-                output="screen",
-                condition=IfCondition(use_jsp_gui),
-            )
-        ],
+    activate_forward_controller = RegisterEventHandler(
+        OnProcessExit(
+            target_action=forward_position_controller_spawner,
+            on_exit=[
+                ExecuteProcess(
+                    cmd=[
+                        "ros2",
+                        "control",
+                        "switch_controllers",
+                        "--controller-manager",
+                        f"/{namespace_arg}/controller_manager",
+                        "--activate",
+                        "forward_position_controller",
+                    ],
+                    output="screen",
+                    condition=IfCondition(activate_forward_controller_enabled),
+                )
+            ],
+        )
     )
 
     return [

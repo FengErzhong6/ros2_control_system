@@ -5,7 +5,7 @@ import yaml
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, EmitEvent, OpaqueFunction, RegisterEventHandler
+from launch.actions import DeclareLaunchArgument, EmitEvent, OpaqueFunction, RegisterEventHandler, TimerAction
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.events import matches_action
@@ -40,6 +40,17 @@ def load_forward_controller_joint_names(path: str | Path) -> list[str]:
     return names
 
 
+def launch_bool(value):
+    return "true" if str(value).strip().lower() in {"1", "true", "yes", "on"} else "false"
+
+
+def launch_float(value, default: float) -> float:
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -59,6 +70,26 @@ def generate_launch_description():
             description="Composite URDF/XACRO file to load.",
         ),
         DeclareLaunchArgument(
+            "collision_description_package",
+            default_value="marvin_system",
+            description="Package with the MoveIt/collision URDF/XACRO file.",
+        ),
+        DeclareLaunchArgument(
+            "collision_description_file",
+            default_value="description/urdf/marvin_dual.urdf",
+            description="MoveIt/collision URDF/XACRO file to load.",
+        ),
+        DeclareLaunchArgument(
+            "collision_srdf_file",
+            default_value="description/srdf/marvin_dual.srdf",
+            description="MoveIt semantic SRDF file for the collision model.",
+        ),
+        DeclareLaunchArgument(
+            "wujihand_joint_state_topics",
+            default_value="",
+            description="Space-separated Wuji hand joint state topics for dynamic collision sync.",
+        ),
+        DeclareLaunchArgument(
             "controllers_file", default_value="",
             description="Controller YAML (auto-selected when empty).",
         ),
@@ -69,6 +100,26 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "shutdown_on_gui_exit", default_value="false",
             description="Stop ros2_control, motion, and visualization processes when the joint GUI exits.",
+        ),
+        DeclareLaunchArgument(
+            "motion_start_delay_sec",
+            default_value="4.0",
+            description="Delay before starting MoveIt and marvin_motion after controller bringup is ready.",
+        ),
+        DeclareLaunchArgument(
+            "initial_motion_mode",
+            default_value="SAFE_HOLD",
+            description="Initial cached mode reported by marvin_motion_server.",
+        ),
+        DeclareLaunchArgument(
+            "go_home_return_mode",
+            default_value="SAFE_HOLD",
+            description="Motion mode restored after /marvin_motion/go_home completes.",
+        ),
+        DeclareLaunchArgument(
+            "controller_state_settle_timeout_sec",
+            default_value="10.0",
+            description="Time marvin_motion waits for controller state transitions to settle.",
         ),
         DeclareLaunchArgument(
             "use_gripper_L", default_value="true",
@@ -146,9 +197,36 @@ def launch_setup(context):
         "" if use_mock_hardware_value else "/marvin_dual/set_collision_guard_enabled"
     )
     use_jsp_gui = LaunchConfiguration("use_jsp_gui")
+    gui_enabled = launch_bool(gui.perform(context))
+    use_jsp_gui_enabled = launch_bool(use_jsp_gui.perform(context))
+    shutdown_on_gui_exit_enabled = launch_bool(
+        LaunchConfiguration("shutdown_on_gui_exit").perform(context)
+    )
+    motion_start_delay_sec = max(
+        0.0,
+        launch_float(LaunchConfiguration("motion_start_delay_sec").perform(context), 4.0),
+    )
+    initial_motion_mode = (
+        LaunchConfiguration("initial_motion_mode").perform(context).strip() or "SAFE_HOLD"
+    )
+    go_home_return_mode = (
+        LaunchConfiguration("go_home_return_mode").perform(context).strip() or "SAFE_HOLD"
+    )
+    controller_state_settle_timeout_sec = launch_float(
+        LaunchConfiguration("controller_state_settle_timeout_sec").perform(context),
+        10.0,
+    )
 
     pkg = LaunchConfiguration("description_package").perform(context)
     desc_file = LaunchConfiguration("description_file").perform(context)
+    collision_pkg = LaunchConfiguration("collision_description_package").perform(context)
+    collision_desc_file = LaunchConfiguration("collision_description_file").perform(context)
+    collision_srdf_file = LaunchConfiguration("collision_srdf_file").perform(context)
+    wujihand_joint_state_topics = [
+        item
+        for item in LaunchConfiguration("wujihand_joint_state_topics").perform(context).split()
+        if item.strip()
+    ]
     ctrl_file_arg = LaunchConfiguration("controllers_file").perform(context)
     grip_L = LaunchConfiguration("use_gripper_L").perform(context).lower() == "true"
     grip_R = LaunchConfiguration("use_gripper_R").perform(context).lower() == "true"
@@ -191,6 +269,19 @@ def launch_setup(context):
 
     robot_description = {
         "robot_description": ParameterValue(Command(xacro_cmd), value_type=str)
+    }
+
+    collision_xacro_cmd = [
+        PathJoinSubstitution([FindExecutable(name="xacro")]),
+        " ",
+        PathJoinSubstitution([FindPackageShare(collision_pkg), collision_desc_file]),
+        ' left_xyz:="', left_xyz, '"',
+        ' left_rpy:="', left_rpy, '"',
+        ' right_xyz:="', right_xyz, '"',
+        ' right_rpy:="', right_rpy, '"',
+    ]
+    collision_robot_description = {
+        "robot_description": ParameterValue(Command(collision_xacro_cmd), value_type=str)
     }
 
     # ── Controller config (auto-select if not overridden) ─────────────────
@@ -240,7 +331,7 @@ def launch_setup(context):
     cell_scene_file = PathJoinSubstitution(
         [FindPackageShare("marvin_system"), "motion", "config", "cell_scene.yaml"]
     )
-    srdf_path = Path(pkg_share) / "description" / "srdf" / "marvin_dual.srdf"
+    srdf_path = Path(get_package_share_directory(collision_pkg)) / collision_srdf_file
     kinematics_path = Path(pkg_share) / "motion" / "config" / "kinematics.yaml"
     joint_limits_path = Path(pkg_share) / "motion" / "config" / "joint_limits.yaml"
     planning_pipelines_path = Path(pkg_share) / "motion" / "config" / "planning_pipelines.yaml"
@@ -248,7 +339,7 @@ def launch_setup(context):
     moveit_controllers_path = Path(pkg_share) / "motion" / "config" / "moveit_controllers.yaml"
 
     move_group_params = [
-        robot_description,
+        collision_robot_description,
         {"robot_description_semantic": load_text_file(srdf_path)},
         {"robot_description_kinematics": load_yaml_file(kinematics_path)},
         {"robot_description_planning": load_yaml_file(joint_limits_path)},
@@ -284,7 +375,7 @@ def launch_setup(context):
         output="screen",
         remappings=joint_state_remappings,
         parameters=[
-            robot_description,
+            collision_robot_description,
             home_poses_file,
             cell_scene_file,
             {"robot_description_semantic": load_text_file(srdf_path)},
@@ -303,8 +394,8 @@ def launch_setup(context):
                 "teleop_state_topic": "",
                 "planning_group": "dual_arm",
                 "home_pose_id": "home",
-                "initial_mode": "TELEOP",
-                "go_home_return_mode": "TELEOP",
+                "initial_mode": initial_motion_mode,
+                "go_home_return_mode": go_home_return_mode,
                 "planning_time_sec": 5.0,
                 "move_group_wait_sec": 10.0,
                 "num_planning_attempts": 3,
@@ -317,12 +408,14 @@ def launch_setup(context):
                 "use_mock_hardware": use_mock_hardware_value,
                 "teleop_service_timeout_sec": 5.0,
                 "legacy_go_home_timeout_sec": 10.0,
-                "controller_switch_timeout_sec": 5.0,
+                "controller_switch_timeout_sec": 10.0,
+                "controller_state_settle_timeout_sec": controller_state_settle_timeout_sec,
                 "controller_manager_switch_service": "/controller_manager/switch_controller",
                 "controller_manager_list_service": "/controller_manager/list_controllers",
                 "trajectory_controller_name": "dual_arm_trajectory_controller",
                 "primary_controller_name": "forward_position_controller",
                 "collision_guard_service_name": collision_guard_service_name,
+                "wujihand_joint_state_topics": wujihand_joint_state_topics,
                 "recovery_enabled": True,
                 "recovery_command_topic": "/forward_position_controller/commands",
                 "recovery_command_joint_names": joint_names,
@@ -343,7 +436,7 @@ def launch_setup(context):
         output="log",
         arguments=["-d", rviz_config_file],
         parameters=[robot_description],
-        condition=IfCondition(gui),
+        condition=IfCondition(gui_enabled),
     )
 
     # ── GUI slider → forward controller bridge ────────────────────────────
@@ -365,7 +458,7 @@ def launch_setup(context):
                 "home_pose_id": "home",
             },
         ],
-        condition=IfCondition(use_jsp_gui),
+        condition=IfCondition(use_jsp_gui_enabled),
     )
 
     gui_to_forward_bridge = Node(
@@ -377,7 +470,7 @@ def launch_setup(context):
             {"output_topic": "/forward_position_controller/commands"},
             {"joint_names": joint_names},
         ],
-        condition=IfCondition(use_jsp_gui),
+        condition=IfCondition(use_jsp_gui_enabled),
     )
 
     # ── Controller spawners ───────────────────────────────────────────────
@@ -542,7 +635,7 @@ def launch_setup(context):
                 shutdown_waiter_node,
             ],
         ),
-        condition=IfCondition(LaunchConfiguration("shutdown_on_gui_exit")),
+        condition=IfCondition(shutdown_on_gui_exit_enabled),
     )
 
     shutdown_when_waiter_exits = RegisterEventHandler(
@@ -554,18 +647,31 @@ def launch_setup(context):
         ),
     )
 
+    moveit_runtime_actions = [
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=dual_arm_trajectory_controller_spawner,
+                on_exit=[
+                    TimerAction(
+                        period=motion_start_delay_sec,
+                        actions=[move_group_node, motion_server_node],
+                    )
+                ],
+            ),
+        ),
+    ]
+
     # ── Assemble ──────────────────────────────────────────────────────────
 
     return [
         ros2_control_node,
         robot_state_publisher_node,
-        move_group_node,
-        motion_server_node,
         rviz_node,
         joint_state_broadcaster_spawner,
         start_forward_controller_after_feedback_ready,
         start_trajectory_and_bridge_after_forward_controller_ready,
         start_gui_after_trajectory_controller_ready,
+        *moveit_runtime_actions,
         shutdown_when_gui_exits,
         shutdown_when_waiter_exits,
     ]

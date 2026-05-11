@@ -1,0 +1,12 @@
+string profile_id
+string title
+string server_host
+uint16 server_port
+string default_prompt
+uint32 action_dim
+uint32 action_horizon
+string action_space
+string[] image_inputs
+string state_source
+string[] frozen_groups
+string summary

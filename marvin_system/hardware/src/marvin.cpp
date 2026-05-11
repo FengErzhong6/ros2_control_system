@@ -1650,18 +1650,53 @@ hardware_interface::CallbackReturn MarvinHardware::on_activate(
     startup_transition_setup_sent_ = false;
     startup_transition_started_at_ = Clock::now();
     if (startup_transition_pending_) {
-        if (!both_arms_in_position_bootstrap()) {
-            if (!request_position_bootstrap() || !wait_for_position_bootstrap()) {
+        bool bootstrap_ready = both_arms_in_position_bootstrap();
+        for (int attempt = 1; !bootstrap_ready && attempt <= activation_max_attempts_; ++attempt) {
+            if (request_position_bootstrap() && wait_for_position_bootstrap()) {
+                if (!OnGetBuf(&dcss)) {
+                    RCLCPP_ERROR(
+                        get_logger(),
+                        "OnGetBuf failed after deferred startup position bootstrap.");
+                    return hardware_interface::CallbackReturn::ERROR;
+                }
+                refresh_hold_positions();
+                bootstrap_ready = true;
+                break;
+            }
+
+            if (attempt == activation_max_attempts_) {
+                const auto servo_summary = servo_error_summary();
                 RCLCPP_ERROR(
                     get_logger(),
-                    "Failed to bootstrap POSITION before deferred %s startup switch.",
-                    control_profile_to_string(startup_profile));
+                    "Failed to bootstrap POSITION before deferred %s startup switch "
+                    "(attempt %d/%d). %s",
+                    control_profile_to_string(startup_profile),
+                    attempt,
+                    activation_max_attempts_,
+                    servo_summary.c_str());
                 return hardware_interface::CallbackReturn::ERROR;
             }
+
+            const auto servo_summary = servo_error_summary();
+            RCLCPP_WARN(
+                get_logger(),
+                "Failed to bootstrap POSITION before deferred %s startup switch "
+                "(attempt %d/%d). Clearing errors, waiting %d ms, and retrying. %s",
+                control_profile_to_string(startup_profile),
+                attempt,
+                activation_max_attempts_,
+                activation_retry_settle_ms_,
+                servo_summary.c_str());
+            request_idle_mode();
+            if (!clear_errors_for_retry()) {
+                return hardware_interface::CallbackReturn::ERROR;
+            }
+            if (activation_retry_settle_ms_ > 0) {
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(activation_retry_settle_ms_));
+            }
             if (!OnGetBuf(&dcss)) {
-                RCLCPP_ERROR(
-                    get_logger(),
-                    "OnGetBuf failed after deferred startup position bootstrap.");
+                RCLCPP_ERROR(get_logger(), "OnGetBuf failed before deferred activation retry.");
                 return hardware_interface::CallbackReturn::ERROR;
             }
             refresh_hold_positions();

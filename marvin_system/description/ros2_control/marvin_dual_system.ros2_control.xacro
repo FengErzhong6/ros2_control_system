@@ -28,6 +28,10 @@
                        collision_guard_escape_min_distance_improvement_m:=0.001
                        collision_guard_interpolation_steps:=6
                        collision_guard_binary_search_steps:=5
+                       collision_guard_description_package:='marvin_system'
+                       collision_guard_description_file:='description/urdf/marvin_dual.urdf'
+                       collision_guard_semantic_package:='marvin_system'
+                       collision_guard_semantic_file:='description/srdf/marvin_dual.srdf'
                        mock_grippers:=false
                        use_gripper_L:=false  gripper_L_arm:=A  gripper_L_can_id:=1
                        use_gripper_R:=false  gripper_R_arm:=B  gripper_R_can_id:=2">
@@ -80,10 +84,10 @@
           <param name="collision_guard_escape_min_distance_improvement_m">${collision_guard_escape_min_distance_improvement_m}</param>
           <param name="collision_guard_interpolation_steps">${collision_guard_interpolation_steps}</param>
           <param name="collision_guard_binary_search_steps">${collision_guard_binary_search_steps}</param>
-          <param name="collision_guard_description_package">marvin_system</param>
-          <param name="collision_guard_description_file">description/urdf/marvin_dual.urdf</param>
-          <param name="collision_guard_semantic_package">marvin_system</param>
-          <param name="collision_guard_semantic_file">description/srdf/marvin_dual.srdf</param>
+          <param name="collision_guard_description_package">${collision_guard_description_package}</param>
+          <param name="collision_guard_description_file">${collision_guard_description_file}</param>
+          <param name="collision_guard_semantic_package">${collision_guard_semantic_package}</param>
+          <param name="collision_guard_semantic_file">${collision_guard_semantic_file}</param>
           <param name="collision_guard_use_gripper_L">${use_gripper_L}</param>
           <param name="collision_guard_use_gripper_R">${use_gripper_R}</param>
           <param name="collision_guard_table_enabled">true</param>

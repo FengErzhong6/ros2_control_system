@@ -1,0 +1,13 @@
+string policy_profile_id
+string prompt
+uint32 max_steps
+uint32 open_loop_horizon
+---
+bool success
+string message
+uint32 steps_executed
+---
+string current_state
+string detail
+uint32 chunk_index
+uint32 step_index
