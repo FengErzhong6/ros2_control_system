@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+
+<!--
+  FastDDS 配置：UDP-only，避免 SHM 资源耗尽。
+
+  背景：
+  - 默认 builtin transports 包含 SHM，在大图像流下可能耗尽 SHM 资源导致新 participant 创建失败
+  - marvin SDK 通过物理网卡 (如 enp7s0) 与 192.168.1.190 机器人通信
+  - DDS 在物理网卡上的流量会与 marvin SDK 竞争
+
+  本配置：
+  - 禁用 builtin transports (SHM + TCP)
+  - 仅使用 UDPv4 transport
+  - DDS 限制在 localhost 由 ROS_LOCALHOST_ONLY=1 环境变量统一控制
+
+  用法：
+    export FASTRTPS_DEFAULT_PROFILES_FILE=<本文件路径>
+    ros2 launch ...
+-->
+
+<profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <transport_descriptors>
+        <transport_descriptor>
+            <transport_id>UdpTransport</transport_id>
+            <type>UDPv4</type>
+        </transport_descriptor>
+    </transport_descriptors>
+
+    <participant profile_name="udp_localhost_only" is_default_profile="true">
+        <rtps>
+            <userTransports>
+                <transport_id>UdpTransport</transport_id>
+            </userTransports>
+            <useBuiltinTransports>false</useBuiltinTransports>
+        </rtps>
+    </participant>
+</profiles>

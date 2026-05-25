@@ -1,8 +1,9 @@
 recipe_id: default_policy_deployment
 summary: Start the two policy cameras, Wuji right hand, and Marvin forward-command chain for policy deployment.
-ready_timeout_sec: 45.0
+ready_timeout_sec: 180.0
 devices:
   - id: cam_high
+
     adapter: camera
     package: camera_system
     launch_file: bringup/launch/single_realsense.launch.py
@@ -18,6 +19,7 @@ devices:
       camera_name: cam_high
       use_showimage: false
       respawn: true
+      initial_reset: false
   - id: cam_left_wrist
     adapter: camera
     package: camera_system
@@ -47,19 +49,18 @@ devices:
     ready_relaunch_attempts: 1
     ready_relaunch_backoff_sec: 2.0
     ready_services:
-      - /right/controller_manager/list_controllers
-      - /right/controller_manager/switch_controller
+      - /right_hand/controller_manager/list_controllers
+      - /right_hand/controller_manager/switch_controller
     ready_topics:
-      - /right/joint_states
+      - /right_hand/joint_states
     ready_controllers:
       joint_state_broadcaster: active
       forward_position_controller: active
     launch_arguments:
       use_mock_hardware: false
-      namespace: right
       gui: false
       use_jsp_gui: false
-      activate_forward_controller: true
+      namespace: right_hand
       identity_file: config/wujihand_identities.yaml
       controllers_file: config/wujihand_right_controllers.yaml
   - id: marvin_dual
@@ -97,9 +98,9 @@ devices:
       use_mock_hardware: false
       description_package: marvin_system
       description_file: description/urdf/marvin_dual.urdf
-      left_xyz: "0 0.037 0.3618964"
+      left_xyz: "0 0.037 0.5118964"
       left_rpy: "-1.5707963 0 0"
-      right_xyz: "0 -0.037 0.3618964"
+      right_xyz: "0 -0.037 0.5118964"
       right_rpy: "1.5707963 0 0"
       collision_guard_enabled: false
       collision_guard_check_rate_hz: 30.0
@@ -112,7 +113,7 @@ devices:
       collision_description_package: marvin_system
       collision_description_file: description/urdf/marvin_wuji_simplified_collision.urdf
       collision_srdf_file: description/srdf/marvin_wuji_simplified_collision.srdf
-      wujihand_joint_state_topics: /right/joint_states
+      wujihand_joint_state_topics: /right_hand/joint_states
       motion_start_delay_sec: 4.0
       initial_motion_mode: SAFE_HOLD
       go_home_return_mode: SAFE_HOLD

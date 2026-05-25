@@ -5,10 +5,13 @@ profiles:
     server_port: 8000
     default_prompt: pick and place.
     action_dim: 27
-    action_horizon: 8
-    open_loop_horizon: 8
-    control_rate_hz: 10.0
+    action_horizon: 25
+    open_loop_horizon: 25
+    control_rate_hz: 50.0
     action_space: joint_position
+    use_local_inference: true
+    local_policy_config_name: pi05_tianji_wuji_pick_place
+    local_policy_checkpoint_dir: /home/mmlab/codes/huangshzh/openpi_dexhand/checkpoints/pi05_tianji_wuji_pick_place/hsz_right_pick_place/29999
     image_inputs:
       - name: cam_high
         topic: /cam_high/cam_high/color/image_raw
@@ -32,7 +35,7 @@ profiles:
           - Joint6_R
           - Joint7_R
       right_hand:
-        topic: /right/joint_states
+        topic: /right_hand/joint_states
         joint_names:
           - right_finger1_joint1
           - right_finger1_joint2
@@ -73,7 +76,7 @@ profiles:
           - Joint6_R
           - Joint7_R
       right_hand:
-        topic: /right/forward_position_controller/commands
+        topic: /right_hand/forward_position_controller/commands
         joint_names:
           - right_finger1_joint1
           - right_finger1_joint2

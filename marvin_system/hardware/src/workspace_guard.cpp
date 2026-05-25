@@ -92,9 +92,9 @@ bool WorkspaceGuard::configure(
     };
 
     mount_tf_[0] = parse_tf("mount_xyz_L", "mount_rpy_L",
-                            "0 0.037 0.3618964", "-1.5707963 0 0");
+                            "0 0.037 0.5118964", "-1.5707963 0 0");
     mount_tf_[1] = parse_tf("mount_xyz_R", "mount_rpy_R",
-                            "0 -0.037 0.3618964", "1.5707963 0 0");
+                            "0 -0.037 0.5118964", "1.5707963 0 0");
 
     auto tool_s = param_str(p, "tool_offset", "");
     if (!tool_s.empty()) {

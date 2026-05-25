@@ -85,14 +85,6 @@ private:
     int home_timeout_ms_{30000};
     bool joint_impedance_profile_enabled_{true};
     ControlProfile startup_control_profile_{ControlProfile::kJointImpedance};
-    // Startup invariant:
-    // Marvin must boot through POSITION first. The first JOINT_IMPEDANCE handoff is
-    // deferred to write(), otherwise controller_manager can be deactivated before the
-    // teleop controller gets its position interfaces.
-    bool startup_transition_pending_{false};
-    bool startup_transition_setup_sent_{false};
-    std::chrono::steady_clock::time_point startup_transition_started_at_{};
-    std::array<std::array<double, kJointsPerArm>, kArmCount> startup_transition_hold_deg_{};
     bool mock_grippers_{false};
     std::array<std::array<double, 6>, kArmCount> tool_kine_{};
     std::array<std::array<double, 10>, kArmCount> tool_dyn_{};

@@ -134,7 +134,7 @@ def generate_launch_description():
             description="Keep gripper joints/collision geometry but skip physical gripper hardware.",
         ),
         DeclareLaunchArgument(
-            "left_xyz", default_value="0 0.037 0.3618964",
+            "left_xyz", default_value="0 0.037 0.5118964",
             description="Mount pose (xyz) of Base_L in world.",
         ),
         DeclareLaunchArgument(
@@ -142,7 +142,7 @@ def generate_launch_description():
             description="Mount pose (rpy) of Base_L in world.",
         ),
         DeclareLaunchArgument(
-            "right_xyz", default_value="0 -0.037 0.3618964",
+            "right_xyz", default_value="0 -0.037 0.5118964",
             description="Mount pose (xyz) of Base_R in world.",
         ),
         DeclareLaunchArgument(

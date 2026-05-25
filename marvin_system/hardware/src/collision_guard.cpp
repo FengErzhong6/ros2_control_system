@@ -142,9 +142,9 @@ struct CollisionGuard::Impl {
     std::string description_file{"description/urdf/marvin_dual.urdf"};
     std::string semantic_package{"marvin_system"};
     std::string semantic_file{"description/srdf/marvin_dual.srdf"};
-    std::string left_xyz{"0 0.037 0.3618964"};
+    std::string left_xyz{"0 0.037 0.5118964"};
     std::string left_rpy{"-1.5707963 0 0"};
-    std::string right_xyz{"0 -0.037 0.3618964"};
+    std::string right_xyz{"0 -0.037 0.5118964"};
     std::string right_rpy{"1.5707963 0 0"};
     bool use_gripper_left{true};
     bool use_gripper_right{true};

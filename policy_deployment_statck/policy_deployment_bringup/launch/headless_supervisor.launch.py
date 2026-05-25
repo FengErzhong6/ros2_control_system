@@ -1,3 +1,6 @@
+import os
+
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
@@ -7,6 +10,16 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
+    # 禁用 FastDDS Shared Memory Transport，避免 RealSense 图像流耗尽 SHM 资源，
+    # 导致 WujiHand ros2_control_node 无法初始化 DDS participant（进程无输出）。
+    if not os.environ.get("FASTRTPS_DEFAULT_PROFILES_FILE"):
+        os.environ["FASTRTPS_DEFAULT_PROFILES_FILE"] = os.path.join(
+            get_package_share_directory("policy_deployment_bringup"),
+            "config", "fastdds_disable_shm.xml"
+        )
+    if not os.environ.get("ROS_LOCALHOST_ONLY"):
+        os.environ["ROS_LOCALHOST_ONLY"] = "1"
+
     bringup_share = FindPackageShare("policy_deployment_bringup")
     default_recipe_directory = PathJoinSubstitution([bringup_share, "config", "recipes"])
     default_policy_profiles = PathJoinSubstitution([bringup_share, "config", "policies", "policy_profiles.yaml"])
@@ -25,6 +38,14 @@ def generate_launch_description():
             DeclareLaunchArgument("observation_max_joint_state_age_sec", default_value="1.0"),
             DeclareLaunchArgument("publish_rate_hz", default_value="10.0"),
             DeclareLaunchArgument("use_mock_hardware", default_value="false"),
+            DeclareLaunchArgument(
+                "local_policy_openpi_src",
+                default_value="/home/mmlab/codes/huangshzh/openpi_dexhand/src",
+            ),
+            DeclareLaunchArgument(
+                "local_policy_openpi_client_src",
+                default_value="/home/mmlab/codes/huangshzh/openpi_dexhand/packages/openpi-client/src",
+            ),
             DeclareLaunchArgument("supervisor_sigterm_timeout_sec", default_value="20.0"),
             DeclareLaunchArgument("supervisor_sigkill_timeout_sec", default_value="20.0"),
             Node(
@@ -53,6 +74,8 @@ def generate_launch_description():
                             LaunchConfiguration("use_mock_hardware"),
                             value_type=bool,
                         ),
+                        "local_policy_openpi_src": LaunchConfiguration("local_policy_openpi_src"),
+                        "local_policy_openpi_client_src": LaunchConfiguration("local_policy_openpi_client_src"),
                     }
                 ],
             ),

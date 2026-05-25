@@ -137,7 +137,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "left_xyz",
-                default_value="0 0.037 0.3618964",
+                default_value="0 0.037 0.5118964",
                 description="Mount pose (xyz) of Base_L in world",
             ),
             DeclareLaunchArgument(
@@ -147,7 +147,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "right_xyz",
-                default_value="0 -0.037 0.3618964",
+                default_value="0 -0.037 0.5118964",
                 description="Mount pose (xyz) of Base_R in world",
             ),
             DeclareLaunchArgument(

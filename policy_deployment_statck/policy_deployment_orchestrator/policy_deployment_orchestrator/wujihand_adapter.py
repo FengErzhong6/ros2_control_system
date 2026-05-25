@@ -8,7 +8,7 @@ from typing import Any
 from ament_index_python.packages import get_package_share_directory
 from controller_manager_msgs.srv import ListControllers, SwitchController
 
-from .managed_launch import ManagedLaunchSession
+from .marvin_adapter import SubprocessLaunchSession
 from .models import LaunchSpec
 
 
@@ -53,7 +53,7 @@ class WujihandAdapter:
         last_error = ""
 
         for attempt in range(1, attempts + 1):
-            session: ManagedLaunchSession | None = None
+            session: SubprocessLaunchSession | None = None
             try:
                 self.precheck()
                 session = self.bringup(startup_timeout=startup_timeout)
@@ -94,8 +94,6 @@ class WujihandAdapter:
             raise RuntimeError(
                 f"{self._launch_spec.device_id}: invalid hand side '{self._hand_side}'."
             )
-        if not Path(self._launch_path).exists():
-            raise RuntimeError(f"WujiHand launch file does not exist: {self._launch_path}")
         identity_file = self._identity_file_path()
         if not identity_file.exists():
             raise RuntimeError(
@@ -107,34 +105,32 @@ class WujihandAdapter:
                 f"{self._launch_spec.device_id}: controllers file does not exist: {controllers_file}"
             )
 
-    def bringup(self, *, startup_timeout: float) -> ManagedLaunchSession:
-        session = ManagedLaunchSession(
-            launch_manager=self._supervisor.launch_manager,
+    def bringup(self, *, startup_timeout: float) -> SubprocessLaunchSession:
+        session = SubprocessLaunchSession(
             label=self._launch_spec.device_id,
-            adapter=self._launch_spec.adapter,
+            adapter="wujihand",
             launch_file_path=self._launch_path,
             launch_arguments=self._runtime_launch_arguments(),
             logger=self._supervisor.get_logger(),
         )
         self._supervisor._managed_sessions.append(session)
-        try:
-            session.start()
-            if not session.wait_started(max(startup_timeout, 1.0)):
-                raise RuntimeError(
-                    f"Launch {self._launch_spec.device_id} did not start. "
-                    f"log={session.log_path}"
-                )
-            self._supervisor._runtime_manifest.register_device(
-                device_id=self._launch_spec.device_id,
-                adapter="wujihand",
-                metadata=session.metadata(),
-            )
-            return session
-        except Exception:
+        session.start()
+        if not session.wait_started(max(startup_timeout, 1.0)):
             self._remove_session(session)
-            raise
+            session.close()
+            raise RuntimeError(
+                f"Launch {self._launch_spec.device_id} did not start within "
+                f"{startup_timeout:.1f} s."
+            )
 
-    def wait_ready(self, *, session: ManagedLaunchSession, timeout_sec: float) -> None:
+        self._supervisor._runtime_manifest.register_device(
+            device_id=self._launch_spec.device_id,
+            adapter="wujihand",
+            metadata=session.metadata(),
+        )
+        return session
+
+    def wait_ready(self, *, session: SubprocessLaunchSession, timeout_sec: float) -> None:
         deadline = time.monotonic() + timeout_sec
         last_report = 0.0
         ready_since: float | None = None
@@ -229,7 +225,7 @@ class WujihandAdapter:
 
     def shutdown_session(
         self,
-        session: ManagedLaunchSession,
+        session: SubprocessLaunchSession,
         *,
         context_label: str,
     ) -> None:
@@ -246,7 +242,7 @@ class WujihandAdapter:
             f"{self._launch_spec.device_id}: shutdown completed for {context_label}."
         )
 
-    def _remove_session(self, session: ManagedLaunchSession) -> None:
+    def _remove_session(self, session: SubprocessLaunchSession) -> None:
         self._supervisor._managed_sessions = [
             item for item in self._supervisor._managed_sessions if item is not session
         ]
@@ -267,9 +263,7 @@ class WujihandAdapter:
 
     def _infer_namespace(self) -> str:
         raw_namespace = str(self._launch_arguments.get("namespace", "")).strip().strip("/")
-        if raw_namespace:
-            return raw_namespace
-        return self._hand_side
+        return raw_namespace
 
     def _absolute_namespace(self, namespace: str) -> str:
         namespace = str(namespace).strip().strip("/")
@@ -306,7 +300,6 @@ class WujihandAdapter:
         arguments.setdefault("use_mock_hardware", False)
         arguments.setdefault("identity_file", str(self._identity_file_path()))
         arguments.setdefault("controllers_file", str(self._controllers_file_path()))
-        arguments.setdefault("activate_forward_controller", True)
         arguments.setdefault("gui", False)
         arguments.setdefault("use_jsp_gui", False)
         return arguments
@@ -315,10 +308,6 @@ class WujihandAdapter:
         required = {
             name: set(states) for name, states in self.REQUIRED_CONTROLLER_STATES.items()
         }
-        if not self._launch_arg_enabled(
-            self._runtime_launch_arguments().get("activate_forward_controller", False)
-        ):
-            required["forward_position_controller"] = {"inactive", "active"}
         return required
 
     def _missing_required_controllers(self, controllers: dict[str, str]) -> list[str]:
@@ -348,10 +337,6 @@ class WujihandAdapter:
         return controllers
 
     def _should_activate_forward_controller(self, controllers: dict[str, str]) -> bool:
-        if not self._launch_arg_enabled(
-            self._runtime_launch_arguments().get("activate_forward_controller", False)
-        ):
-            return False
         if controllers.get("joint_state_broadcaster") != "active":
             return False
         return controllers.get("forward_position_controller") == "inactive"

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import OrderedDict
+
 from dataclasses import dataclass, field
 from pathlib import Path
 import os
@@ -39,6 +39,7 @@ from .image_preprocessing import decode_image_message, preprocess_image_for_topi
 from .managed_launch import LaunchManager, ManagedLaunchSession
 from .marvin_adapter import PolicyMarvinAdapter
 from .models import LaunchSpec, PolicyProfileSpec, SupervisorConfig
+from .local_policy_client import LocalPolicyClient
 from .policy_client import WebsocketPolicyClient
 from .policy_profile_loader import discover_policy_profiles, to_msg
 from .recipe_loader import discover_recipes, load_recipe
@@ -119,12 +120,9 @@ def _process_matches_launch(device_id: str, process_name: str, cmd: list[str]) -
             "cam_left_wrist",
         ),
         "right_wujihand": (
-            "/right",
-            "__ns:=/right",
             "wujihand_right_control.launch.py",
             "wujihand_right",
             "wujihand_right_controllers",
-            "/right/controller_manager",
         ),
         "marvin_dual": (
             "marvin_dual_joint_gui_control.launch.py",
@@ -155,9 +153,9 @@ def _process_matches_launch(device_id: str, process_name: str, cmd: list[str]) -
         return any(marker in joined for marker in markers)
     if process_name.startswith("spawner"):
         if device_id == "right_wujihand":
-            return "__ns:=/right" in joined or "/right/controller_manager" in joined
+            return any(marker in joined for marker in markers)
         if device_id == "marvin_dual":
-            if "__ns:=/right" in joined or "/right/controller_manager" in joined:
+            if any(m in joined for m in ("wujihand_right", "wujihand_right_controllers")):
                 return False
             return any(
                 marker in joined
@@ -223,6 +221,10 @@ class _PolicyRuntime:
     step_index: int = 0
     last_infer_ms: float = 0.0
     last_error: str = ""
+    frozen_reference: np.ndarray | None = None
+    frozen_group_names: tuple[str, ...] = ()
+    last_obs_build_ms: float = 0.0
+    last_cycle_ms: float = 0.0
 
 
 class PolicyDeploymentSupervisor(Node):
@@ -261,7 +263,8 @@ class PolicyDeploymentSupervisor(Node):
         self._latest_image_receipt_monotonic: dict[str, float] = {}
         self._latest_joint_state_receipt_monotonic: dict[str, float] = {}
         self._command_publishers: dict[str, Any] = {}
-        self._policy_client: WebsocketPolicyClient | None = None
+        self._policy_client: WebsocketPolicyClient | LocalPolicyClient | None = None
+        self._local_policy_warmup_ok = False
         self._service_callback_group = ReentrantCallbackGroup()
         self._go_home_client = self.create_client(
             Trigger,
@@ -332,6 +335,8 @@ class PolicyDeploymentSupervisor(Node):
         self.declare_parameter("observation_max_joint_state_age_sec", 1.0)
         self.declare_parameter("publish_rate_hz", 10.0)
         self.declare_parameter("use_mock_hardware", False)
+        self.declare_parameter("local_policy_openpi_src", "")
+        self.declare_parameter("local_policy_openpi_client_src", "")
 
         return SupervisorConfig(
             recipe_id=str(self.get_parameter("recipe_id").value),
@@ -360,6 +365,12 @@ class PolicyDeploymentSupervisor(Node):
                 self.get_parameter("publish_rate_hz").value, 10.0
             ),
             use_mock_hardware=_coerce_bool(self.get_parameter("use_mock_hardware").value),
+            local_policy_openpi_src=str(
+                self.get_parameter("local_policy_openpi_src").value
+            ),
+            local_policy_openpi_client_src=str(
+                self.get_parameter("local_policy_openpi_client_src").value
+            ),
         )
 
     def _create_observation_subscriptions(self) -> None:
@@ -777,7 +788,7 @@ class PolicyDeploymentSupervisor(Node):
             return "ros2_control_node+marvin controller config"
 
         if "controller_manager/spawner" in lowered:
-            if "__ns:=/right" in lowered or "/right/controller_manager" in lowered:
+            if "wujihand_right_controllers" in lowered:
                 return ""
             if (
                 "dual_arm_trajectory_controller" in lowered
@@ -1387,6 +1398,7 @@ class PolicyDeploymentSupervisor(Node):
         self._active_profile_id = profile.profile_id
         self._active_prompt = profile.default_prompt
         self._current_recipe = recipe
+        self._local_policy_warmup_ok = False
         with self._state_lock:
             self._latest_images.clear()
             self._latest_joint_states.clear()
@@ -1394,23 +1406,17 @@ class PolicyDeploymentSupervisor(Node):
             self._latest_joint_state_receipt_monotonic.clear()
         self._set_system_state(SystemStates.STARTING, f"Starting recipe {recipe.recipe_id}.")
 
+        # Phase 1: bring up hardware devices.
         try:
             self._managed_sessions = []
             self._bringup_recipe_launches(recipe)
-            self._set_system_state(
-                SystemStates.READY,
-                f"Recipe {recipe.recipe_id} ready with profile {profile.profile_id}.",
-            )
-            goal_handle.succeed()
-            result.success = True
-            result.message = f"Connected recipe {recipe.recipe_id} with profile {profile.profile_id}"
-            return result
         except Exception as exc:
+            self.get_logger().error(f"ConnectSystem hardware bringup failed: {exc}")
             self._record_fault(
                 fault_id="connect_system",
                 device_id=recipe.recipe_id,
                 severity=FaultEvent.SEVERITY_BLOCKING,
-                summary="Connect failed",
+                summary="Connect failed during hardware bringup",
                 detail=str(exc),
             )
             self._shutdown_managed_sessions()
@@ -1424,6 +1430,29 @@ class PolicyDeploymentSupervisor(Node):
             result.message = str(exc)
             return result
 
+        # Phase 2: warm up local policy before declaring READY so the operator
+        # sees READY only when the first rollout will be fast.
+        warmup_msg = ""
+        if profile.use_local_inference:
+            try:
+                self._warmup_local_policy(profile)
+                self._local_policy_warmup_ok = True
+            except Exception as exc:
+                self.get_logger().error(
+                    f"Local policy warmup failed (first rollout will JIT-compile): {exc}"
+                )
+                warmup_msg = f", but local policy warmup failed: {exc}"
+
+        self._set_system_state(
+            SystemStates.READY,
+            f"Recipe {recipe.recipe_id} ready with profile {profile.profile_id}{warmup_msg}.",
+        )
+
+        goal_handle.succeed()
+        result.success = True
+        result.message = f"Connected recipe {recipe.recipe_id} with profile {profile.profile_id}"
+        return result
+
     def execute_disconnect_system(self, goal_handle):
         request = goal_handle.request
         del request
@@ -1436,6 +1465,7 @@ class PolicyDeploymentSupervisor(Node):
         self._active_profile_id = ""
         self._active_prompt = ""
         self._current_recipe = None
+        self._local_policy_warmup_ok = False
         with self._state_lock:
             self._latest_images.clear()
             self._latest_joint_states.clear()
@@ -1570,34 +1600,196 @@ class PolicyDeploymentSupervisor(Node):
             result.message = str(exc)
             return result
 
+    def _fresh_observation_wait_reasons(self, profile: PolicyProfileSpec) -> list[str]:
+        with self._state_lock:
+            latest_images = dict(self._latest_images)
+            latest_joint_states = dict(self._latest_joint_states)
+            latest_image_receipts = dict(self._latest_image_receipt_monotonic)
+            latest_joint_state_receipts = dict(self._latest_joint_state_receipt_monotonic)
+
+        now = time.monotonic()
+        max_image_age_sec = max(0.0, float(self._config.observation_max_image_age_sec))
+        max_joint_state_age_sec = max(0.0, float(self._config.observation_max_joint_state_age_sec))
+        reasons: list[str] = []
+
+        for image_input in profile.image_inputs:
+            topic = image_input.topic
+            if topic not in latest_images:
+                reasons.append(f"{topic} (no image message)")
+                continue
+            receipt_monotonic = latest_image_receipts.get(topic)
+            if receipt_monotonic is None:
+                reasons.append(f"{topic} (missing image receipt timestamp)")
+                continue
+            age_sec = now - receipt_monotonic
+            if max_image_age_sec > 0.0 and age_sec > max_image_age_sec:
+                reasons.append(f"{topic} (image stale {age_sec:.2f}s)")
+
+        for topic in sorted({profile.right_arm_state.topic, profile.right_hand_state.topic}):
+            if topic not in latest_joint_states:
+                reasons.append(f"{topic} (no joint_state message)")
+                continue
+            receipt_monotonic = latest_joint_state_receipts.get(topic)
+            if receipt_monotonic is None:
+                reasons.append(f"{topic} (missing joint_state receipt timestamp)")
+                continue
+            age_sec = now - receipt_monotonic
+            if max_joint_state_age_sec > 0.0 and age_sec > max_joint_state_age_sec:
+                reasons.append(f"{topic} (joint_state stale {age_sec:.2f}s)")
+
+        return reasons
+
+    def _wait_for_fresh_observation(
+        self,
+        profile: PolicyProfileSpec,
+        *,
+        timeout_sec: float,
+        context_label: str,
+    ) -> None:
+        deadline = time.monotonic() + max(0.0, timeout_sec)
+        last_report = 0.0
+        last_reasons: list[str] = []
+
+        while time.monotonic() < deadline:
+            last_reasons = self._fresh_observation_wait_reasons(profile)
+            if not last_reasons:
+                return
+
+            now = time.monotonic()
+            if now - last_report >= 1.0:
+                self.get_logger().info(
+                    f"Waiting for fresh observation data before {context_label}: "
+                    + "; ".join(last_reasons)
+                )
+                last_report = now
+            time.sleep(0.1)
+
+        last_reasons = self._fresh_observation_wait_reasons(profile) or last_reasons
+        detail = "; ".join(last_reasons) if last_reasons else "unknown observation wait state"
+        raise RuntimeError(
+            f"Fresh observation data was not available within {timeout_sec:.1f} s "
+            f"before {context_label}: {detail}"
+        )
+
+    def _warmup_local_policy(self, profile: PolicyProfileSpec) -> None:
+        """Load and JIT-compile the local policy during connect so the first rollout is fast.
+
+        JAX JIT-compiles the model on the first ``infer()`` call, which can take 10-30 seconds.
+        Doing this during the connect phase absorbs the delay while the system is still STARTING,
+        rather than surprising the operator after they press "execute".
+
+        This is non-fatal: if warmup fails, hardware stays READY and the first rollout will
+        JIT-compile on demand.
+        """
+        client: LocalPolicyClient | None = None
+        try:
+            self.get_logger().info(
+                "Starting local policy warmup: config=%s checkpoint=%s src=%s"
+                % (
+                    profile.local_policy_config_name,
+                    profile.local_policy_checkpoint_dir,
+                    self._config.local_policy_openpi_src or "(none)",
+                )
+            )
+            client = LocalPolicyClient(
+                config_name=profile.local_policy_config_name,
+                checkpoint_dir=profile.local_policy_checkpoint_dir,
+                openpi_src_path=self._config.local_policy_openpi_src,
+                openpi_client_src_path=self._config.local_policy_openpi_client_src,
+                default_prompt=profile.default_prompt,
+            )
+            client.connect()
+            self.get_logger().info(
+                "Local policy model loaded (metadata=%s). Waiting for observation data..."
+                % (client.metadata,)
+            )
+
+            # Model loading can take long enough that messages received before
+            # loading become stale.  Wait for a post-load fresh sample before
+            # building the warmup observation.
+            self._wait_for_fresh_observation(
+                profile,
+                timeout_sec=5.0,
+                context_label="local policy warmup",
+            )
+
+            obs = self._build_observation(profile, profile.default_prompt)
+            self.get_logger().info(
+                "Local policy JIT warmup starting (may take 10-30 s). Robot will remain stationary."
+            )
+            t_start = time.monotonic()
+            client.infer(obs)
+            warmup_ms = (time.monotonic() - t_start) * 1000.0
+            self.get_logger().info(
+                "Local policy JIT warmup complete in %.0f ms. Subsequent inferences will be fast."
+                % (warmup_ms,)
+            )
+        finally:
+            if client is not None:
+                client.close()
+
     def _policy_rollout_worker(self, profile: PolicyProfileSpec) -> None:
         runtime = self._policy_runtime
         try:
-            client = WebsocketPolicyClient(
-                host=profile.server_host,
-                port=profile.server_port,
-                connect_timeout_sec=self._config.connect_timeout_sec,
-            )
+            if profile.use_local_inference:
+                if not self._local_policy_warmup_ok:
+                    self.get_logger().warn(
+                        "Local policy warmup did not complete — first inference will JIT-compile "
+                        "(may take 10-30 s)."
+                    )
+                client = LocalPolicyClient(
+                    config_name=profile.local_policy_config_name,
+                    checkpoint_dir=profile.local_policy_checkpoint_dir,
+                    openpi_src_path=self._config.local_policy_openpi_src,
+                    openpi_client_src_path=self._config.local_policy_openpi_client_src,
+                    default_prompt=profile.default_prompt,
+                )
+            else:
+                client = WebsocketPolicyClient(
+                    host=profile.server_host,
+                    port=profile.server_port,
+                    connect_timeout_sec=self._config.connect_timeout_sec,
+                )
             self._policy_client = client
             client.connect()
-            self.get_logger().info(f"Connected to policy server: {client.metadata}")
+            self.get_logger().info(f"Policy client connected: {client.metadata}")
 
             chunk_index = 0
             step_index = 0
             max_steps = runtime.max_steps if runtime.max_steps > 0 else 0
-            open_loop_horizon = runtime.open_loop_horizon or profile.open_loop_horizon
-            control_period = 1.0 / max(1.0, profile.control_rate_hz)
+            step_time = 1.0 / max(1.0, profile.control_rate_hz)
+            chunk_horizon = profile.action_horizon
+
+            runtime.frozen_reference = self._capture_frozen_reference(profile)
+            runtime.frozen_group_names = profile.frozen_groups
 
             while not runtime.stop_event.is_set():
                 if max_steps and step_index >= max_steps:
                     break
+                obs_start = time.monotonic()
                 observation = self._build_observation(profile, runtime.prompt)
+                obs_build_ms = (time.monotonic() - obs_start) * 1000.0
+                runtime.last_obs_build_ms = obs_build_ms
+
                 infer_start = time.monotonic()
                 response = client.infer(observation)
                 infer_ms = (time.monotonic() - infer_start) * 1000.0
+
+                chunk_duration_ms = step_time * 1000.0 * float(chunk_horizon)
+                if infer_ms > chunk_duration_ms:
+                    self.get_logger().error(
+                        f"Inference over deadline: {infer_ms:.0f} ms > "
+                        f"{chunk_duration_ms:.0f} ms (chunk budget). "
+                        "Robot may pause between chunks."
+                    )
+                elif infer_ms > chunk_duration_ms * 0.8:
+                    self.get_logger().warn(
+                        f"Inference approaching deadline: {infer_ms:.0f} ms / "
+                        f"{chunk_duration_ms:.0f} ms ({infer_ms / chunk_duration_ms * 100:.0f}%)"
+                    )
                 actions = response.get("actions")
                 if actions is None:
-                    raise RuntimeError("Policy server response did not contain actions")
+                    raise RuntimeError("Policy response did not contain actions")
 
                 action_chunk = np.asarray(actions, dtype=np.float32)
                 if action_chunk.ndim == 1:
@@ -1629,28 +1821,28 @@ class PolicyDeploymentSupervisor(Node):
                     state="EXECUTING",
                     detail="chunk received",
                 )
+                self._log_action_chunk(profile, chunk_index, action_chunk, infer_ms)
 
-                for inner_index, action_row in enumerate(action_chunk):
+                last_step_time = time.monotonic()
+                steps_in_chunk = min(chunk_horizon, action_chunk.shape[0])
+                for inner_index in range(steps_in_chunk):
                     if runtime.stop_event.is_set():
                         break
                     if max_steps and step_index >= max_steps:
                         break
-                    self._execute_action_row(profile, action_row)
+                    self._execute_action_row(profile, action_chunk[inner_index])
                     step_index += 1
                     runtime.step_index = step_index
                     runtime.steps_executed = step_index
-                    self._publish_chunk_status(
-                        profile_id=profile.profile_id,
-                        chunk_index=chunk_index,
-                        chunk_length=int(action_chunk.shape[0]),
-                        step_index=step_index,
-                        last_infer_ms=infer_ms,
-                        state="EXECUTING",
-                        detail=f"step {inner_index + 1}/{action_chunk.shape[0]}",
-                    )
-                    time.sleep(control_period)
-                    if inner_index + 1 >= open_loop_horizon:
-                        break
+                    now = time.monotonic()
+                    cycle_ms = (now - last_step_time) * 1000.0
+                    runtime.last_cycle_ms = cycle_ms
+                    elapsed = now - last_step_time
+                    if elapsed < step_time:
+                        time.sleep(step_time - elapsed)
+                        last_step_time = time.monotonic()
+                    else:
+                        last_step_time = now
                 chunk_index += 1
 
             if runtime.stop_event.is_set():
@@ -1750,11 +1942,11 @@ class PolicyDeploymentSupervisor(Node):
                 f"State dim {state.shape[0]} does not match profile action dim {profile.action_dim}"
             )
 
-        return OrderedDict(
-            images=images,
-            state=state,
-            prompt=prompt or profile.default_prompt,
-        )
+        return {
+            "images": images,
+            "state": state,
+            "prompt": prompt or profile.default_prompt,
+        }
 
     def _execute_action_row(self, profile: PolicyProfileSpec, action_row: np.ndarray) -> None:
         if not np.all(np.isfinite(action_row)):
@@ -1772,7 +1964,8 @@ class PolicyDeploymentSupervisor(Node):
     def _slice_action(self, profile: PolicyProfileSpec, action_row: np.ndarray, spec) -> np.ndarray:
         segment = np.asarray(action_row[spec.start : spec.start + spec.length], dtype=np.float32)
         if spec.mode == "delta":
-            latest_joint_states = dict(self._latest_joint_states)
+            with self._state_lock:
+                latest_joint_states = dict(self._latest_joint_states)
             if spec.name == "right_arm":
                 current = self._joint_state_vector(
                     latest_joint_states,
@@ -1791,7 +1984,8 @@ class PolicyDeploymentSupervisor(Node):
         return segment
 
     def _compose_marvin_command(self, profile: PolicyProfileSpec, right_arm_target: np.ndarray) -> list[float]:
-        latest_joint_states = dict(self._latest_joint_states)
+        with self._state_lock:
+            latest_joint_states = dict(self._latest_joint_states)
         current = self._joint_state_map(
             latest_joint_states,
             profile.right_arm_state.topic,
@@ -1848,6 +2042,33 @@ class PolicyDeploymentSupervisor(Node):
             self._publish_command(profile.marvin_command.topic, profile.marvin_command.home)
         if profile.right_hand_command.home:
             self._publish_command(profile.right_hand_command.topic, profile.right_hand_command.home)
+
+    def _capture_frozen_reference(self, profile: PolicyProfileSpec) -> np.ndarray | None:
+        if not profile.frozen_groups:
+            return None
+        with self._state_lock:
+            latest_joint_states = dict(self._latest_joint_states)
+        frozen_vectors: list[np.ndarray] = []
+        left_arm = self._joint_state_vector(
+            latest_joint_states,
+            profile.marvin_command.topic,
+            tuple(profile.marvin_command.joint_names),
+        )
+        frozen_vectors.append(left_arm)
+        return np.concatenate(frozen_vectors).astype(np.float32) if frozen_vectors else None
+
+    def _log_action_chunk(
+        self,
+        profile: PolicyProfileSpec,
+        chunk_index: int,
+        action_chunk: np.ndarray,
+        infer_ms: float,
+    ) -> None:
+        self.get_logger().debug(
+            f"Chunk {chunk_index}: shape={action_chunk.shape} "
+            f"infer={infer_ms:.1f}ms "
+            f"obs_build={self._policy_runtime.last_obs_build_ms:.1f}ms"
+        )
 
     def _record_fault(
         self,
@@ -1926,6 +2147,20 @@ class PolicyDeploymentSupervisor(Node):
 
 
 def main(args: list[str] | None = None) -> None:
+    # 禁用 FastDDS Shared Memory Transport，避免 RealSense 图像流耗尽 SHM 资源，
+    # 导致 WujiHand ros2_control_node 无法初始化 DDS participant（进程无输出）。
+    # 仅在 supervisor 直接通过 ros2 run 启动而非从 launch 文件启动时生效。
+    if not os.environ.get("FASTRTPS_DEFAULT_PROFILES_FILE"):
+        try:
+            os.environ["FASTRTPS_DEFAULT_PROFILES_FILE"] = os.path.join(
+                get_package_share_directory("policy_deployment_bringup"),
+                "config", "fastdds_disable_shm.xml"
+            )
+        except PackageNotFoundError:
+            pass
+    if not os.environ.get("ROS_LOCALHOST_ONLY"):
+        os.environ["ROS_LOCALHOST_ONLY"] = "1"
+
     rclpy.init(args=args)
     launch_manager = LaunchManager()
     node = PolicyDeploymentSupervisor(launch_manager=launch_manager)

@@ -1,0 +1,59 @@
+recipe_id: test_policy_wuji
+summary: Test recipe for wujihand startup debug.
+ready_timeout_sec: 45.0
+devices:
+  - id: cam_high
+    adapter: camera
+    package: camera_system
+    launch_file: bringup/launch/single_realsense.launch.py
+    required: true
+    depends_on: []
+    startup_timeout_sec: 20.0
+    ready_stability_window_sec: 2.0
+    ready_topics:
+      - /cam_high/cam_high/color/image_raw
+    launch_arguments:
+      camera_name: cam_high
+      use_showimage: false
+      respawn: true
+  - id: cam_left_wrist
+    adapter: camera
+    package: camera_system
+    launch_file: bringup/launch/single_orbbec.launch.py
+    required: true
+    depends_on: []
+    startup_timeout_sec: 20.0
+    ready_stability_window_sec: 2.0
+    ready_topics:
+      - /cam_left_wrist/image_raw
+    launch_arguments:
+      camera_name: cam_left_wrist
+      use_showimage: false
+      respawn: true
+  - id: right_wujihand
+    adapter: wujihand
+    package: policy_deployment_bringup
+    launch_file: launch/policy_wujihand_right.launch.py
+    required: true
+    depends_on:
+      - cam_high
+      - cam_left_wrist
+    startup_timeout_sec: 30.0
+    ready_stability_window_sec: 2.0
+    ready_relaunch_attempts: 1
+    ready_relaunch_backoff_sec: 2.0
+    ready_services:
+      - /right_hand/controller_manager/list_controllers
+      - /right_hand/controller_manager/switch_controller
+    ready_topics:
+      - /right_hand/joint_states
+    ready_controllers:
+      joint_state_broadcaster: active
+      forward_position_controller: active
+    launch_arguments:
+      use_mock_hardware: false
+      gui: false
+      use_jsp_gui: false
+      namespace: right_hand
+      identity_file: config/wujihand_identities.yaml
+      controllers_file: config/wujihand_right_controllers.yaml

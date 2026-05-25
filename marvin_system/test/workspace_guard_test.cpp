@@ -14,9 +14,9 @@ std::unordered_map<std::string, std::string> make_params()
     return {
         {"workspace_z_min", "0.2"},
         {"workspace_safety_margin", "0.0"},
-        {"mount_xyz_L", "0 0.037 0.3618964"},
+        {"mount_xyz_L", "0 0.037 0.5118964"},
         {"mount_rpy_L", "-1.5707963 0 0"},
-        {"mount_xyz_R", "0 -0.037 0.3618964"},
+        {"mount_xyz_R", "0 -0.037 0.5118964"},
         {"mount_rpy_R", "1.5707963 0 0"},
         {"tool_offset", "0 -0.245 0"},
     };

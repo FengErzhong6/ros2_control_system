@@ -1,3 +1,6 @@
+import os
+
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription, TimerAction
 from launch.conditions import IfCondition
@@ -7,6 +10,15 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
+    # 禁用 FastDDS Shared Memory Transport，避免 RealSense 图像流耗尽 SHM 资源，
+    # 导致 WujiHand ros2_control_node 无法初始化 DDS participant（进程无输出）。
+    if not os.environ.get("FASTRTPS_DEFAULT_PROFILES_FILE"):
+        os.environ["FASTRTPS_DEFAULT_PROFILES_FILE"] = os.path.join(
+            get_package_share_directory("policy_deployment_bringup"),
+            "config", "fastdds_disable_shm.xml"
+        )
+    if not os.environ.get("ROS_LOCALHOST_ONLY"):
+        os.environ["ROS_LOCALHOST_ONLY"] = "1"
     marvin_launch = GroupAction(
         scoped=True,
         actions=[
@@ -38,7 +50,7 @@ def generate_launch_description():
                     "collision_description_package": "marvin_system",
                     "collision_description_file": "description/urdf/marvin_wuji_simplified_collision.urdf",
                     "collision_srdf_file": "description/srdf/marvin_wuji_simplified_collision.srdf",
-                    "wujihand_joint_state_topics": "/right/joint_states",
+                    "wujihand_joint_state_topics": "/joint_states",
                     "use_mock_hardware": LaunchConfiguration("use_mock_hardware"),
                 }.items(),
             )

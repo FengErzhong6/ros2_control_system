@@ -96,6 +96,9 @@ def _parse_profile(profile_id: str, raw: dict[str, Any]) -> PolicyProfileSpec:
         action_slices=action_slices,
         frozen_groups=tuple(str(item) for item in raw.get("frozen_groups", [])),
         summary=str(raw.get("summary", "")),
+        use_local_inference=bool(raw.get("use_local_inference", False)),
+        local_policy_config_name=str(raw.get("local_policy_config_name", "")),
+        local_policy_checkpoint_dir=str(raw.get("local_policy_checkpoint_dir", "")),
     )
 
 

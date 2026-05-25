@@ -87,6 +87,9 @@ class PolicyProfileSpec:
     action_slices: tuple[ActionSliceSpec, ...]
     frozen_groups: tuple[str, ...] = ()
     summary: str = ""
+    use_local_inference: bool = False
+    local_policy_config_name: str = ""
+    local_policy_checkpoint_dir: str = ""
 
     def slice_for(self, name: str) -> ActionSliceSpec:
         for action_slice in self.action_slices:
@@ -109,3 +112,5 @@ class SupervisorConfig:
     observation_max_joint_state_age_sec: float = 1.0
     publish_rate_hz: float = 10.0
     use_mock_hardware: bool = False
+    local_policy_openpi_src: str = ""
+    local_policy_openpi_client_src: str = ""

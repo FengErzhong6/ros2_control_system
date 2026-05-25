@@ -45,7 +45,7 @@ def generate_launch_description():
                     "collision_description_package": "marvin_system",
                     "collision_description_file": "description/urdf/marvin_wuji_simplified_collision.urdf",
                     "collision_srdf_file": "description/srdf/marvin_wuji_simplified_collision.srdf",
-                    "wujihand_joint_state_topics": "/right/joint_states",
+                    "wujihand_joint_state_topics": "/joint_states",
                     "motion_start_delay_sec": "4.0",
                     "initial_motion_mode": "SAFE_HOLD",
                     "go_home_return_mode": "SAFE_HOLD",

@@ -1,7 +1,7 @@
 profiles:
   wrist_default:
     color_enabled: true
-    color_width: 848
+    color_width: 640
     color_height: 480
     color_fps: 60
     color_encoding: "rgb8"
@@ -11,7 +11,7 @@ profiles:
 
   high_default:
     color_enabled: true
-    color_width: 848
+    color_width: 640
     color_height: 480
     color_fps: 60
     color_encoding: "rgb8"

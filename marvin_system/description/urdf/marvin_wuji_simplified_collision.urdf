@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="marvin_wuji_simplified_collision">
 
-  <xacro:arg name="left_xyz" default="0 0.037 0.3618964" />
+  <xacro:arg name="left_xyz" default="0 0.037 0.5118964" />
   <xacro:arg name="left_rpy" default="-1.5707963 0 0" />
-  <xacro:arg name="right_xyz" default="0 -0.037 0.3618964" />
+  <xacro:arg name="right_xyz" default="0 -0.037 0.5118964" />
   <xacro:arg name="right_rpy" default="1.5707963 0 0" />
 
   <xacro:arg name="use_wujihand_L" default="true" />
